@@ -23,6 +23,7 @@ const IMAGE_WEBP_QUALITY = 0.78;
 const IMAGE_JPEG_QUALITY = 0.82;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
+const STORAGE_UPLOAD_VERSION = 2;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -1383,6 +1384,7 @@ async function migrateNestedScorePages(scores) {
         blob: page.blob,
         storagePath: page.storagePath || null,
         storageSyncedAt: page.storageSyncedAt || null,
+        storageUploadVersion: Number(page.storageUploadVersion) || 0,
         createdAt: page.createdAt || score.createdAt || new Date().toISOString(),
         updatedAt: page.updatedAt || score.updatedAt || new Date().toISOString(),
         deletedAt: page.deletedAt || null,
@@ -1462,6 +1464,7 @@ function normalizeLocalPageRecord(page) {
     blob: page.blob,
     storagePath: page.storagePath || null,
     storageSyncedAt: page.storageSyncedAt || null,
+    storageUploadVersion: Number(page.storageUploadVersion) || 0,
     createdAt: page.createdAt || new Date().toISOString(),
     updatedAt: page.updatedAt || page.createdAt || new Date().toISOString(),
     deletedAt: page.deletedAt || null,
@@ -1936,7 +1939,9 @@ async function uploadLocalChanges() {
     const shouldUploadBlob =
       page.blob &&
       page.blob.size > 0 &&
-      (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED || !page.storageSyncedAt);
+      (!page.storagePath ||
+        page.syncStatus !== SYNC_STATUS_SYNCED ||
+        page.storageUploadVersion !== STORAGE_UPLOAD_VERSION);
 
     if (shouldUploadBlob) {
       const cloudPath = page.storagePath?.startsWith("cloud://")
@@ -1951,6 +1956,7 @@ async function uploadLocalChanges() {
       size: pageSize,
       storagePath,
       storageSyncedAt,
+      storageUploadVersion: storageSyncedAt ? STORAGE_UPLOAD_VERSION : page.storageUploadVersion,
       syncStatus: SYNC_STATUS_SYNCED,
     });
   }
@@ -1989,7 +1995,12 @@ async function pullCloudChanges() {
     const page = fromCloudPage(row);
     const localPage = localPageById.get(page.id);
     if (localPage?.blob?.size > 0) {
-      cloudPages.push({ ...page, blob: localPage.blob });
+      cloudPages.push({
+        ...page,
+        blob: localPage.blob,
+        storageSyncedAt: localPage.storageSyncedAt || page.updatedAt || null,
+        storageUploadVersion: localPage.storageUploadVersion || 0,
+      });
       continue;
     }
 
@@ -2000,6 +2011,7 @@ async function pullCloudChanges() {
         blob: data,
         size: page.size || data.size,
         storageSyncedAt: page.updatedAt || new Date().toISOString(),
+        storageUploadVersion: STORAGE_UPLOAD_VERSION,
       });
     } catch (error) {
       console.warn(error);
@@ -2095,12 +2107,21 @@ function assertCloudResult(result) {
 }
 
 async function uploadCloudFile(cloudPath, blob, fileName = "score-page.jpg") {
+  const file = toUploadFile(blob, fileName);
+  if (!file?.size) {
+    throw new Error("歌谱图片文件为空，无法上传。");
+  }
+
+  if (typeof state.cloudApp.getUploadMetadata === "function") {
+    return uploadCloudFileWithSignedUrl(cloudPath, file);
+  }
+
   const result = await state.cloudApp.uploadFile({
     cloudPath,
-    filePath: toUploadFile(blob, fileName),
+    filePath: file,
   });
   assertCloudResult(result);
-  return result.fileID || result.fileId || result.data?.fileID || cloudPath;
+  return result.fileID || result.fileId || result.data?.fileID || result.data?.fileId || cloudPath;
 }
 
 function toUploadFile(blob, fileName) {
@@ -2112,6 +2133,48 @@ function toUploadFile(blob, fileName) {
   }
 
   return blob;
+}
+
+async function uploadCloudFileWithSignedUrl(cloudPath, file) {
+  const contentType = file.type || "application/octet-stream";
+  const metadataResult = await state.cloudApp.getUploadMetadata({
+    cloudPath,
+    method: "put",
+    headers: {
+      "content-type": contentType,
+    },
+  });
+  assertCloudResult(metadataResult);
+
+  const metadata = metadataResult.data || metadataResult;
+  const url = metadata.url;
+  const fileID = metadata.fileId || metadata.fileID || metadata.file_id || cloudPath;
+  const cosFileId = metadata.cosFileId || metadata.cosFileID || metadata.cos_file_id;
+  const headers = {
+    authorization: metadata.authorization,
+    "content-type": contentType,
+    "x-cos-meta-fileid": cosFileId,
+    "x-cos-security-token": metadata.token,
+  };
+
+  Object.keys(headers).forEach((key) => {
+    if (!headers[key]) {
+      delete headers[key];
+    }
+  });
+
+  const response = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: file,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(detail || "歌谱图片上传失败。");
+  }
+
+  return fileID;
 }
 
 async function downloadCloudFile(fileID, expectedSize = 0) {
@@ -2484,6 +2547,8 @@ async function importScoresByShareCode(code) {
         size: Number(pageRow.size) || blob.size,
         blob,
         storagePath: fileID,
+        storageSyncedAt: new Date().toISOString(),
+        storageUploadVersion: STORAGE_UPLOAD_VERSION,
         createdAt: now,
         updatedAt: now,
         deletedAt: null,
