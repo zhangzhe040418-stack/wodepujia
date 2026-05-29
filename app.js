@@ -1848,24 +1848,34 @@ async function handleManualSync() {
     return;
   }
 
-  setStatus("准备同步...");
   elements.syncNowButton.classList.add("is-syncing");
   elements.syncNowButton.disabled = true;
+  state.syncing = true;
+  updateAccountUi();
 
   try {
-    if (!(await ensureCloudReady())) {
-      openAuthDialog();
+    await loadScores();
+
+    const cloudReady = state.cloudReady || (await initializeCloud());
+    if (!cloudReady) {
+      await loadScores();
       return;
     }
 
     if (!state.session) {
-      setStatus("请先登录账号。", true);
-      openAuthDialog();
+      await restoreCloudSession();
+    }
+
+    if (!state.session) {
+      await loadScores();
       return;
     }
 
-    await syncNow({ manual: true });
+    await performSync();
+  } catch (error) {
+    console.error(error);
   } finally {
+    state.syncing = false;
     elements.syncNowButton.classList.remove("is-syncing");
     updateAccountUi();
   }
@@ -1886,9 +1896,7 @@ async function syncNow(options = {}) {
   }
 
   try {
-    await uploadLocalChanges();
-    await pullCloudChanges();
-    await loadScores();
+    await performSync();
     if (options.manual) {
       setStatus("同步完成。");
     }
@@ -1899,6 +1907,12 @@ async function syncNow(options = {}) {
     state.syncing = false;
     updateAccountUi();
   }
+}
+
+async function performSync() {
+  await uploadLocalChanges();
+  await pullCloudChanges();
+  await loadScores();
 }
 
 async function uploadLocalChanges() {
