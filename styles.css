@@ -177,6 +177,17 @@ noscript {
   display: none;
 }
 
+.account-button {
+  background: #ffffff;
+  color: var(--accent-strong);
+  box-shadow: 0 8px 20px rgba(23, 33, 31, 0.06);
+}
+
+.account-button:hover,
+.account-button:focus-visible {
+  background: var(--accent-soft);
+}
+
 .brand-lockup {
   display: flex;
   align-items: center;
@@ -269,6 +280,8 @@ noscript {
   align-items: center;
   flex: 0 0 auto;
   gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .searchbar {
@@ -521,6 +534,8 @@ noscript {
   box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
 }
 
+.auth-dialog,
+.share-dialog,
 .choice-dialog,
 .folder-dialog {
   width: min(360px, calc(100vw - 36px));
@@ -530,11 +545,19 @@ noscript {
   background: transparent;
 }
 
+.share-dialog {
+  width: min(430px, calc(100vw - 28px));
+}
+
+.auth-dialog::backdrop,
+.share-dialog::backdrop,
 .choice-dialog::backdrop,
 .folder-dialog::backdrop {
   background: rgba(23, 33, 31, 0.42);
 }
 
+.auth-surface,
+.share-surface,
 .choice-surface,
 .folder-surface {
   display: grid;
@@ -544,6 +567,92 @@ noscript {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 22px 64px rgba(23, 33, 31, 0.24);
+}
+
+.auth-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-head h2 {
+  margin: 0;
+}
+
+.auth-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.auth-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.auth-actions .cancel-delete-button[hidden] {
+  display: none;
+}
+
+.auth-actions:has(.cancel-delete-button[hidden]) {
+  grid-template-columns: 1fr 1fr;
+}
+
+.share-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.share-option {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.share-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.share-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-code-panel {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(15, 118, 110, 0.22);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.share-code-panel span {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.share-code-panel strong {
+  font-size: 1.35rem;
+  letter-spacing: 0.08em;
 }
 
 .choice-surface h2,

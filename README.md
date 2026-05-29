@@ -30,6 +30,29 @@ node server.js
 
 发布成功后，用公网 HTTPS 地址打开，例如 `https://你的站点名.vercel.app`。这个地址在手机移动网络、家里 Wi-Fi、教会 Wi-Fi 等任意网络中都可以访问。
 
+## Supabase 登录与同步
+
+当前代码已经预留账号密码登录、云端同步、图片上传和分享码导入功能。启用步骤：
+
+1. 在 Supabase 新建项目。
+2. 打开项目的 SQL Editor，运行 `supabase-schema.sql`。
+3. 在 Supabase Authentication 里开启 Email 登录方式。
+4. 打开 `supabase-config.js`，填写项目 URL 和 anon key：
+
+```js
+window.MY_SCORE_FOLDER_SUPABASE = {
+  url: "https://你的项目.supabase.co",
+  anonKey: "你的 anon public key",
+  storageBucket: "score-pages",
+};
+```
+
+5. 提交并重新部署到 GitHub Pages。
+
+启用后，用户可以用邮箱和密码注册/登录。登录后，本地歌谱会上传到当前账号；换设备登录同一个账号后，会自动下载该账号的文件夹、歌谱和图片。
+
+分享功能：登录后点击“分享”按钮，选择歌谱生成同步码。其他登录用户输入同步码后，会把分享的歌谱复制到自己的账号中；如果自己账号里已有同名歌谱，会保留自己的歌谱，不导入同名分享歌谱。
+
 ## 手机安装
 
 把整个文件夹发布到 HTTPS 网站后，用手机浏览器打开：
@@ -39,4 +62,4 @@ node server.js
 
 安装后会像普通 App 一样从桌面打开。应用外壳支持离线加载，歌谱数据保存在当前浏览器或已安装 App 的 IndexedDB 中；只要不清除站点数据，之前保存的歌谱都会保留。
 
-注意：当前版本不需要服务器保存歌谱，所以部署后没有后端费用，也不会依赖电脑开机。但歌谱数据仍然保存在当前手机或当前浏览器里；如果需要多台设备自动同步同一份歌谱，需要再接入云端数据库和登录功能。
+注意：没有填写 Supabase 配置时，App 会继续以本地离线模式运行。填写并部署 Supabase 配置后，才会启用账号登录和多设备同步。

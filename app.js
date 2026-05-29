@@ -1,7 +1,18 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
+const PAGE_STORE_NAME = "score_pages";
+const SYNC_STATUS_LOCAL = "local";
+const SYNC_STATUS_PENDING = "pending";
+const SYNC_STATUS_SYNCED = "synced";
+const CLOUD_TABLES = {
+  folders: "folders",
+  scores: "scores",
+  pages: "score_pages",
+  shareBatches: "share_batches",
+  shareItems: "share_items",
+};
 const VIEWER_MIN_ZOOM = 1;
 const VIEWER_MAX_ZOOM = 4;
 const VIEWER_DOUBLE_TAP_ZOOM = 2;
@@ -10,7 +21,12 @@ const VIEWER_DOUBLE_TAP_DELAY = 320;
 
 const state = {
   db: null,
+  supabase: null,
+  session: null,
+  cloudReady: false,
+  syncing: false,
   scores: [],
+  scorePages: [],
   folders: [],
   pendingPages: [],
   scoreUrls: new Map(),
@@ -41,7 +57,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     state.db = await openDatabase();
+    initializeCloud();
     await loadScores();
+    await restoreCloudSession();
     setStatus("");
   } catch (error) {
     console.error(error);
@@ -63,6 +81,32 @@ function bindElements() {
   elements.exportDataButton = document.querySelector("#exportDataButton");
   elements.importDataButton = document.querySelector("#importDataButton");
   elements.backupInput = document.querySelector("#backupInput");
+  elements.syncNowButton = document.querySelector("#syncNowButton");
+  elements.shareScoresButton = document.querySelector("#shareScoresButton");
+  elements.importShareButton = document.querySelector("#importShareButton");
+  elements.accountButton = document.querySelector("#accountButton");
+  elements.accountButtonText = document.querySelector("#accountButtonText");
+  elements.authDialog = document.querySelector("#authDialog");
+  elements.authForm = document.querySelector("#authForm");
+  elements.authEmail = document.querySelector("#authEmail");
+  elements.authPassword = document.querySelector("#authPassword");
+  elements.authState = document.querySelector("#authState");
+  elements.closeAuthButton = document.querySelector("#closeAuthButton");
+  elements.signOutButton = document.querySelector("#signOutButton");
+  elements.signUpButton = document.querySelector("#signUpButton");
+  elements.signInButton = document.querySelector("#signInButton");
+  elements.shareDialog = document.querySelector("#shareDialog");
+  elements.shareForm = document.querySelector("#shareForm");
+  elements.shareList = document.querySelector("#shareList");
+  elements.shareCodePanel = document.querySelector("#shareCodePanel");
+  elements.shareCodeText = document.querySelector("#shareCodeText");
+  elements.closeShareButton = document.querySelector("#closeShareButton");
+  elements.createShareButton = document.querySelector("#createShareButton");
+  elements.importShareDialog = document.querySelector("#importShareDialog");
+  elements.importShareForm = document.querySelector("#importShareForm");
+  elements.shareCodeInput = document.querySelector("#shareCodeInput");
+  elements.closeImportShareButton = document.querySelector("#closeImportShareButton");
+  elements.importShareSubmitButton = document.querySelector("#importShareSubmitButton");
   elements.installAppButton = document.querySelector("#installAppButton");
   elements.addScoreButton = document.querySelector("#addScoreButton");
   elements.addChoiceDialog = document.querySelector("#addChoiceDialog");
@@ -115,6 +159,30 @@ function bindEvents() {
   elements.exportDataButton.addEventListener("click", exportBackup);
   elements.importDataButton.addEventListener("click", openBackupPicker);
   elements.backupInput.addEventListener("change", importBackupFile);
+  elements.syncNowButton.addEventListener("click", () => syncNow({ manual: true }));
+  elements.accountButton.addEventListener("click", openAuthDialog);
+  elements.closeAuthButton.addEventListener("click", closeAuthDialog);
+  elements.authForm.addEventListener("submit", signInWithPassword);
+  elements.signUpButton.addEventListener("click", signUpWithPassword);
+  elements.signOutButton.addEventListener("click", signOut);
+  elements.authDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeAuthDialog();
+  });
+  elements.shareScoresButton.addEventListener("click", openShareDialog);
+  elements.closeShareButton.addEventListener("click", closeShareDialog);
+  elements.shareDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeShareDialog();
+  });
+  elements.shareForm.addEventListener("submit", createShareCode);
+  elements.importShareButton.addEventListener("click", openImportShareDialog);
+  elements.closeImportShareButton.addEventListener("click", closeImportShareDialog);
+  elements.importShareDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeImportShareDialog();
+  });
+  elements.importShareForm.addEventListener("submit", importSharedScores);
   elements.installAppButton.addEventListener("click", installApp);
   elements.addScoreButton.addEventListener("click", handleAddButtonClick);
   elements.folderBackButton.addEventListener("click", openRootFolder);
@@ -289,6 +357,180 @@ function closeFolderDialog() {
 
   elements.folderForm.reset();
   elements.saveFolderButton.disabled = false;
+}
+
+function initializeCloud() {
+  const config = window.MY_SCORE_FOLDER_SUPABASE || {};
+  const hasConfig = Boolean(config.url && config.anonKey);
+
+  if (!hasConfig || !window.supabase?.createClient) {
+    state.cloudReady = false;
+    updateAccountUi();
+    return;
+  }
+
+  state.supabase = window.supabase.createClient(config.url, config.anonKey);
+  state.cloudReady = true;
+  state.supabase.auth.onAuthStateChange(async (_event, session) => {
+    state.session = session;
+    updateAccountUi();
+    await loadScores();
+    if (session) {
+      await claimLocalRecordsForUser(session.user.id);
+      await syncNow();
+    }
+  });
+  updateAccountUi();
+}
+
+async function restoreCloudSession() {
+  if (!state.cloudReady) {
+    updateAccountUi();
+    return;
+  }
+
+  const { data, error } = await state.supabase.auth.getSession();
+  if (error) {
+    console.error(error);
+    updateAccountUi();
+    return;
+  }
+
+  state.session = data.session;
+  updateAccountUi();
+  await loadScores();
+  if (state.session) {
+    await claimLocalRecordsForUser(state.session.user.id);
+    await syncNow();
+  }
+}
+
+function updateAccountUi() {
+  const email = state.session?.user?.email;
+  elements.accountButtonText.textContent = email ? "已登录" : "登录";
+  elements.syncNowButton.disabled = !state.cloudReady || !state.session || state.syncing;
+  elements.shareScoresButton.disabled = !state.cloudReady || !state.session;
+  elements.importShareButton.disabled = !state.cloudReady || !state.session;
+
+  if (elements.authState) {
+    elements.authState.textContent = state.cloudReady
+      ? email
+        ? `当前账号：${email}`
+        : "登录后可以跨设备同步歌谱。"
+      : "请先填写 supabase-config.js 中的 Supabase URL 和 anon key。";
+  }
+
+  if (elements.signOutButton) {
+    elements.signOutButton.hidden = !email;
+  }
+}
+
+function requireCloudSession() {
+  if (!state.cloudReady) {
+    setStatus("请先填写 Supabase 配置并重新部署。", true);
+    openAuthDialog();
+    return false;
+  }
+
+  if (!state.session) {
+    setStatus("请先登录账号。", true);
+    openAuthDialog();
+    return false;
+  }
+
+  return true;
+}
+
+function openAuthDialog() {
+  updateAccountUi();
+  if (typeof elements.authDialog.showModal === "function") {
+    elements.authDialog.showModal();
+  } else {
+    elements.authDialog.setAttribute("open", "");
+  }
+  refreshIcons();
+}
+
+function closeAuthDialog() {
+  if (elements.authDialog.open) {
+    elements.authDialog.close();
+  } else {
+    elements.authDialog.removeAttribute("open");
+  }
+}
+
+async function signInWithPassword(event) {
+  event.preventDefault();
+  if (!state.cloudReady) {
+    updateAccountUi();
+    return;
+  }
+
+  elements.signInButton.disabled = true;
+  try {
+    const { data, error } = await state.supabase.auth.signInWithPassword({
+      email: elements.authEmail.value.trim(),
+      password: elements.authPassword.value,
+    });
+    if (error) {
+      throw error;
+    }
+    state.session = data.session;
+    closeAuthDialog();
+    setStatus("已登录，正在同步...");
+    await claimLocalRecordsForUser(data.session.user.id);
+    await syncNow({ manual: true });
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "登录失败，请检查账号密码。", true);
+  } finally {
+    elements.signInButton.disabled = false;
+    updateAccountUi();
+  }
+}
+
+async function signUpWithPassword() {
+  if (!state.cloudReady) {
+    updateAccountUi();
+    return;
+  }
+
+  elements.signUpButton.disabled = true;
+  try {
+    const { data, error } = await state.supabase.auth.signUp({
+      email: elements.authEmail.value.trim(),
+      password: elements.authPassword.value,
+    });
+    if (error) {
+      throw error;
+    }
+    state.session = data.session || state.session;
+    setStatus(data.session ? "注册成功，正在同步..." : "注册成功，请按邮件提示确认账号后登录。");
+    if (data.session) {
+      closeAuthDialog();
+      await claimLocalRecordsForUser(data.session.user.id);
+      await syncNow({ manual: true });
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "注册失败，请稍后再试。", true);
+  } finally {
+    elements.signUpButton.disabled = false;
+    updateAccountUi();
+  }
+}
+
+async function signOut() {
+  if (!state.cloudReady) {
+    return;
+  }
+
+  await state.supabase.auth.signOut();
+  state.session = null;
+  closeAuthDialog();
+  await loadScores();
+  setStatus("已退出登录。");
+  updateAccountUi();
 }
 
 function openAddScreen() {
@@ -625,9 +867,27 @@ function openBackupPicker() {
 }
 
 async function loadScores() {
-  const [scores, folders] = await Promise.all([getAllScores(), getAllFolders()]);
-  state.scores = scores;
-  state.folders = folders;
+  const [scoreRecords, pageRecords, folders] = await Promise.all([getAllScores(), getAllScorePages(), getAllFolders()]);
+  const migrated = await migrateNestedScorePages(scoreRecords);
+  const normalizedScores = migrated.map(normalizeLocalScoreRecord);
+  const activeUserId = state.session?.user?.id || null;
+  const ownerMatches = (record) => (activeUserId ? !record.userId || record.userId === activeUserId : !record.userId);
+  const ownedScores = normalizedScores.filter(ownerMatches);
+  const ownedScoreIds = new Set(ownedScores.map((score) => score.id));
+  const normalizedPages = [...pageRecords, ...migrated.flatMap((score) => score.__migratedPages || [])]
+    .map(normalizeLocalPageRecord)
+    .filter((page) => !page.deletedAt && ownedScoreIds.has(page.scoreId));
+
+  state.scorePages = normalizedPages;
+  state.scores = ownedScores
+    .filter((score) => !score.deletedAt)
+    .map((score) => ({
+      ...score,
+      pages: normalizedPages
+        .filter((page) => page.scoreId === score.id)
+        .sort((a, b) => a.pageIndex - b.pageIndex),
+    }));
+  state.folders = folders.map(normalizeLocalFolderRecord).filter((folder) => !folder.deletedAt && ownerMatches(folder));
   state.scores.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   state.folders.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
@@ -666,11 +926,34 @@ function openDatabase() {
       if (!scoreStore.indexNames.contains("folderId")) {
         scoreStore.createIndex("folderId", "folderId", { unique: false });
       }
+      if (!scoreStore.indexNames.contains("userId")) {
+        scoreStore.createIndex("userId", "userId", { unique: false });
+      }
+      if (!scoreStore.indexNames.contains("syncStatus")) {
+        scoreStore.createIndex("syncStatus", "syncStatus", { unique: false });
+      }
 
       if (!db.objectStoreNames.contains(FOLDER_STORE_NAME)) {
         const folderStore = db.createObjectStore(FOLDER_STORE_NAME, { keyPath: "id" });
         folderStore.createIndex("normalizedName", "normalizedName", { unique: false });
         folderStore.createIndex("updatedAt", "updatedAt", { unique: false });
+        folderStore.createIndex("userId", "userId", { unique: false });
+        folderStore.createIndex("syncStatus", "syncStatus", { unique: false });
+      } else {
+        const folderStore = request.transaction.objectStore(FOLDER_STORE_NAME);
+        if (!folderStore.indexNames.contains("userId")) {
+          folderStore.createIndex("userId", "userId", { unique: false });
+        }
+        if (!folderStore.indexNames.contains("syncStatus")) {
+          folderStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        }
+      }
+
+      if (!db.objectStoreNames.contains(PAGE_STORE_NAME)) {
+        const pageStore = db.createObjectStore(PAGE_STORE_NAME, { keyPath: "id" });
+        pageStore.createIndex("scoreId", "scoreId", { unique: false });
+        pageStore.createIndex("userId", "userId", { unique: false });
+        pageStore.createIndex("syncStatus", "syncStatus", { unique: false });
       }
     };
 
@@ -679,10 +962,131 @@ function openDatabase() {
   });
 }
 
+async function migrateNestedScorePages(scores) {
+  const nestedScores = scores.filter((score) => Array.isArray(score.pages));
+  if (!nestedScores.length) {
+    return scores;
+  }
+
+  await new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+
+    nestedScores.forEach((score) => {
+      const pages = score.pages.map((page, index) => ({
+        id: page.id || createId(),
+        scoreId: score.id,
+        userId: score.userId || null,
+        pageIndex: index,
+        name: page.name || `第 ${index + 1} 页`,
+        type: page.type || page.blob?.type || "image/jpeg",
+        size: Number(page.size) || page.blob?.size || 0,
+        blob: page.blob,
+        storagePath: page.storagePath || null,
+        createdAt: page.createdAt || score.createdAt || new Date().toISOString(),
+        updatedAt: page.updatedAt || score.updatedAt || new Date().toISOString(),
+        deletedAt: page.deletedAt || null,
+        syncStatus: page.syncStatus || score.syncStatus || SYNC_STATUS_LOCAL,
+      }));
+      const record = toScoreRecord({
+        ...score,
+        syncStatus: score.syncStatus || SYNC_STATUS_LOCAL,
+      });
+
+      scoreStore.put(record);
+      pages.forEach((page) => pageStore.put(page));
+      score.__migratedPages = pages;
+    });
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+
+  return scores.map((score) => {
+    if (!Array.isArray(score.pages)) {
+      return score;
+    }
+
+    return {
+      ...toScoreRecord(score),
+      __migratedPages: score.__migratedPages || [],
+    };
+  });
+}
+
+function normalizeLocalScoreRecord(score) {
+  const name = String(score.name || "未命名歌谱").trim() || "未命名歌谱";
+
+  return {
+    ...score,
+    id: String(score.id || createId()),
+    userId: score.userId || null,
+    folderId: score.folderId || null,
+    name,
+    normalizedName: normalizeText(score.normalizedName || name),
+    createdAt: score.createdAt || new Date().toISOString(),
+    updatedAt: score.updatedAt || score.createdAt || new Date().toISOString(),
+    deletedAt: score.deletedAt || null,
+    syncStatus: score.syncStatus || SYNC_STATUS_LOCAL,
+    storageSyncedAt: score.storageSyncedAt || null,
+  };
+}
+
+function normalizeLocalFolderRecord(folder) {
+  const name = String(folder.name || "未命名文件夹").trim() || "未命名文件夹";
+
+  return {
+    ...folder,
+    id: String(folder.id || createId()),
+    userId: folder.userId || null,
+    name,
+    normalizedName: normalizeText(folder.normalizedName || name),
+    createdAt: folder.createdAt || new Date().toISOString(),
+    updatedAt: folder.updatedAt || folder.createdAt || new Date().toISOString(),
+    deletedAt: folder.deletedAt || null,
+    syncStatus: folder.syncStatus || SYNC_STATUS_LOCAL,
+  };
+}
+
+function normalizeLocalPageRecord(page) {
+  return {
+    ...page,
+    id: String(page.id || createId()),
+    scoreId: String(page.scoreId || ""),
+    userId: page.userId || null,
+    pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : 0,
+    name: page.name || "歌谱图片",
+    type: page.type || page.blob?.type || "image/jpeg",
+    size: Number(page.size) || page.blob?.size || 0,
+    blob: page.blob,
+    storagePath: page.storagePath || null,
+    createdAt: page.createdAt || new Date().toISOString(),
+    updatedAt: page.updatedAt || page.createdAt || new Date().toISOString(),
+    deletedAt: page.deletedAt || null,
+    syncStatus: page.syncStatus || SYNC_STATUS_LOCAL,
+  };
+}
+
+function toScoreRecord(score) {
+  const { pages, __migratedPages, ...record } = score;
+  return record;
+}
+
 function getAllScores() {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction(STORE_NAME, "readonly");
     const request = transaction.objectStore(STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getAllScorePages() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(PAGE_STORE_NAME, "readonly");
+    const request = transaction.objectStore(PAGE_STORE_NAME).getAll();
     request.onsuccess = () => resolve(request.result || []);
     request.onerror = () => reject(request.error);
   });
@@ -700,9 +1104,30 @@ function getAllFolders() {
 function putScore(score) {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction(STORE_NAME, "readwrite");
-    const request = transaction.objectStore(STORE_NAME).put(score);
+    const request = transaction.objectStore(STORE_NAME).put(toScoreRecord(score));
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+  });
+}
+
+function putScoreWithPages(score, pages) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+
+    scoreStore.put(toScoreRecord(score));
+    pages.forEach((page, index) => {
+      pageStore.put({
+        ...page,
+        scoreId: score.id,
+        pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+      });
+    });
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
   });
 }
 
@@ -717,12 +1142,22 @@ function putFolder(folder) {
 
 function putImportedRecords(folders, scores) {
   return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME], "readwrite");
+    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
     const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
     const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
 
     folders.forEach((folder) => folderStore.put(folder));
-    scores.forEach((score) => scoreStore.put(score));
+    scores.forEach((score) => {
+      scoreStore.put(toScoreRecord(score));
+      (score.pages || []).forEach((page, index) => {
+        pageStore.put({
+          ...page,
+          scoreId: score.id,
+          pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+        });
+      });
+    });
 
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
@@ -732,10 +1167,20 @@ function putImportedRecords(folders, scores) {
 
 function deleteScoreRecord(id) {
   return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction(STORE_NAME, "readwrite");
-    const request = transaction.objectStore(STORE_NAME).delete(id);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const pageIndex = pageStore.index("scoreId");
+    const scoreRequest = scoreStore.delete(id);
+    const pageRequest = pageIndex.getAllKeys(id);
+
+    pageRequest.onsuccess = () => {
+      pageRequest.result.forEach((key) => pageStore.delete(key));
+    };
+    scoreRequest.onerror = () => reject(scoreRequest.error);
+    pageRequest.onerror = () => reject(pageRequest.error);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
   });
 }
 
@@ -832,30 +1277,43 @@ async function saveScore(event) {
   }
 
   const now = new Date().toISOString();
+  const userId = state.session?.user?.id || null;
   const score = {
     id: createId(),
+    userId,
     name,
     normalizedName: normalizeText(name),
     folderId: state.currentFolderId || null,
     createdAt: now,
     updatedAt: now,
-    pages: state.pendingPages.map((page) => ({
-      id: page.id,
-      name: page.name,
-      type: page.type,
-      size: page.size,
-      blob: page.blob,
-    })),
+    deletedAt: null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
+  const pages = state.pendingPages.map((page, index) => ({
+    id: page.id,
+    scoreId: score.id,
+    userId,
+    pageIndex: index,
+    name: page.name,
+    type: page.type,
+    size: page.size,
+    blob: page.blob,
+    storagePath: null,
+    createdAt: now,
+    updatedAt: now,
+    deletedAt: null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  }));
 
   elements.saveButton.disabled = true;
   setStatus("正在保存...");
 
     try {
-      await putScore(score);
+      await putScoreWithPages(score, pages);
       resetForm(false);
       elements.searchInput.value = "";
       await loadScores();
+      queueSync();
       closeAddScreen();
       setStatus(`已保存《${name}》。`);
     } catch (error) {
@@ -876,12 +1334,16 @@ async function createFolder(event) {
   }
 
   const now = new Date().toISOString();
+  const userId = state.session?.user?.id || null;
   const folder = {
     id: createId(),
+    userId,
     name,
     normalizedName: normalizeText(name),
     createdAt: now,
     updatedAt: now,
+    deletedAt: null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
 
   elements.saveFolderButton.disabled = true;
@@ -892,6 +1354,7 @@ async function createFolder(event) {
     elements.searchInput.value = "";
     closeFolderDialog();
     await loadScores();
+    queueSync();
     elements.appShell.scrollTo({ top: 0 });
   } catch (error) {
     console.error(error);
@@ -962,6 +1425,7 @@ async function importBackupFile(event) {
     elements.searchInput.value = "";
     state.currentFolderId = null;
     await loadScores();
+    queueSync();
     setStatus(`已导入 ${imported.folders.length} 个文件夹、${imported.scores.length} 份歌谱。`);
   } catch (error) {
     console.error(error);
@@ -994,28 +1458,37 @@ async function normalizeBackupData(backup) {
 
 function normalizeImportedFolder(folder, now) {
   const name = String(folder?.name || "未命名文件夹").trim() || "未命名文件夹";
+  const userId = state.session?.user?.id || null;
 
   return {
     id: String(folder?.id || createId()),
+    userId,
     name,
     normalizedName: normalizeText(folder?.normalizedName || name),
     createdAt: folder?.createdAt || now,
     updatedAt: folder?.updatedAt || folder?.createdAt || now,
+    deletedAt: folder?.deletedAt || null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
 }
 
 async function normalizeImportedScore(score, knownFolderIds, now) {
   const name = String(score?.name || "未命名歌谱").trim() || "未命名歌谱";
+  const userId = state.session?.user?.id || null;
   const folderId = score?.folderId && knownFolderIds.has(score.folderId) ? score.folderId : null;
   const pages = Array.isArray(score?.pages) ? score.pages : [];
+  const scoreId = String(score?.id || createId());
 
   return {
-    id: String(score?.id || createId()),
+    id: scoreId,
+    userId,
     name,
     normalizedName: normalizeText(score?.normalizedName || name),
     folderId,
     createdAt: score?.createdAt || now,
     updatedAt: score?.updatedAt || score?.createdAt || now,
+    deletedAt: score?.deletedAt || null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
     pages: await Promise.all(
       pages
         .filter((page) => typeof page?.dataUrl === "string")
@@ -1024,14 +1497,582 @@ async function normalizeImportedScore(score, knownFolderIds, now) {
 
           return {
             id: String(page.id || createId()),
+            scoreId,
+            userId,
+            pageIndex: index,
             name: page.name || `第 ${index + 1} 页`,
             type: page.type || blob.type || "image/jpeg",
             size: Number(page.size) || blob.size,
             blob,
+            storagePath: page.storagePath || null,
+            createdAt: page.createdAt || now,
+            updatedAt: page.updatedAt || now,
+            deletedAt: page.deletedAt || null,
+            syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
           };
         }),
     ),
   };
+}
+
+async function claimLocalRecordsForUser(userId) {
+  const [scores, pages, folders] = await Promise.all([getAllScores(), getAllScorePages(), getAllFolders()]);
+  const now = new Date().toISOString();
+  const claimedFolders = folders
+    .filter((folder) => !folder.userId)
+    .map((folder) => ({
+      ...normalizeLocalFolderRecord(folder),
+      userId,
+      updatedAt: folder.updatedAt || now,
+      syncStatus: SYNC_STATUS_PENDING,
+    }));
+  const claimedScores = scores
+    .filter((score) => !score.userId)
+    .map((score) => ({
+      ...normalizeLocalScoreRecord(score),
+      userId,
+      updatedAt: score.updatedAt || now,
+      syncStatus: SYNC_STATUS_PENDING,
+    }));
+  const claimedPages = pages
+    .filter((page) => !page.userId)
+    .map((page) => ({
+      ...normalizeLocalPageRecord(page),
+      userId,
+      updatedAt: page.updatedAt || now,
+      syncStatus: SYNC_STATUS_PENDING,
+    }));
+
+  if (!claimedFolders.length && !claimedScores.length && !claimedPages.length) {
+    return;
+  }
+
+  await putCloudReadyRecords(claimedFolders, claimedScores, claimedPages);
+  await loadScores();
+}
+
+function putCloudReadyRecords(folders, scores, pages) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+
+    folders.forEach((folder) => folderStore.put(folder));
+    scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
+    pages.forEach((page) => pageStore.put(page));
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+function queueSync() {
+  if (!state.cloudReady || !state.session || state.syncing) {
+    return;
+  }
+
+  window.setTimeout(() => syncNow(), 250);
+}
+
+async function syncNow(options = {}) {
+  if (!state.cloudReady || !state.session || state.syncing) {
+    if (options.manual && !state.session) {
+      setStatus("请先登录账号。", true);
+    }
+    return;
+  }
+
+  state.syncing = true;
+  updateAccountUi();
+  if (options.manual) {
+    setStatus("正在同步...");
+  }
+
+  try {
+    await uploadLocalChanges();
+    await pullCloudChanges();
+    await loadScores();
+    if (options.manual) {
+      setStatus("同步完成。");
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "同步失败，请检查网络和 Supabase 配置。", true);
+  } finally {
+    state.syncing = false;
+    updateAccountUi();
+  }
+}
+
+async function uploadLocalChanges() {
+  const userId = state.session.user.id;
+  const bucket = getStorageBucket();
+  const folders = state.folders.map((folder) => ({ ...folder, userId }));
+  const scores = state.scores.map((score) => ({ ...toScoreRecord(score), userId }));
+  const pages = state.scorePages
+    .filter((page) => scores.some((score) => score.id === page.scoreId))
+    .map((page) => ({ ...page, userId }));
+  const uploadedPages = [];
+
+  for (const page of pages) {
+    const storagePath = page.storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
+    if (page.blob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)) {
+      const { error } = await bucket.upload(storagePath, page.blob, {
+        upsert: true,
+        contentType: page.type || page.blob.type || "image/jpeg",
+      });
+      if (error) {
+        throw error;
+      }
+    }
+    uploadedPages.push({
+      ...page,
+      storagePath,
+      syncStatus: SYNC_STATUS_SYNCED,
+    });
+  }
+
+  if (folders.length) {
+    await upsertCloud(CLOUD_TABLES.folders, folders.map(toCloudFolder));
+  }
+  if (scores.length) {
+    await upsertCloud(CLOUD_TABLES.scores, scores.map(toCloudScore));
+  }
+  if (uploadedPages.length) {
+    await upsertCloud(CLOUD_TABLES.pages, uploadedPages.map(toCloudPage));
+  }
+
+  await markLocalSynced(
+    folders.map((folder) => ({ ...folder, syncStatus: SYNC_STATUS_SYNCED })),
+    scores.map((score) => ({ ...score, syncStatus: SYNC_STATUS_SYNCED })),
+    uploadedPages,
+  );
+}
+
+async function pullCloudChanges() {
+  const userId = state.session.user.id;
+  const [foldersResult, scoresResult, pagesResult] = await Promise.all([
+    state.supabase.from(CLOUD_TABLES.folders).select("*").eq("user_id", userId).is("deleted_at", null),
+    state.supabase.from(CLOUD_TABLES.scores).select("*").eq("user_id", userId).is("deleted_at", null),
+    state.supabase
+      .from(CLOUD_TABLES.pages)
+      .select("*")
+      .eq("user_id", userId)
+      .is("deleted_at", null)
+      .order("page_index"),
+  ]);
+
+  if (foldersResult.error) throw foldersResult.error;
+  if (scoresResult.error) throw scoresResult.error;
+  if (pagesResult.error) throw pagesResult.error;
+
+  const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
+  const cloudPages = [];
+
+  for (const row of pagesResult.data || []) {
+    const page = fromCloudPage(row);
+    const localPage = localPageById.get(page.id);
+    if (localPage?.blob) {
+      cloudPages.push({ ...page, blob: localPage.blob });
+      continue;
+    }
+
+    const { data, error } = await getStorageBucket().download(page.storagePath);
+    if (error) {
+      throw error;
+    }
+    cloudPages.push({
+      ...page,
+      blob: data,
+      size: page.size || data.size,
+    });
+  }
+
+  await putCloudReadyRecords(
+    (foldersResult.data || []).map(fromCloudFolder),
+    (scoresResult.data || []).map(fromCloudScore),
+    cloudPages,
+  );
+}
+
+function markLocalSynced(folders, scores, pages) {
+  return putCloudReadyRecords(folders, scores, pages);
+}
+
+async function upsertCloud(table, rows) {
+  const { error } = await state.supabase.from(table).upsert(rows, { onConflict: "id" });
+  if (error) {
+    throw error;
+  }
+}
+
+function getStorageBucket() {
+  const bucket = window.MY_SCORE_FOLDER_SUPABASE?.storageBucket || "score-pages";
+  return state.supabase.storage.from(bucket);
+}
+
+function createStoragePath(userId, scoreId, pageId, type) {
+  return `${userId}/${scoreId}/${pageId}.${getExtensionFromType(type)}`;
+}
+
+function getExtensionFromType(type) {
+  if (type === "image/png") return "png";
+  if (type === "image/webp") return "webp";
+  if (type === "image/gif") return "gif";
+  return "jpg";
+}
+
+function toCloudFolder(folder) {
+  return {
+    id: folder.id,
+    user_id: folder.userId,
+    name: folder.name,
+    normalized_name: folder.normalizedName,
+    created_at: folder.createdAt,
+    updated_at: folder.updatedAt,
+    deleted_at: folder.deletedAt || null,
+  };
+}
+
+function toCloudScore(score) {
+  return {
+    id: score.id,
+    user_id: score.userId,
+    folder_id: score.folderId || null,
+    name: score.name,
+    normalized_name: score.normalizedName,
+    created_at: score.createdAt,
+    updated_at: score.updatedAt,
+    deleted_at: score.deletedAt || null,
+  };
+}
+
+function toCloudPage(page) {
+  return {
+    id: page.id,
+    user_id: page.userId,
+    score_id: page.scoreId,
+    page_index: page.pageIndex,
+    name: page.name,
+    type: page.type,
+    size: page.size,
+    storage_path: page.storagePath,
+    created_at: page.createdAt,
+    updated_at: page.updatedAt,
+    deleted_at: page.deletedAt || null,
+  };
+}
+
+function fromCloudFolder(row) {
+  return normalizeLocalFolderRecord({
+    id: row.id,
+    userId: row.user_id,
+    name: row.name,
+    normalizedName: row.normalized_name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
+}
+
+function fromCloudScore(row) {
+  return normalizeLocalScoreRecord({
+    id: row.id,
+    userId: row.user_id,
+    folderId: row.folder_id,
+    name: row.name,
+    normalizedName: row.normalized_name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
+}
+
+function fromCloudPage(row) {
+  return normalizeLocalPageRecord({
+    id: row.id,
+    userId: row.user_id,
+    scoreId: row.score_id,
+    pageIndex: row.page_index,
+    name: row.name,
+    type: row.type,
+    size: row.size,
+    storagePath: row.storage_path,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
+}
+
+function openShareDialog() {
+  if (!requireCloudSession()) {
+    return;
+  }
+
+  elements.shareCodePanel.hidden = true;
+  elements.shareCodeText.textContent = "";
+  renderShareList();
+  if (typeof elements.shareDialog.showModal === "function") {
+    elements.shareDialog.showModal();
+  } else {
+    elements.shareDialog.setAttribute("open", "");
+  }
+  refreshIcons();
+}
+
+function closeShareDialog() {
+  if (elements.shareDialog.open) {
+    elements.shareDialog.close();
+  } else {
+    elements.shareDialog.removeAttribute("open");
+  }
+}
+
+function renderShareList() {
+  elements.shareList.replaceChildren();
+  if (!state.scores.length) {
+    elements.shareList.append(createEmptyState("还没有歌谱", "保存歌谱后就可以分享。"));
+    elements.createShareButton.disabled = true;
+    return;
+  }
+
+  elements.createShareButton.disabled = false;
+  state.scores.forEach((score) => {
+    const label = document.createElement("label");
+    label.className = "share-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = score.id;
+    const text = document.createElement("span");
+    text.textContent = score.name;
+    label.append(checkbox, text);
+    elements.shareList.append(label);
+  });
+}
+
+async function createShareCode(event) {
+  event.preventDefault();
+  if (!requireCloudSession()) {
+    return;
+  }
+
+  const selectedIds = Array.from(elements.shareList.querySelectorAll("input[type='checkbox']:checked")).map(
+    (input) => input.value,
+  );
+  if (!selectedIds.length) {
+    setStatus("请至少选择一份歌谱。", true);
+    return;
+  }
+
+  elements.createShareButton.disabled = true;
+  try {
+    await syncNow();
+    const code = await insertShareBatch(selectedIds);
+    elements.shareCodeText.textContent = code;
+    elements.shareCodePanel.hidden = false;
+    setStatus("同步码已生成。");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "生成同步码失败。", true);
+  } finally {
+    elements.createShareButton.disabled = false;
+  }
+}
+
+async function insertShareBatch(scoreIds) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const code = createShareCodeValue();
+    const { data, error } = await state.supabase
+      .from(CLOUD_TABLES.shareBatches)
+      .insert({
+        owner_id: state.session.user.id,
+        code,
+      })
+      .select("id, code")
+      .single();
+
+    if (error) {
+      if (String(error.code) === "23505") {
+        continue;
+      }
+      throw error;
+    }
+
+    const { error: itemError } = await state.supabase.from(CLOUD_TABLES.shareItems).insert(
+      scoreIds.map((scoreId) => ({
+        share_id: data.id,
+        score_id: scoreId,
+      })),
+    );
+    if (itemError) {
+      throw itemError;
+    }
+
+    return data.code;
+  }
+
+  throw new Error("同步码生成失败，请重试。");
+}
+
+function openImportShareDialog() {
+  if (!requireCloudSession()) {
+    return;
+  }
+
+  elements.importShareForm.reset();
+  if (typeof elements.importShareDialog.showModal === "function") {
+    elements.importShareDialog.showModal();
+  } else {
+    elements.importShareDialog.setAttribute("open", "");
+  }
+  requestAnimationFrame(() => elements.shareCodeInput.focus());
+}
+
+function closeImportShareDialog() {
+  if (elements.importShareDialog.open) {
+    elements.importShareDialog.close();
+  } else {
+    elements.importShareDialog.removeAttribute("open");
+  }
+}
+
+async function importSharedScores(event) {
+  event.preventDefault();
+  if (!requireCloudSession()) {
+    return;
+  }
+
+  const code = elements.shareCodeInput.value.trim().toUpperCase();
+  if (!code) {
+    return;
+  }
+
+  elements.importShareSubmitButton.disabled = true;
+  setStatus("正在导入分享歌谱...");
+
+  try {
+    const importedCount = await importScoresByShareCode(code);
+    closeImportShareDialog();
+    await loadScores();
+    setStatus(`已导入 ${importedCount} 份分享歌谱。`);
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "导入同步码失败。", true);
+  } finally {
+    elements.importShareSubmitButton.disabled = false;
+  }
+}
+
+async function importScoresByShareCode(code) {
+  const { data: batch, error: batchError } = await state.supabase
+    .from(CLOUD_TABLES.shareBatches)
+    .select("id, owner_id, code")
+    .eq("code", code)
+    .single();
+  if (batchError) {
+    throw batchError;
+  }
+
+  const { data: items, error: itemError } = await state.supabase
+    .from(CLOUD_TABLES.shareItems)
+    .select("score_id")
+    .eq("share_id", batch.id);
+  if (itemError) {
+    throw itemError;
+  }
+
+  const scoreIds = (items || []).map((item) => item.score_id);
+  if (!scoreIds.length) {
+    return 0;
+  }
+
+  const [{ data: sharedScores, error: scoreError }, { data: sharedPages, error: pageError }] = await Promise.all([
+    state.supabase.from(CLOUD_TABLES.scores).select("*").in("id", scoreIds).is("deleted_at", null),
+    state.supabase.from(CLOUD_TABLES.pages).select("*").in("score_id", scoreIds).is("deleted_at", null).order("page_index"),
+  ]);
+  if (scoreError) throw scoreError;
+  if (pageError) throw pageError;
+
+  const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
+  const userId = state.session.user.id;
+  let importedCount = 0;
+
+  for (const sharedScore of sharedScores || []) {
+    if (existingNames.has(normalizeText(sharedScore.name))) {
+      continue;
+    }
+
+    const now = new Date().toISOString();
+    const newScore = {
+      id: createId(),
+      userId,
+      name: sharedScore.name,
+      normalizedName: normalizeText(sharedScore.name),
+      folderId: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      syncStatus: SYNC_STATUS_PENDING,
+    };
+    const pageRows = (sharedPages || []).filter((page) => page.score_id === sharedScore.id);
+    const newPages = [];
+
+    for (const [index, pageRow] of pageRows.entries()) {
+      const { data: blob, error } = await getStorageBucket().download(pageRow.storage_path);
+      if (error) {
+        throw error;
+      }
+      const newPageId = createId();
+      const storagePath = createStoragePath(userId, newScore.id, newPageId, pageRow.type);
+      const { error: uploadError } = await getStorageBucket().upload(storagePath, blob, {
+        upsert: true,
+        contentType: pageRow.type || blob.type || "image/jpeg",
+      });
+      if (uploadError) {
+        throw uploadError;
+      }
+      newPages.push({
+        id: newPageId,
+        scoreId: newScore.id,
+        userId,
+        pageIndex: index,
+        name: pageRow.name || `第 ${index + 1} 页`,
+        type: pageRow.type || blob.type || "image/jpeg",
+        size: Number(pageRow.size) || blob.size,
+        blob,
+        storagePath,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+        syncStatus: SYNC_STATUS_PENDING,
+      });
+    }
+
+    if (!newPages.length) {
+      continue;
+    }
+
+    await putScoreWithPages(newScore, newPages);
+    await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(newScore)]);
+    await upsertCloud(CLOUD_TABLES.pages, newPages.map((page) => toCloudPage({ ...page, syncStatus: SYNC_STATUS_SYNCED })));
+    existingNames.add(newScore.normalizedName);
+    importedCount += 1;
+  }
+
+  await syncNow();
+  return importedCount;
+}
+
+function createShareCodeValue() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(8);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
 }
 
 function resetForm(showMessage = true) {
@@ -1306,6 +2347,9 @@ async function deleteScore(id) {
   }
 
   try {
+    if (state.cloudReady && state.session && score.userId === state.session.user.id) {
+      await deleteCloudScore(score);
+    }
     await deleteScoreRecord(id);
     revokeScoreUrls(score);
     state.scores = state.scores.filter((item) => item.id !== id);
@@ -1316,6 +2360,22 @@ async function deleteScore(id) {
     console.error(error);
     setStatus("删除失败，请稍后再试。", true);
   }
+}
+
+async function deleteCloudScore(score) {
+  const pageIds = (score.pages || []).map((page) => page.id);
+  const paths = (score.pages || []).map((page) => page.storagePath).filter(Boolean);
+
+  if (paths.length) {
+    const { error } = await getStorageBucket().remove(paths);
+    if (error) throw error;
+  }
+  if (pageIds.length) {
+    const { error } = await state.supabase.from(CLOUD_TABLES.pages).delete().in("id", pageIds);
+    if (error) throw error;
+  }
+  const { error } = await state.supabase.from(CLOUD_TABLES.scores).delete().eq("id", score.id);
+  if (error) throw error;
 }
 
 function requestDeleteConfirmation(score) {
@@ -1458,7 +2518,18 @@ function createId() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {
     return window.crypto.randomUUID();
   }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const bytes = new Uint8Array(16);
+  if (window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function formatBackupDate(date) {
