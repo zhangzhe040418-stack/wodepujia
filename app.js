@@ -127,6 +127,7 @@ function bindElements() {
   elements.importShareSubmitButton = document.querySelector("#importShareSubmitButton");
   elements.installAppButton = document.querySelector("#installAppButton");
   elements.addScoreButton = document.querySelector("#addScoreButton");
+  elements.addScoreButtonArt = document.querySelector(".fab-art");
   elements.addChoiceDialog = document.querySelector("#addChoiceDialog");
   elements.chooseFolderButton = document.querySelector("#chooseFolderButton");
   elements.chooseScoreButton = document.querySelector("#chooseScoreButton");
@@ -210,6 +211,18 @@ function bindEvents() {
   elements.importShareForm.addEventListener("submit", importSharedScores);
   elements.installAppButton.addEventListener("click", installApp);
   elements.addScoreButton.addEventListener("click", handleAddButtonClick);
+  if (elements.addScoreButtonArt) {
+    if (elements.addScoreButtonArt.complete && elements.addScoreButtonArt.naturalWidth > 0) {
+      elements.addScoreButton.classList.add("fab-image-ready");
+    } else {
+      elements.addScoreButtonArt.addEventListener("load", () => {
+        elements.addScoreButton.classList.add("fab-image-ready");
+      });
+      elements.addScoreButtonArt.addEventListener("error", () => {
+        elements.addScoreButton.classList.remove("fab-image-ready");
+      });
+    }
+  }
   elements.folderBackButton.addEventListener("click", openRootFolder);
   elements.chooseScoreButton.addEventListener("click", () => {
     closeAddChoiceDialog();
@@ -483,10 +496,21 @@ function loadScript(src) {
     }
 
     const script = document.createElement("script");
+    const timeout = window.setTimeout(() => {
+      script.remove();
+      reject(new Error(`${src} 加载超时`));
+    }, 12000);
+
     script.src = src;
     script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`${src} 加载失败`));
+    script.onload = () => {
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    script.onerror = () => {
+      window.clearTimeout(timeout);
+      reject(new Error(`${src} 加载失败`));
+    };
     document.head.append(script);
   });
 }
@@ -621,6 +645,7 @@ function updateAccountUi() {
   elements.importShareButton.disabled = !state.cloudReady || !state.session;
 
   if (elements.authState) {
+    elements.authState.style.color = "var(--muted)";
     if (state.cloudReady) {
       elements.authState.textContent = email ? `当前账号：${email}` : "登录后可以跨设备同步歌谱。";
     } else if (state.cloudInitializing) {
@@ -633,6 +658,15 @@ function updateAccountUi() {
   if (elements.signOutButton) {
     elements.signOutButton.hidden = !email;
   }
+}
+
+function setAuthStatus(message, isError = false) {
+  if (!elements.authState) {
+    return;
+  }
+
+  elements.authState.textContent = message;
+  elements.authState.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
 
 function requireCloudSession() {
@@ -678,13 +712,19 @@ function closeAuthDialog() {
 
 async function signInWithPassword(event) {
   event.preventDefault();
+  setAuthStatus("正在连接 CloudBase，请稍候...");
+  elements.signInButton.disabled = true;
+  elements.signUpButton.disabled = true;
+
   if (!(await ensureCloudReady())) {
+    elements.signInButton.disabled = false;
+    elements.signUpButton.disabled = false;
     updateAccountUi();
     return;
   }
 
-  elements.signInButton.disabled = true;
   try {
+    setAuthStatus("正在登录...");
     const account = elements.authEmail.value.trim();
     const loginState = await signInCloudWithPassword(account, elements.authPassword.value);
     state.session = await createCloudSession(loginState, account);
@@ -697,26 +737,33 @@ async function signInWithPassword(event) {
     await syncNow({ manual: true });
   } catch (error) {
     console.error(error);
+    setAuthStatus(error.message || "登录失败，请检查账号密码。", true);
     setStatus(error.message || "登录失败，请检查账号密码。", true);
   } finally {
     elements.signInButton.disabled = false;
-    updateAccountUi();
+    elements.signUpButton.disabled = false;
   }
 }
 
 async function signUpWithPassword() {
+  setAuthStatus("正在连接 CloudBase，请稍候...");
+  elements.signInButton.disabled = true;
+  elements.signUpButton.disabled = true;
+
   if (!(await ensureCloudReady())) {
+    elements.signInButton.disabled = false;
+    elements.signUpButton.disabled = false;
     updateAccountUi();
     return;
   }
 
-  elements.signUpButton.disabled = true;
   try {
     const account = elements.authEmail.value.trim();
     if (!isEmailAddress(account)) {
       throw new Error("注册时请填写邮箱地址；注册成功后可以用这个邮箱作为账号登录。");
     }
 
+    setAuthStatus("正在发送邮箱验证码...");
     const signUpResult = await signUpCloudWithEmail(account, elements.authPassword.value);
     const verifyOtp = signUpResult?.data?.verifyOtp;
     if (typeof verifyOtp === "function") {
@@ -724,10 +771,12 @@ async function signUpWithPassword() {
       if (!code) {
         throw new Error("已取消邮箱验证。");
       }
+      setAuthStatus("正在验证邮箱...");
       const verifyResult = await verifyOtp({ token: code });
       throwCloudResultError(verifyResult);
     }
 
+    setAuthStatus("注册成功，正在登录...");
     const loginState = await signInCloudWithPassword(account, elements.authPassword.value);
     state.session = await createCloudSession(loginState, account);
     if (!state.session) {
@@ -739,10 +788,11 @@ async function signUpWithPassword() {
     await syncNow({ manual: true });
   } catch (error) {
     console.error(error);
+    setAuthStatus(error.message || "注册失败，请稍后再试。", true);
     setStatus(error.message || "注册失败，请稍后再试。", true);
   } finally {
+    elements.signInButton.disabled = false;
     elements.signUpButton.disabled = false;
-    updateAccountUi();
   }
 }
 
@@ -751,13 +801,16 @@ async function ensureCloudReady() {
     return true;
   }
 
+  setAuthStatus("正在连接 CloudBase，请稍候...");
   setStatus("正在连接 CloudBase...");
   const ready = await initializeCloud();
   if (!ready) {
+    setAuthStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
     setStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
     return false;
   }
 
+  setAuthStatus("CloudBase 已连接，可以登录或注册。");
   setStatus("");
   return true;
 }
