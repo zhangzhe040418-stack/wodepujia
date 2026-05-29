@@ -49,6 +49,11 @@ const state = {
   addScreenOpen: false,
   activeTab: "library",
   currentFolderId: null,
+  authMode: "guest",
+  authRegisterMethod: "phone",
+  authRegisterAccount: "",
+  authRegisterCode: "",
+  authRegisterVerifyOtp: null,
   appTouchY: 0,
   deleteDialogResolve: null,
   verifyDialogResolve: null,
@@ -109,6 +114,14 @@ function bindElements() {
   elements.accountButtonText = document.querySelector("#accountButtonText");
   elements.authDialog = document.querySelector("#authDialog");
   elements.authForm = document.querySelector("#authForm");
+  elements.authDialogTitle = document.querySelector("#authDialogTitle");
+  elements.authBackButton = document.querySelector("#authBackButton");
+  elements.authLoggedInPane = document.querySelector("#authLoggedInPane");
+  elements.authGuestPane = document.querySelector("#authGuestPane");
+  elements.authLoginPane = document.querySelector("#authLoginPane");
+  elements.authRegisterChoicePane = document.querySelector("#authRegisterChoicePane");
+  elements.authRegisterCodePane = document.querySelector("#authRegisterCodePane");
+  elements.authRegisterPasswordPane = document.querySelector("#authRegisterPasswordPane");
   elements.authEmail = document.querySelector("#authEmail");
   elements.authPassword = document.querySelector("#authPassword");
   elements.authState = document.querySelector("#authState");
@@ -116,6 +129,17 @@ function bindElements() {
   elements.signOutButton = document.querySelector("#signOutButton");
   elements.signUpButton = document.querySelector("#signUpButton");
   elements.signInButton = document.querySelector("#signInButton");
+  elements.loginChoiceButton = document.querySelector("#loginChoiceButton");
+  elements.registerPhoneOption = document.querySelector("#registerPhoneOption");
+  elements.registerEmailOption = document.querySelector("#registerEmailOption");
+  elements.registerContactLabel = document.querySelector("#registerContactLabel");
+  elements.registerContactInput = document.querySelector("#registerContactInput");
+  elements.sendRegisterCodeButton = document.querySelector("#sendRegisterCodeButton");
+  elements.registerCodeInput = document.querySelector("#registerCodeInput");
+  elements.nextRegisterPasswordButton = document.querySelector("#nextRegisterPasswordButton");
+  elements.registerPassword = document.querySelector("#registerPassword");
+  elements.registerPasswordConfirm = document.querySelector("#registerPasswordConfirm");
+  elements.completeRegisterButton = document.querySelector("#completeRegisterButton");
   elements.verifyDialog = document.querySelector("#verifyDialog");
   elements.verifyForm = document.querySelector("#verifyForm");
   elements.verifyState = document.querySelector("#verifyState");
@@ -196,7 +220,14 @@ function bindEvents() {
   elements.accountButton?.addEventListener("click", openAuthDialog);
   elements.closeAuthButton.addEventListener("click", closeAuthDialog);
   elements.authForm.addEventListener("submit", signInWithPassword);
-  elements.signUpButton.addEventListener("click", signUpWithPassword);
+  elements.authBackButton?.addEventListener("click", goBackInAuthDialog);
+  elements.signUpButton.addEventListener("click", () => setAuthMode("registerChoice"));
+  elements.loginChoiceButton?.addEventListener("click", () => setAuthMode("login"));
+  elements.registerPhoneOption?.addEventListener("click", () => beginRegisterWithCode("phone"));
+  elements.registerEmailOption?.addEventListener("click", () => beginRegisterWithCode("email"));
+  elements.sendRegisterCodeButton?.addEventListener("click", sendRegisterCode);
+  elements.nextRegisterPasswordButton?.addEventListener("click", continueToRegisterPassword);
+  elements.completeRegisterButton?.addEventListener("click", completeRegisterWithPassword);
   elements.signOutButton.addEventListener("click", signOut);
   elements.verifyForm?.addEventListener("submit", submitVerificationCode);
   elements.cancelVerifyButton?.addEventListener("click", () => closeVerifyDialog(""));
@@ -687,8 +718,8 @@ function extractCloudUser(source) {
 }
 
 function updateAccountUi() {
-  const email = state.session?.user?.email;
-  const accountButtonText = email ? "已登录" : state.cloudInitializing ? "连接中" : "登录";
+  const accountLabel = getCurrentAccountLabel();
+  const accountButtonText = accountLabel ? "已登录" : state.cloudInitializing ? "连接中" : "登录";
   if (elements.accountButtonText) {
     elements.accountButtonText.textContent = accountButtonText;
   }
@@ -696,21 +727,10 @@ function updateAccountUi() {
   elements.shareScoresButton.disabled = !state.cloudReady || !state.session;
   elements.importShareButton.disabled = !state.cloudReady || !state.session;
 
-  if (elements.authState) {
-    elements.authState.style.color = "var(--muted)";
-    if (state.cloudReady) {
-      elements.authState.textContent = email ? `当前账号：${email}` : "登录后可以跨设备同步歌谱。";
-    } else if (state.cloudInitializing) {
-      elements.authState.textContent = "正在连接 CloudBase，请稍候...";
-    } else {
-      elements.authState.textContent = state.cloudError || "登录后可以跨设备同步歌谱。";
-    }
-  }
-
   if (elements.myAuthState) {
     elements.myAuthState.style.color = "var(--muted)";
     if (state.cloudReady) {
-      elements.myAuthState.textContent = email ? `当前账号：${email}` : "登录后可以跨设备同步歌谱。";
+      elements.myAuthState.textContent = accountLabel ? `当前账号：${accountLabel}` : "登录后可以跨设备同步歌谱。";
     } else if (state.cloudInitializing) {
       elements.myAuthState.textContent = "正在连接 CloudBase，请稍候...";
     } else {
@@ -720,16 +740,22 @@ function updateAccountUi() {
   }
 
   if (elements.myAuthButtonText) {
-    elements.myAuthButtonText.textContent = email ? "账号管理" : state.cloudInitializing ? "连接中" : "登录 / 注册";
+    elements.myAuthButtonText.textContent = accountLabel ? "账号管理" : state.cloudInitializing ? "连接中" : "登录 / 注册";
   }
 
   if (elements.myAuthButton) {
     elements.myAuthButton.disabled = Boolean(state.cloudInitializing);
   }
 
-  if (elements.signOutButton) {
-    elements.signOutButton.hidden = !email;
+  if (elements.authDialog?.open && accountLabel && state.authMode !== "loggedIn") {
+    setAuthMode("loggedIn");
+  } else {
+    renderAuthMode();
   }
+}
+
+function getCurrentAccountLabel() {
+  return state.session?.user?.email || "";
 }
 
 function setAuthStatus(message, isError = false) {
@@ -739,6 +765,88 @@ function setAuthStatus(message, isError = false) {
 
   elements.authState.textContent = message;
   elements.authState.style.color = isError ? "var(--danger)" : "var(--muted)";
+}
+
+function getDefaultAuthMessage() {
+  const accountLabel = getCurrentAccountLabel();
+  if (accountLabel) {
+    return `当前账号：${accountLabel}`;
+  }
+  if (state.cloudInitializing) {
+    return "正在连接 CloudBase，请稍候...";
+  }
+  if (!state.cloudReady && state.cloudError) {
+    return state.cloudError;
+  }
+  return "登录后可以跨设备同步歌谱。";
+}
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  renderAuthMode();
+  refreshIcons();
+}
+
+function renderAuthMode() {
+  if (!elements.authDialog) {
+    return;
+  }
+
+  const accountLabel = getCurrentAccountLabel();
+  const mode = accountLabel ? state.authMode : state.authMode === "loggedIn" ? "guest" : state.authMode;
+  const titles = {
+    loggedIn: "账号管理",
+    guest: "账号管理",
+    login: "账号登录",
+    registerChoice: "账号注册",
+    registerCode: state.authRegisterMethod === "phone" ? "手机验证码注册" : "邮箱验证码注册",
+    registerPassword: "设置密码",
+  };
+  const panes = {
+    loggedIn: elements.authLoggedInPane,
+    guest: elements.authGuestPane,
+    login: elements.authLoginPane,
+    registerChoice: elements.authRegisterChoicePane,
+    registerCode: elements.authRegisterCodePane,
+    registerPassword: elements.authRegisterPasswordPane,
+  };
+
+  Object.values(panes).forEach((pane) => {
+    if (pane) {
+      pane.hidden = true;
+    }
+  });
+
+  const visiblePane = panes[mode] || panes.guest;
+  if (visiblePane) {
+    visiblePane.hidden = false;
+  }
+
+  if (elements.authDialogTitle) {
+    elements.authDialogTitle.textContent = titles[mode] || "账号管理";
+  }
+
+  if (elements.authBackButton) {
+    elements.authBackButton.hidden = mode === "guest" || mode === "loggedIn";
+  }
+
+  if (elements.registerContactLabel) {
+    elements.registerContactLabel.textContent =
+      state.authRegisterMethod === "phone" ? "手机号" : "邮箱";
+  }
+  if (elements.registerContactInput) {
+    elements.registerContactInput.type = state.authRegisterMethod === "phone" ? "tel" : "email";
+    elements.registerContactInput.inputMode = state.authRegisterMethod === "phone" ? "tel" : "email";
+    elements.registerContactInput.autocomplete = state.authRegisterMethod === "phone" ? "tel" : "email";
+    elements.registerContactInput.placeholder =
+      state.authRegisterMethod === "phone" ? "请输入手机号" : "请输入邮箱";
+  }
+
+  if (elements.signOutButton) {
+    elements.signOutButton.hidden = !accountLabel;
+  }
+
+  setAuthStatus(getDefaultAuthMessage(), Boolean(!state.cloudReady && state.cloudError));
 }
 
 function requireCloudSession() {
@@ -758,7 +866,7 @@ function requireCloudSession() {
 }
 
 async function openAuthDialog() {
-  updateAccountUi();
+  setAuthMode(state.session ? "loggedIn" : "guest");
   if (typeof elements.authDialog.showModal === "function") {
     elements.authDialog.showModal();
   } else {
@@ -782,22 +890,54 @@ function closeAuthDialog() {
   }
 }
 
+function goBackInAuthDialog() {
+  if (state.authMode === "registerPassword") {
+    setAuthMode("registerCode");
+    return;
+  }
+  if (state.authMode === "registerCode") {
+    setAuthMode("registerChoice");
+    return;
+  }
+  setAuthMode("guest");
+}
+
+function beginRegisterWithCode(method) {
+  state.authRegisterMethod = method;
+  state.authRegisterAccount = "";
+  state.authRegisterCode = "";
+  state.authRegisterVerifyOtp = null;
+  elements.registerContactInput.value = "";
+  elements.registerCodeInput.value = "";
+  elements.registerPassword.value = "";
+  elements.registerPasswordConfirm.value = "";
+  setAuthMode("registerCode");
+  requestAnimationFrame(() => elements.registerContactInput.focus());
+}
+
 async function signInWithPassword(event) {
   event.preventDefault();
+  if (state.authMode !== "login") {
+    return;
+  }
+
+  const account = elements.authEmail.value.trim();
+  if (!account || !elements.authPassword.value) {
+    setAuthStatus("请填写手机号或邮箱和密码。", true);
+    return;
+  }
+
   setAuthStatus("正在连接 CloudBase，请稍候...");
   elements.signInButton.disabled = true;
-  elements.signUpButton.disabled = true;
 
   if (!(await ensureCloudReady())) {
     elements.signInButton.disabled = false;
-    elements.signUpButton.disabled = false;
     updateAccountUi();
     return;
   }
 
   try {
     setAuthStatus("正在登录...");
-    const account = elements.authEmail.value.trim();
     const loginState = await signInCloudWithPassword(account, elements.authPassword.value);
     state.session = await createCloudSession(loginState, account);
     if (!state.session) {
@@ -809,62 +949,129 @@ async function signInWithPassword(event) {
     await syncNow({ manual: true });
   } catch (error) {
     console.error(error);
-    setAuthStatus(error.message || "登录失败，请检查账号密码。", true);
-    setStatus(error.message || "登录失败，请检查账号密码。", true);
+    const message = getErrorMessage(error) || "登录失败，请检查账号密码。";
+    setAuthStatus(message, true);
+    setStatus(message, true);
   } finally {
     elements.signInButton.disabled = false;
-    elements.signUpButton.disabled = false;
   }
 }
 
-async function signUpWithPassword() {
-  setAuthStatus("正在连接 CloudBase，请稍候...");
-  elements.signInButton.disabled = true;
-  elements.signUpButton.disabled = true;
+async function sendRegisterCode() {
+  const account = elements.registerContactInput.value.trim();
+  if (state.authRegisterMethod === "phone" && !isValidPhoneNumber(account)) {
+    setAuthStatus("请输入正确的手机号。", true);
+    return;
+  }
+  if (state.authRegisterMethod === "email" && !isEmailAddress(account)) {
+    setAuthStatus("请输入正确的邮箱。", true);
+    return;
+  }
+
+  elements.sendRegisterCodeButton.disabled = true;
+  setAuthStatus("正在发送验证码...");
 
   if (!(await ensureCloudReady())) {
-    elements.signInButton.disabled = false;
-    elements.signUpButton.disabled = false;
-    updateAccountUi();
+    elements.sendRegisterCodeButton.disabled = false;
     return;
   }
 
   try {
-    const account = elements.authEmail.value.trim();
-    if (!isEmailAddress(account)) {
-      throw new Error("注册时请填写邮箱地址；注册成功后可以用这个邮箱作为账号登录。");
-    }
+    state.authRegisterAccount =
+      state.authRegisterMethod === "phone" ? normalizePhoneNumber(account) : account;
+    state.authRegisterVerifyOtp = null;
 
-    setAuthStatus("正在发送邮箱验证码...");
-    const signUpResult = await signUpCloudWithEmail(account, elements.authPassword.value);
-    const verifyOtp = signUpResult?.data?.verifyOtp;
-    if (typeof verifyOtp === "function") {
-      const code = await requestVerificationCode(account);
-      if (!code) {
-        throw new Error("已取消邮箱验证。");
+    if (state.authRegisterMethod === "phone") {
+      if (typeof state.cloudAuth.sendPhoneCode !== "function") {
+        throw new Error("当前 CloudBase SDK 不支持手机验证码注册。");
       }
-      setAuthStatus("正在验证邮箱...");
-      const verifyResult = await verifyOtp({ token: code });
-      throwCloudResultError(verifyResult);
+      const result = await state.cloudAuth.sendPhoneCode(state.authRegisterAccount);
+      throwCloudResultError(result);
+    } else {
+      if (typeof state.cloudAuth.signUp !== "function") {
+        throw new Error("当前 CloudBase SDK 不支持邮箱验证码注册。");
+      }
+      const result = await state.cloudAuth.signUp({ email: state.authRegisterAccount });
+      throwCloudResultError(result);
+      state.authRegisterVerifyOtp = result?.data?.verifyOtp || null;
     }
 
-    setAuthStatus("注册成功，正在登录...");
-    const loginState = await signInCloudWithPassword(account, elements.authPassword.value);
-    state.session = await createCloudSession(loginState, account);
+    setAuthStatus(`验证码已发送至 ${state.authRegisterAccount}。`);
+    requestAnimationFrame(() => elements.registerCodeInput.focus());
+  } catch (error) {
+    console.error(error);
+    const message = getErrorMessage(error) || "验证码发送失败，请稍后再试。";
+    setAuthStatus(message, true);
+    setStatus(message, true);
+  } finally {
+    elements.sendRegisterCodeButton.disabled = false;
+  }
+}
+
+function continueToRegisterPassword() {
+  const account = elements.registerContactInput.value.trim();
+  const normalizedAccount = state.authRegisterMethod === "phone" ? normalizePhoneNumber(account) : account;
+  const code = elements.registerCodeInput.value.trim();
+
+  if (!state.authRegisterAccount || state.authRegisterAccount !== normalizedAccount) {
+    setAuthStatus("请先发送验证码。", true);
+    return;
+  }
+  if (!code) {
+    setAuthStatus("请输入验证码。", true);
+    return;
+  }
+
+  state.authRegisterCode = code;
+  setAuthMode("registerPassword");
+  requestAnimationFrame(() => elements.registerPassword.focus());
+}
+
+async function completeRegisterWithPassword() {
+  const password = elements.registerPassword.value;
+  const confirmPassword = elements.registerPasswordConfirm.value;
+  if (password.length < 6) {
+    setAuthStatus("密码至少需要 6 位。", true);
+    return;
+  }
+  if (password !== confirmPassword) {
+    setAuthStatus("两次输入的密码不一致。", true);
+    return;
+  }
+  if (!state.authRegisterAccount || !state.authRegisterCode) {
+    setAuthStatus("验证码已失效，请重新获取。", true);
+    setAuthMode("registerCode");
+    return;
+  }
+
+  elements.completeRegisterButton.disabled = true;
+  setAuthStatus("正在注册账号...");
+
+  if (!(await ensureCloudReady())) {
+    elements.completeRegisterButton.disabled = false;
+    return;
+  }
+
+  try {
+    const loginState =
+      state.authRegisterMethod === "phone"
+        ? await signUpCloudWithPhoneCode(state.authRegisterAccount, state.authRegisterCode, password)
+        : await signUpCloudWithEmailCode(state.authRegisterAccount, state.authRegisterCode, password);
+    state.session = await createCloudSession(loginState, state.authRegisterAccount);
     if (!state.session) {
       throw new Error("注册成功，但登录状态读取失败，请重新登录。");
     }
-    setStatus("注册成功，正在同步...");
     closeAuthDialog();
+    setStatus("注册成功，正在同步...");
     await claimLocalRecordsForUser(state.session.user.id);
     await syncNow({ manual: true });
   } catch (error) {
     console.error(error);
-    setAuthStatus(error.message || "注册失败，请稍后再试。", true);
-    setStatus(error.message || "注册失败，请稍后再试。", true);
+    const message = getErrorMessage(error) || "注册失败，请稍后再试。";
+    setAuthStatus(message, true);
+    setStatus(message, true);
   } finally {
-    elements.signInButton.disabled = false;
-    elements.signUpButton.disabled = false;
+    elements.completeRegisterButton.disabled = false;
   }
 }
 
@@ -874,13 +1081,13 @@ async function ensureCloudReady() {
   }
 
   setAuthStatus("正在连接 CloudBase，请稍候...");
-    setStatus("正在连接 CloudBase...");
-    const ready = await initializeCloud();
-    if (!ready) {
-      setAuthStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
-      setStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
-      return false;
-    }
+  setStatus("正在连接 CloudBase...");
+  const ready = await initializeCloud();
+  if (!ready) {
+    setAuthStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
+    setStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
+    return false;
+  }
 
   setAuthStatus("CloudBase 已连接，可以登录或注册。");
   setStatus("");
@@ -888,6 +1095,13 @@ async function ensureCloudReady() {
 }
 
 async function signInCloudWithPassword(account, password) {
+  if (isLikelyPhoneNumber(account) && typeof state.cloudAuth.signInWithPhoneCodeOrPassword === "function") {
+    return state.cloudAuth.signInWithPhoneCodeOrPassword({
+      phoneNumber: normalizePhoneNumber(account),
+      password,
+    });
+  }
+
   if (typeof state.cloudAuth.signIn === "function") {
     return state.cloudAuth.signIn({ username: account, password });
   }
@@ -897,6 +1111,38 @@ async function signInCloudWithPassword(account, password) {
   }
 
   return state.cloudAuth.signInWithEmailAndPassword(account, password);
+}
+
+async function signUpCloudWithPhoneCode(phoneNumber, phoneCode, password) {
+  if (typeof state.cloudAuth.signUpWithPhoneCode === "function") {
+    return state.cloudAuth.signUpWithPhoneCode(phoneNumber, phoneCode, password);
+  }
+
+  if (typeof state.cloudAuth.signUp === "function") {
+    const result = await state.cloudAuth.signUp({
+      phone_number: phoneNumber,
+      verification_code: phoneCode,
+      password,
+    });
+    throwCloudResultError(result);
+    return result;
+  }
+
+  throw new Error("当前 CloudBase SDK 不支持手机验证码注册。");
+}
+
+async function signUpCloudWithEmailCode(email, emailCode, password) {
+  if (typeof state.cloudAuth.signUp !== "function") {
+    throw new Error("当前 CloudBase SDK 不支持邮箱验证码注册。");
+  }
+
+  const result = await state.cloudAuth.signUp({
+    email,
+    verification_code: emailCode,
+    password,
+  });
+  throwCloudResultError(result);
+  return result;
 }
 
 async function signUpCloudWithEmail(email, password) {
@@ -932,6 +1178,19 @@ function getErrorMessage(error) {
 
 function isEmailAddress(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function normalizePhoneNumber(value) {
+  return String(value || "").replace(/[\s-]/g, "");
+}
+
+function isLikelyPhoneNumber(value) {
+  const normalized = normalizePhoneNumber(value);
+  return /^(\+?86)?1[3-9]\d{9}$/.test(normalized);
+}
+
+function isValidPhoneNumber(value) {
+  return isLikelyPhoneNumber(value);
 }
 
 function requestVerificationCode(account) {
@@ -992,9 +1251,14 @@ async function signOut() {
     return;
   }
 
+  const keepAuthDialogOpen = Boolean(elements.authDialog?.open);
   await state.cloudAuth.signOut();
   state.session = null;
-  closeAuthDialog();
+  if (keepAuthDialogOpen) {
+    setAuthMode("guest");
+  } else {
+    closeAuthDialog();
+  }
   await loadScores();
   setStatus("已退出登录。");
   updateAccountUi();
@@ -1048,7 +1312,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=36");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=37");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);

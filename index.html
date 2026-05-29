@@ -12,20 +12,20 @@
     <meta name="apple-mobile-web-app-title" content="我的谱夹" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>我的谱夹</title>
-    <link rel="manifest" href="manifest.webmanifest?v=36" />
-    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=36" />
-    <link rel="apple-touch-icon" href="icons/icon-192.png?v=36" />
-    <link rel="stylesheet" href="styles.css?v=36" />
-    <script defer charset="UTF-8" src="vendor/lucide.min.js?v=36"></script>
-    <script defer charset="UTF-8" src="cloudbase-config.js?v=36"></script>
-    <script defer charset="UTF-8" src="app.js?v=36"></script>
+    <link rel="manifest" href="manifest.webmanifest?v=37" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=37" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png?v=37" />
+    <link rel="stylesheet" href="styles.css?v=37" />
+    <script defer charset="UTF-8" src="vendor/lucide.min.js?v=37"></script>
+    <script defer charset="UTF-8" src="cloudbase-config.js?v=37"></script>
+    <script defer charset="UTF-8" src="app.js?v=37"></script>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-lockup">
           <span class="brand-mark" aria-hidden="true">
-            <img src="icons/icon-192.png?v=36" alt="" />
+            <img src="icons/icon-192.png?v=37" alt="" />
           </span>
           <div>
             <h1>我的谱夹</h1>
@@ -166,7 +166,7 @@
       </section>
 
       <button class="fab-button" id="addScoreButton" type="button" title="添加歌谱" aria-label="添加歌谱">
-        <img class="fab-art" src="assets/add-score-button.png?v=36" alt="" />
+        <img class="fab-art" src="assets/add-score-button.png?v=37" alt="" />
         <span class="fab-fallback">添加歌谱</span>
       </button>
 
@@ -185,27 +185,75 @@
     <dialog class="auth-dialog" id="authDialog" aria-labelledby="authDialogTitle">
       <form class="auth-surface" id="authForm">
         <div class="auth-head">
+          <button class="icon-button auth-back-button" id="authBackButton" type="button" title="返回" aria-label="返回" hidden>
+            <i data-lucide="arrow-left" aria-hidden="true"></i>
+          </button>
           <h2 id="authDialogTitle">账号登录</h2>
           <button class="icon-button" id="closeAuthButton" type="button" title="关闭" aria-label="关闭">
             <i data-lucide="x" aria-hidden="true"></i>
           </button>
         </div>
         <p class="auth-state" id="authState">登录后可以跨设备同步歌谱。</p>
-        <label class="field">
-          <span>账号或邮箱</span>
-          <input id="authEmail" name="account" type="text" autocomplete="username" placeholder="请输入账号或邮箱" required />
-        </label>
-        <label class="field">
-          <span>密码</span>
-          <input id="authPassword" name="password" type="password" autocomplete="current-password" minlength="6" required />
-        </label>
-        <div class="auth-actions">
-          <button class="cancel-delete-button" id="signOutButton" type="button" hidden>退出登录</button>
-          <button class="cancel-delete-button" id="signUpButton" type="button">注册</button>
-          <button class="confirm-delete-button folder-save-button" id="signInButton" type="submit">
+
+        <div class="auth-pane" id="authLoggedInPane" hidden>
+          <button class="confirm-delete-button signout-only-button" id="signOutButton" type="button">退出登录</button>
+        </div>
+
+        <div class="auth-pane auth-entry-pane" id="authGuestPane">
+          <div class="auth-register-hint">还没有账号？点击去注册</div>
+          <button class="confirm-delete-button folder-save-button" id="signUpButton" type="button">注册</button>
+          <button class="cancel-delete-button" id="loginChoiceButton" type="button">登录</button>
+        </div>
+
+        <div class="auth-pane" id="authLoginPane" hidden>
+          <label class="field">
+            <span>手机号或邮箱</span>
+            <input id="authEmail" name="account" type="text" autocomplete="username" placeholder="请输入手机号或邮箱" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="authPassword" name="password" type="password" autocomplete="current-password" minlength="6" placeholder="请输入密码" />
+          </label>
+          <button class="confirm-delete-button folder-save-button auth-wide-button" id="signInButton" type="submit">
             <i data-lucide="log-in" aria-hidden="true"></i>
             <span>登录</span>
           </button>
+        </div>
+
+        <div class="auth-pane auth-choice-pane" id="authRegisterChoicePane" hidden>
+          <button class="choice-button" id="registerPhoneOption" type="button">
+            <i data-lucide="smartphone" aria-hidden="true"></i>
+            <span>手机验证码注册</span>
+          </button>
+          <button class="choice-button" id="registerEmailOption" type="button">
+            <i data-lucide="mail" aria-hidden="true"></i>
+            <span>邮箱验证码注册</span>
+          </button>
+        </div>
+
+        <div class="auth-pane" id="authRegisterCodePane" hidden>
+          <label class="field">
+            <span id="registerContactLabel">手机号</span>
+            <input id="registerContactInput" type="tel" autocomplete="tel" placeholder="请输入手机号" />
+          </label>
+          <button class="cancel-delete-button auth-wide-button" id="sendRegisterCodeButton" type="button">发送验证码</button>
+          <label class="field">
+            <span>验证码</span>
+            <input id="registerCodeInput" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="请输入验证码" />
+          </label>
+          <button class="confirm-delete-button folder-save-button auth-wide-button" id="nextRegisterPasswordButton" type="button">下一步</button>
+        </div>
+
+        <div class="auth-pane" id="authRegisterPasswordPane" hidden>
+          <label class="field">
+            <span>设置密码</span>
+            <input id="registerPassword" type="password" autocomplete="new-password" minlength="6" placeholder="请输入密码" />
+          </label>
+          <label class="field">
+            <span>再次输入密码</span>
+            <input id="registerPasswordConfirm" type="password" autocomplete="new-password" minlength="6" placeholder="请再次输入密码" />
+          </label>
+          <button class="confirm-delete-button folder-save-button auth-wide-button" id="completeRegisterButton" type="button">完成注册</button>
         </div>
       </form>
     </dialog>

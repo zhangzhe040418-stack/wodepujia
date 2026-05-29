@@ -643,9 +643,7 @@ body.add-screen-open .bottom-nav {
   padding: 0;
   border-radius: 999px;
   overflow: hidden;
-  background:
-    url("assets/add-score-button.png") center / contain no-repeat,
-    linear-gradient(180deg, #8f1023, #600915);
+  background: transparent;
   color: #fce8ae;
   box-shadow: 0 8px 18px rgba(66, 9, 18, 0.24);
 }
@@ -653,13 +651,15 @@ body.add-screen-open .bottom-nav {
 .fab-button::before {
   content: "";
   position: absolute;
-  top: 17%;
-  right: 8%;
-  bottom: 17%;
-  left: 50%;
+  top: 5%;
+  right: 3%;
+  bottom: 5%;
+  left: 40%;
   z-index: 1;
   border-radius: 999px;
-  background: linear-gradient(180deg, #9d1026, #690915);
+  background:
+    radial-gradient(circle at 20% 42%, rgba(247, 174, 43, 0.16), transparent 28%),
+    linear-gradient(180deg, #9d1026 0%, #850e21 50%, #650915 100%);
   pointer-events: none;
 }
 
@@ -677,9 +677,7 @@ body.add-screen-open .bottom-nav {
   line-height: 1;
   letter-spacing: 0;
   text-align: center;
-  text-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.32),
-    0 2px 4px rgba(37, 7, 0, 0.56);
+  text-shadow: none;
   pointer-events: none;
 }
 
@@ -709,7 +707,7 @@ body.add-screen-open .bottom-nav {
   position: absolute;
   inset: 0;
   z-index: 3;
-  display: grid;
+  display: none;
   place-items: center;
   padding-left: 42%;
   font-size: 1.15rem;
@@ -801,6 +799,49 @@ body.add-screen-open .bottom-nav {
   color: var(--muted);
   font-size: 0.9rem;
   line-height: 1.45;
+}
+
+.auth-pane {
+  display: grid;
+  gap: 12px;
+}
+
+.auth-pane[hidden] {
+  display: none;
+}
+
+.auth-entry-pane {
+  padding-top: 2px;
+}
+
+.auth-register-hint {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.auth-pane .field {
+  margin: 0;
+}
+
+.auth-wide-button,
+.signout-only-button {
+  width: 100%;
+}
+
+.signout-only-button {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.signout-only-button:hover,
+.signout-only-button:focus-visible {
+  background: #8f1d14;
+}
+
+.auth-choice-pane .choice-button {
+  width: 100%;
 }
 
 .auth-actions {
