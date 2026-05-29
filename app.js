@@ -60,6 +60,9 @@ function bindElements() {
   elements.scoreGrid = document.querySelector("#scoreGrid");
   elements.searchInput = document.querySelector("#searchInput");
   elements.clearSearchButton = document.querySelector("#clearSearchButton");
+  elements.exportDataButton = document.querySelector("#exportDataButton");
+  elements.importDataButton = document.querySelector("#importDataButton");
+  elements.backupInput = document.querySelector("#backupInput");
   elements.installAppButton = document.querySelector("#installAppButton");
   elements.addScoreButton = document.querySelector("#addScoreButton");
   elements.addChoiceDialog = document.querySelector("#addChoiceDialog");
@@ -109,6 +112,9 @@ function bindEvents() {
     renderScores();
     elements.searchInput.blur();
   });
+  elements.exportDataButton.addEventListener("click", exportBackup);
+  elements.importDataButton.addEventListener("click", openBackupPicker);
+  elements.backupInput.addEventListener("change", importBackupFile);
   elements.installAppButton.addEventListener("click", installApp);
   elements.addScoreButton.addEventListener("click", handleAddButtonClick);
   elements.folderBackButton.addEventListener("click", openRootFolder);
@@ -613,6 +619,11 @@ function openFilePicker(input) {
   input.click();
 }
 
+function openBackupPicker() {
+  elements.backupInput.value = "";
+  elements.backupInput.click();
+}
+
 async function loadScores() {
   const [scores, folders] = await Promise.all([getAllScores(), getAllFolders()]);
   state.scores = scores;
@@ -701,6 +712,21 @@ function putFolder(folder) {
     const request = transaction.objectStore(FOLDER_STORE_NAME).put(folder);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+  });
+}
+
+function putImportedRecords(folders, scores) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME], "readwrite");
+    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
+    const scoreStore = transaction.objectStore(STORE_NAME);
+
+    folders.forEach((folder) => folderStore.put(folder));
+    scores.forEach((score) => scoreStore.put(score));
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
   });
 }
 
@@ -871,6 +897,141 @@ async function createFolder(event) {
     console.error(error);
     elements.saveFolderButton.disabled = false;
   }
+}
+
+async function exportBackup() {
+  elements.exportDataButton.disabled = true;
+
+  try {
+    const backup = {
+      app: DB_NAME,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      folders: state.folders.map((folder) => ({
+        id: folder.id,
+        name: folder.name,
+        normalizedName: folder.normalizedName,
+        createdAt: folder.createdAt,
+        updatedAt: folder.updatedAt,
+      })),
+      scores: await Promise.all(
+        state.scores.map(async (score) => ({
+          id: score.id,
+          name: score.name,
+          normalizedName: score.normalizedName,
+          folderId: score.folderId || null,
+          createdAt: score.createdAt,
+          updatedAt: score.updatedAt,
+          pages: await Promise.all(
+            score.pages.map(async (page, index) => ({
+              id: page.id || createId(),
+              name: page.name || `第 ${index + 1} 页`,
+              type: page.type || page.blob?.type || "image/jpeg",
+              size: page.size || page.blob?.size || 0,
+              dataUrl: await blobToDataUrl(page.blob),
+            })),
+          ),
+        })),
+      ),
+    };
+
+    downloadJsonBackup(backup);
+    setStatus("已导出备份文件。");
+  } catch (error) {
+    console.error(error);
+    setStatus("导出失败，请稍后再试。", true);
+  } finally {
+    elements.exportDataButton.disabled = false;
+  }
+}
+
+async function importBackupFile(event) {
+  const file = event.target.files?.[0];
+  if (!file) {
+    return;
+  }
+
+  elements.importDataButton.disabled = true;
+  setStatus("正在导入备份...");
+
+  try {
+    const backup = JSON.parse(await file.text());
+    const imported = await normalizeBackupData(backup);
+    await putImportedRecords(imported.folders, imported.scores);
+    revokeAllUrls();
+    elements.searchInput.value = "";
+    state.currentFolderId = null;
+    await loadScores();
+    setStatus(`已导入 ${imported.folders.length} 个文件夹、${imported.scores.length} 份歌谱。`);
+  } catch (error) {
+    console.error(error);
+    setStatus("导入失败，请确认选择的是我的谱夹备份文件。", true);
+  } finally {
+    elements.backupInput.value = "";
+    elements.importDataButton.disabled = false;
+  }
+}
+
+async function normalizeBackupData(backup) {
+  if (!backup || backup.app !== DB_NAME || !Array.isArray(backup.scores)) {
+    throw new Error("Invalid backup file.");
+  }
+
+  const now = new Date().toISOString();
+  const folders = Array.isArray(backup.folders)
+    ? backup.folders.map((folder) => normalizeImportedFolder(folder, now))
+    : [];
+  const knownFolderIds = new Set([...state.folders.map((folder) => folder.id), ...folders.map((folder) => folder.id)]);
+  const scores = await Promise.all(
+    backup.scores.map((score) => normalizeImportedScore(score, knownFolderIds, now)),
+  );
+
+  return {
+    folders,
+    scores: scores.filter((score) => score.pages.length),
+  };
+}
+
+function normalizeImportedFolder(folder, now) {
+  const name = String(folder?.name || "未命名文件夹").trim() || "未命名文件夹";
+
+  return {
+    id: String(folder?.id || createId()),
+    name,
+    normalizedName: normalizeText(folder?.normalizedName || name),
+    createdAt: folder?.createdAt || now,
+    updatedAt: folder?.updatedAt || folder?.createdAt || now,
+  };
+}
+
+async function normalizeImportedScore(score, knownFolderIds, now) {
+  const name = String(score?.name || "未命名歌谱").trim() || "未命名歌谱";
+  const folderId = score?.folderId && knownFolderIds.has(score.folderId) ? score.folderId : null;
+  const pages = Array.isArray(score?.pages) ? score.pages : [];
+
+  return {
+    id: String(score?.id || createId()),
+    name,
+    normalizedName: normalizeText(score?.normalizedName || name),
+    folderId,
+    createdAt: score?.createdAt || now,
+    updatedAt: score?.updatedAt || score?.createdAt || now,
+    pages: await Promise.all(
+      pages
+        .filter((page) => typeof page?.dataUrl === "string")
+        .map(async (page, index) => {
+          const blob = dataUrlToBlob(page.dataUrl);
+
+          return {
+            id: String(page.id || createId()),
+            name: page.name || `第 ${index + 1} 页`,
+            type: page.type || blob.type || "image/jpeg",
+            size: Number(page.size) || blob.size,
+            blob,
+          };
+        }),
+    ),
+  };
 }
 
 function resetForm(showMessage = true) {
@@ -1226,7 +1387,49 @@ function clearPendingUrls() {
 
 function revokeAllUrls() {
   state.scoreUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.scoreUrls.clear();
   clearPendingUrls();
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [header, content] = dataUrl.split(",");
+  const match = /^data:([^;]+);base64$/i.exec(header || "");
+
+  if (!match || !content) {
+    throw new Error("Invalid image data.");
+  }
+
+  const binary = atob(content);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([bytes], { type: match[1] });
+}
+
+function downloadJsonBackup(backup) {
+  const json = JSON.stringify(backup);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = `我的谱夹备份-${formatBackupDate(new Date())}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function createIcon(name) {
@@ -1256,6 +1459,18 @@ function createId() {
     return window.crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function formatBackupDate(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+  ].join("");
 }
 
 function formatBytes(bytes) {

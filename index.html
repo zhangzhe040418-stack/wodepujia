@@ -56,6 +56,15 @@
               </div>
               <p id="resultCount">0 份歌谱</p>
             </div>
+            <div class="library-actions" aria-label="数据备份">
+              <button class="icon-button" id="exportDataButton" type="button" title="导出备份" aria-label="导出备份">
+                <i data-lucide="download" aria-hidden="true"></i>
+              </button>
+              <button class="icon-button" id="importDataButton" type="button" title="导入备份" aria-label="导入备份">
+                <i data-lucide="upload" aria-hidden="true"></i>
+              </button>
+              <input id="backupInput" type="file" accept="application/json,.json" hidden />
+            </div>
           </div>
 
           <div class="searchbar">

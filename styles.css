@@ -244,6 +244,10 @@ noscript {
   gap: 12px;
 }
 
+.library-head > div:first-child {
+  min-width: 0;
+}
+
 .library-head h2,
 .tool-head h2 {
   font-size: 1.1rem;
@@ -258,6 +262,13 @@ noscript {
 
 .folder-back-button {
   margin-left: -10px;
+}
+
+.library-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
 }
 
 .searchbar {
