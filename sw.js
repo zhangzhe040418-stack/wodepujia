@@ -1,4 +1,4 @@
-const CACHE_NAME = "my-score-folder-v23";
+const CACHE_NAME = "my-score-folder-v24";
 const APP_SHELL = [
   "./",
   "./index.html",

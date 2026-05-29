@@ -18,6 +18,9 @@ const VIEWER_MAX_ZOOM = 4;
 const VIEWER_DOUBLE_TAP_ZOOM = 2;
 const VIEWER_TAP_MAX_DISTANCE = 10;
 const VIEWER_DOUBLE_TAP_DELAY = 320;
+const IMAGE_MAX_EDGE = 1800;
+const IMAGE_WEBP_QUALITY = 0.78;
+const IMAGE_JPEG_QUALITY = 0.82;
 
 const state = {
   db: null,
@@ -1184,7 +1187,7 @@ function deleteScoreRecord(id) {
   });
 }
 
-function addPendingFiles(fileList) {
+async function addPendingFiles(fileList) {
   const files = Array.from(fileList || []);
   const imageFiles = files.filter((file) => file.type.startsWith("image/"));
 
@@ -1193,24 +1196,74 @@ function addPendingFiles(fileList) {
     return;
   }
 
-  imageFiles.forEach((file) => {
+  setStatus(`正在压缩 ${imageFiles.length} 张图片...`);
+
+  for (const file of imageFiles) {
+    const compressed = await compressImageFile(file);
     state.pendingPages.push({
       id: createId(),
       name: file.name,
-      type: file.type || "image/jpeg",
-      size: file.size,
-      blob: file,
+      originalSize: file.size,
+      type: compressed.type || file.type || "image/jpeg",
+      size: compressed.size,
+      blob: compressed,
     });
-  });
+  }
 
   if (imageFiles.length !== files.length) {
-    setStatus("已跳过非图片文件。", true);
+    setStatus(`已压缩 ${imageFiles.length} 张图片，并跳过非图片文件。`, true);
   } else {
-    setStatus(`已选择 ${state.pendingPages.length} 张图片。`);
+    setStatus(`已压缩并选择 ${state.pendingPages.length} 张图片。`);
   }
 
   renderPending();
   updateSaveState();
+}
+
+async function compressImageFile(file) {
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { alpha: false });
+
+    canvas.width = width;
+    canvas.height = height;
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close?.();
+
+    const webpBlob = await canvasToBlob(canvas, "image/webp", IMAGE_WEBP_QUALITY);
+    if (webpBlob && webpBlob.size < file.size) {
+      return createCompressedFile(webpBlob, file.name, "webp");
+    }
+
+    const jpegBlob = await canvasToBlob(canvas, "image/jpeg", IMAGE_JPEG_QUALITY);
+    if (jpegBlob && jpegBlob.size < file.size) {
+      return createCompressedFile(jpegBlob, file.name, "jpg");
+    }
+  } catch (error) {
+    console.warn("Image compression failed, using original file.", error);
+  }
+
+  return file;
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob(resolve, type, quality);
+  });
+}
+
+function createCompressedFile(blob, originalName, extension) {
+  const baseName = originalName.replace(/\.[^.]+$/, "") || "score-page";
+  return new File([blob], `${baseName}.${extension}`, {
+    type: blob.type,
+    lastModified: Date.now(),
+  });
 }
 
 function renderPending() {
@@ -1244,7 +1297,7 @@ function renderPending() {
     title.textContent = page.name || `第 ${index + 1} 页`;
     const meta = document.createElement("p");
     meta.className = "pending-meta";
-    meta.textContent = `${index + 1} / ${state.pendingPages.length} · ${formatBytes(page.size)}`;
+    meta.textContent = `${index + 1} / ${state.pendingPages.length} · ${formatCompressionMeta(page)}`;
     text.append(title, meta);
 
     const removeButton = document.createElement("button");
@@ -2542,6 +2595,15 @@ function formatBackupDate(date) {
     pad(date.getHours()),
     pad(date.getMinutes()),
   ].join("");
+}
+
+function formatCompressionMeta(page) {
+  if (!page.originalSize || page.originalSize <= page.size) {
+    return formatBytes(page.size);
+  }
+
+  const percent = Math.max(1, Math.round((1 - page.size / page.originalSize) * 100));
+  return `${formatBytes(page.size)}，已减小 ${percent}%`;
 }
 
 function formatBytes(bytes) {
