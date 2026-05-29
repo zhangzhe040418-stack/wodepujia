@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0f766e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="我的谱夹" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <title>我的谱夹</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="vendor/lucide.min.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">
+            <img src="icons/icon-192.png" alt="" />
+          </span>
+          <div>
+            <h1>我的谱夹</h1>
+            <p id="librarySummary">正在读取谱夹</p>
+          </div>
+        </div>
+        <button class="install-button" id="installAppButton" type="button" hidden>
+          <i data-lucide="download" aria-hidden="true"></i>
+          <span>安装</span>
+        </button>
+      </header>
+
+      <main class="workspace" id="libraryScreen">
+        <section class="library-panel" aria-labelledby="libraryTitle">
+          <div class="library-head">
+            <div>
+              <div class="library-title-row">
+                <button
+                  class="icon-button folder-back-button"
+                  id="folderBackButton"
+                  type="button"
+                  title="返回谱夹"
+                  aria-label="返回谱夹"
+                  hidden
+                >
+                  <i data-lucide="arrow-left" aria-hidden="true"></i>
+                </button>
+                <h2 id="libraryTitle">谱夹</h2>
+              </div>
+              <p id="resultCount">0 份歌谱</p>
+            </div>
+          </div>
+
+          <div class="searchbar">
+            <i data-lucide="search" aria-hidden="true"></i>
+            <label class="sr-only" for="searchInput">搜索歌谱名</label>
+            <input id="searchInput" type="search" placeholder="搜索歌谱名" autocomplete="off" />
+            <button class="icon-button" id="clearSearchButton" type="button" title="清空搜索" aria-label="清空搜索">
+              <i data-lucide="x" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="score-grid" id="scoreGrid" aria-live="polite"></div>
+        </section>
+      </main>
+
+      <section class="upload-screen" id="uploadScreen" aria-labelledby="uploadTitle" hidden>
+        <form class="upload-tool" id="scoreForm">
+          <div class="tool-head">
+            <div class="tool-title">
+              <button class="icon-button" id="closeAddButton" type="button" title="返回谱夹" aria-label="返回谱夹">
+                <i data-lucide="arrow-left" aria-hidden="true"></i>
+              </button>
+              <h2 id="uploadTitle">新增歌谱</h2>
+            </div>
+            <button class="icon-button" id="resetFormButton" type="button" title="清空表单" aria-label="清空表单">
+              <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <label class="field">
+            <span>歌谱名</span>
+            <input id="scoreName" name="scoreName" type="text" maxlength="60" placeholder="例如：送别" required />
+          </label>
+
+          <div class="source-group" role="group" aria-label="上传方式">
+            <button class="source-button" type="button" id="cameraButton">
+              <i data-lucide="camera" aria-hidden="true"></i>
+              <span>拍照</span>
+            </button>
+            <button class="source-button" type="button" id="galleryButton">
+              <i data-lucide="images" aria-hidden="true"></i>
+              <span>图库</span>
+            </button>
+            <button class="source-button" type="button" id="fileButton">
+              <i data-lucide="folder-up" aria-hidden="true"></i>
+              <span>文件</span>
+            </button>
+          </div>
+
+          <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
+          <input id="galleryInput" type="file" accept="image/*" multiple hidden />
+          <input id="fileInput" type="file" accept="image/*" multiple hidden />
+
+          <div class="pending-area" id="pendingArea"></div>
+
+          <button class="primary-button" id="saveButton" type="submit" disabled>
+            <i data-lucide="save" aria-hidden="true"></i>
+            <span>保存歌谱</span>
+          </button>
+
+          <p class="status-message" id="statusMessage" role="status"></p>
+        </form>
+      </section>
+
+      <button class="fab-button" id="addScoreButton" type="button" title="添加歌谱" aria-label="添加歌谱">
+        <img class="fab-art" src="assets/add-score-button.png" alt="" />
+      </button>
+    </div>
+
+    <dialog class="choice-dialog" id="addChoiceDialog" aria-labelledby="addChoiceTitle">
+      <div class="choice-surface">
+        <h2 id="addChoiceTitle">添加内容</h2>
+        <div class="choice-actions">
+          <button class="choice-button" id="chooseFolderButton" type="button">
+            <i data-lucide="folder-plus" aria-hidden="true"></i>
+            <span>添加文件夹</span>
+          </button>
+          <button class="choice-button" id="chooseScoreButton" type="button">
+            <i data-lucide="file-plus-2" aria-hidden="true"></i>
+            <span>添加歌谱</span>
+          </button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="folder-dialog" id="folderDialog" aria-labelledby="folderDialogTitle">
+      <form class="folder-surface" id="folderForm">
+        <span class="folder-mark" aria-hidden="true">
+          <i data-lucide="folder-plus"></i>
+        </span>
+        <h2 id="folderDialogTitle">新建文件夹</h2>
+        <label class="field folder-name-field">
+          <span>文件夹名称</span>
+          <input id="folderName" name="folderName" type="text" maxlength="40" placeholder="例如：主日敬拜" required />
+        </label>
+        <div class="confirm-actions">
+          <button class="cancel-delete-button" id="cancelFolderButton" type="button">取消</button>
+          <button class="confirm-delete-button folder-save-button" id="saveFolderButton" type="submit">
+            <i data-lucide="check" aria-hidden="true"></i>
+            <span>创建</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="confirm-dialog" id="deleteDialog" aria-labelledby="deleteDialogTitle">
+      <div class="confirm-surface">
+        <span class="confirm-mark" aria-hidden="true">
+          <i data-lucide="trash-2"></i>
+        </span>
+        <h2 id="deleteDialogTitle">删除歌谱？</h2>
+        <p id="deleteDialogMessage">删除后无法恢复。</p>
+        <div class="confirm-actions">
+          <button class="cancel-delete-button" id="cancelDeleteButton" type="button">取消</button>
+          <button class="confirm-delete-button" id="confirmDeleteButton" type="button">
+            <i data-lucide="trash-2" aria-hidden="true"></i>
+            <span>删除</span>
+          </button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="viewer-dialog" id="viewerDialog" aria-label="歌谱图片查看">
+      <div class="viewer-surface">
+        <div class="viewer-pages" id="viewerPages"></div>
+      </div>
+    </dialog>
+
+    <noscript>请启用 JavaScript 后使用“我的谱夹”。</noscript>
+  </body>
+</html>
