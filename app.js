@@ -47,6 +47,7 @@ const state = {
   pendingUrls: new Map(),
   installPrompt: null,
   addScreenOpen: false,
+  activeTab: "library",
   currentFolderId: null,
   appTouchY: 0,
   deleteDialogResolve: null,
@@ -86,6 +87,14 @@ function bindElements() {
   elements.appShell = document.querySelector(".app-shell");
   elements.librarySummary = document.querySelector("#librarySummary");
   elements.libraryScreen = document.querySelector("#libraryScreen");
+  elements.myScreen = document.querySelector("#myScreen");
+  elements.navLibraryButton = document.querySelector("#navLibraryButton");
+  elements.navMineButton = document.querySelector("#navMineButton");
+  elements.myAccountButton = document.querySelector("#myAccountButton");
+  elements.preferencesButton = document.querySelector("#preferencesButton");
+  elements.myAuthState = document.querySelector("#myAuthState");
+  elements.myAuthButton = document.querySelector("#myAuthButton");
+  elements.myAuthButtonText = document.querySelector("#myAuthButtonText");
   elements.libraryTitle = document.querySelector("#libraryTitle");
   elements.folderBackButton = document.querySelector("#folderBackButton");
   elements.uploadScreen = document.querySelector("#uploadScreen");
@@ -171,13 +180,20 @@ function bindEvents() {
 
   elements.scoreName.addEventListener("input", updateSaveState);
   elements.searchInput.addEventListener("input", renderScores);
+  elements.navLibraryButton.addEventListener("click", () => switchMainTab("library"));
+  elements.navMineButton.addEventListener("click", () => switchMainTab("mine"));
+  elements.myAccountButton.addEventListener("click", openAuthDialog);
+  elements.myAuthButton.addEventListener("click", openAuthDialog);
+  elements.preferencesButton.addEventListener("click", () => {
+    refreshIcons();
+  });
   elements.clearSearchButton.addEventListener("click", () => {
     elements.searchInput.value = "";
     renderScores();
     elements.searchInput.blur();
   });
   elements.syncNowButton.addEventListener("click", handleManualSync);
-  elements.accountButton.addEventListener("click", openAuthDialog);
+  elements.accountButton?.addEventListener("click", openAuthDialog);
   elements.closeAuthButton.addEventListener("click", closeAuthDialog);
   elements.authForm.addEventListener("submit", signInWithPassword);
   elements.signUpButton.addEventListener("click", signUpWithPassword);
@@ -350,6 +366,41 @@ function handleAddButtonClick() {
   }
 
   openAddChoiceDialog();
+}
+
+function switchMainTab(tab) {
+  if (state.addScreenOpen) {
+    closeAddScreen();
+  }
+
+  state.activeTab = tab;
+  const isMine = tab === "mine";
+
+  elements.libraryScreen.hidden = isMine;
+  elements.myScreen.hidden = !isMine;
+  elements.uploadScreen.hidden = true;
+  elements.addScoreButton.hidden = isMine;
+  document.body.classList.toggle("mine-tab-open", isMine);
+  updateMainNav();
+
+  if (!isMine) {
+    renderScores();
+  }
+
+  elements.appShell.scrollTo({ top: 0 });
+}
+
+function updateMainNav() {
+  const isLibrary = state.activeTab === "library";
+  elements.navLibraryButton.classList.toggle("is-active", isLibrary);
+  elements.navMineButton.classList.toggle("is-active", !isLibrary);
+  if (isLibrary) {
+    elements.navLibraryButton.setAttribute("aria-current", "page");
+    elements.navMineButton.removeAttribute("aria-current");
+  } else {
+    elements.navMineButton.setAttribute("aria-current", "page");
+    elements.navLibraryButton.removeAttribute("aria-current");
+  }
 }
 
 function openAddChoiceDialog() {
@@ -637,7 +688,10 @@ function extractCloudUser(source) {
 
 function updateAccountUi() {
   const email = state.session?.user?.email;
-  elements.accountButtonText.textContent = email ? "已登录" : state.cloudInitializing ? "连接中" : "登录";
+  const accountButtonText = email ? "已登录" : state.cloudInitializing ? "连接中" : "登录";
+  if (elements.accountButtonText) {
+    elements.accountButtonText.textContent = accountButtonText;
+  }
   elements.syncNowButton.disabled = state.syncing || Boolean(state.cloudInitializing);
   elements.shareScoresButton.disabled = !state.cloudReady || !state.session;
   elements.importShareButton.disabled = !state.cloudReady || !state.session;
@@ -651,6 +705,26 @@ function updateAccountUi() {
     } else {
       elements.authState.textContent = state.cloudError || "登录后可以跨设备同步歌谱。";
     }
+  }
+
+  if (elements.myAuthState) {
+    elements.myAuthState.style.color = "var(--muted)";
+    if (state.cloudReady) {
+      elements.myAuthState.textContent = email ? `当前账号：${email}` : "登录后可以跨设备同步歌谱。";
+    } else if (state.cloudInitializing) {
+      elements.myAuthState.textContent = "正在连接 CloudBase，请稍候...";
+    } else {
+      elements.myAuthState.textContent = state.cloudError || "登录后可以跨设备同步歌谱。";
+      elements.myAuthState.style.color = state.cloudError ? "var(--danger)" : "var(--muted)";
+    }
+  }
+
+  if (elements.myAuthButtonText) {
+    elements.myAuthButtonText.textContent = email ? "账号管理" : state.cloudInitializing ? "连接中" : "登录 / 注册";
+  }
+
+  if (elements.myAuthButton) {
+    elements.myAuthButton.disabled = Boolean(state.cloudInitializing);
   }
 
   if (elements.signOutButton) {
@@ -928,10 +1002,14 @@ async function signOut() {
 
 function openAddScreen() {
   state.addScreenOpen = true;
+  state.activeTab = "library";
   elements.libraryScreen.hidden = true;
+  elements.myScreen.hidden = true;
   elements.uploadScreen.hidden = false;
   elements.addScoreButton.hidden = true;
   document.body.classList.add("add-screen-open");
+  document.body.classList.remove("mine-tab-open");
+  updateMainNav();
   refreshIcons();
   requestAnimationFrame(() => {
     elements.scoreName.focus();
@@ -940,10 +1018,14 @@ function openAddScreen() {
 
 function closeAddScreen(options = {}) {
   state.addScreenOpen = false;
+  state.activeTab = "library";
   elements.uploadScreen.hidden = true;
   elements.libraryScreen.hidden = false;
+  elements.myScreen.hidden = true;
   elements.addScoreButton.hidden = false;
   document.body.classList.remove("add-screen-open");
+  document.body.classList.remove("mine-tab-open");
+  updateMainNav();
 
   if (options.resetForm) {
     resetForm(false);

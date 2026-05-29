@@ -36,10 +36,6 @@
           <i data-lucide="download" aria-hidden="true"></i>
           <span>安装</span>
         </button>
-        <button class="install-button account-button" id="accountButton" type="button">
-          <i data-lucide="user" aria-hidden="true"></i>
-          <span id="accountButtonText">登录</span>
-        </button>
       </header>
 
       <main class="workspace" id="libraryScreen">
@@ -84,6 +80,39 @@
           </div>
 
           <div class="score-grid" id="scoreGrid" aria-live="polite"></div>
+        </section>
+      </main>
+
+      <main class="workspace my-screen" id="myScreen" hidden>
+        <section class="mine-panel" aria-labelledby="myTitle">
+          <div class="mine-head">
+            <h2 id="myTitle">我的</h2>
+          </div>
+
+          <div class="mine-menu" aria-label="我的功能">
+            <button class="mine-strip-button" id="myAccountButton" type="button">
+              <span class="mine-strip-icon" aria-hidden="true">
+                <i data-lucide="user-round"></i>
+              </span>
+              <span>账号管理</span>
+              <i data-lucide="chevron-right" aria-hidden="true"></i>
+            </button>
+            <button class="mine-strip-button" id="preferencesButton" type="button">
+              <span class="mine-strip-icon" aria-hidden="true">
+                <i data-lucide="settings-2"></i>
+              </span>
+              <span>偏好设置</span>
+              <i data-lucide="chevron-right" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="mine-auth-panel">
+            <p class="mine-auth-state" id="myAuthState">登录后可以跨设备同步歌谱。</p>
+            <button class="primary-button mine-auth-button" id="myAuthButton" type="button">
+              <i data-lucide="log-in" aria-hidden="true"></i>
+              <span id="myAuthButtonText">登录 / 注册</span>
+            </button>
+          </div>
         </section>
       </main>
 
@@ -140,6 +169,17 @@
         <img class="fab-art" src="assets/add-score-button.png" alt="" />
         <span class="fab-fallback">添加歌谱</span>
       </button>
+
+      <nav class="bottom-nav" aria-label="底部导航">
+        <button class="bottom-nav-button is-active" id="navLibraryButton" type="button" aria-current="page">
+          <i data-lucide="folder-open" aria-hidden="true"></i>
+          <span>谱夹</span>
+        </button>
+        <button class="bottom-nav-button" id="navMineButton" type="button">
+          <i data-lucide="user-round" aria-hidden="true"></i>
+          <span>我的</span>
+        </button>
+      </nav>
     </div>
 
     <dialog class="auth-dialog" id="authDialog" aria-labelledby="authDialogTitle">
