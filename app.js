@@ -41,6 +41,7 @@ const state = {
   currentFolderId: null,
   appTouchY: 0,
   deleteDialogResolve: null,
+  verifyDialogResolve: null,
   viewerZoom: VIEWER_MIN_ZOOM,
   viewerPointers: new Map(),
   viewerPinchStartDistance: 0,
@@ -100,6 +101,13 @@ function bindElements() {
   elements.signOutButton = document.querySelector("#signOutButton");
   elements.signUpButton = document.querySelector("#signUpButton");
   elements.signInButton = document.querySelector("#signInButton");
+  elements.verifyDialog = document.querySelector("#verifyDialog");
+  elements.verifyForm = document.querySelector("#verifyForm");
+  elements.verifyState = document.querySelector("#verifyState");
+  elements.verifyCodeInput = document.querySelector("#verifyCodeInput");
+  elements.cancelVerifyButton = document.querySelector("#cancelVerifyButton");
+  elements.closeVerifyButton = document.querySelector("#closeVerifyButton");
+  elements.confirmVerifyButton = document.querySelector("#confirmVerifyButton");
   elements.shareDialog = document.querySelector("#shareDialog");
   elements.shareForm = document.querySelector("#shareForm");
   elements.shareList = document.querySelector("#shareList");
@@ -170,6 +178,13 @@ function bindEvents() {
   elements.authForm.addEventListener("submit", signInWithPassword);
   elements.signUpButton.addEventListener("click", signUpWithPassword);
   elements.signOutButton.addEventListener("click", signOut);
+  elements.verifyForm.addEventListener("submit", submitVerificationCode);
+  elements.cancelVerifyButton.addEventListener("click", () => closeVerifyDialog(""));
+  elements.closeVerifyButton.addEventListener("click", () => closeVerifyDialog(""));
+  elements.verifyDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeVerifyDialog("");
+  });
   elements.authDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
     closeAuthDialog();
@@ -589,9 +604,9 @@ async function signInWithPassword(event) {
 
   elements.signInButton.disabled = true;
   try {
-    const email = elements.authEmail.value.trim();
-    const loginState = await state.cloudAuth.signInWithEmailAndPassword(email, elements.authPassword.value);
-    state.session = await createCloudSession(loginState, email);
+    const account = elements.authEmail.value.trim();
+    const loginState = await signInCloudWithPassword(account, elements.authPassword.value);
+    state.session = await createCloudSession(loginState, account);
     if (!state.session) {
       throw new Error("登录状态读取失败，请重新登录。");
     }
@@ -616,10 +631,24 @@ async function signUpWithPassword() {
 
   elements.signUpButton.disabled = true;
   try {
-    const email = elements.authEmail.value.trim();
-    await state.cloudAuth.signUpWithEmailAndPassword(email, elements.authPassword.value);
-    const loginState = await state.cloudAuth.signInWithEmailAndPassword(email, elements.authPassword.value);
-    state.session = await createCloudSession(loginState, email);
+    const account = elements.authEmail.value.trim();
+    if (!isEmailAddress(account)) {
+      throw new Error("注册时请填写邮箱地址；注册成功后可以用这个邮箱作为账号登录。");
+    }
+
+    const signUpResult = await signUpCloudWithEmail(account, elements.authPassword.value);
+    const verifyOtp = signUpResult?.data?.verifyOtp;
+    if (typeof verifyOtp === "function") {
+      const code = await requestVerificationCode(account);
+      if (!code) {
+        throw new Error("已取消邮箱验证。");
+      }
+      const verifyResult = await verifyOtp({ token: code });
+      throwCloudResultError(verifyResult);
+    }
+
+    const loginState = await signInCloudWithPassword(account, elements.authPassword.value);
+    state.session = await createCloudSession(loginState, account);
     if (!state.session) {
       throw new Error("注册成功，但登录状态读取失败，请重新登录。");
     }
@@ -633,6 +662,82 @@ async function signUpWithPassword() {
   } finally {
     elements.signUpButton.disabled = false;
     updateAccountUi();
+  }
+}
+
+async function signInCloudWithPassword(account, password) {
+  if (typeof state.cloudAuth.signIn === "function") {
+    return state.cloudAuth.signIn({ username: account, password });
+  }
+
+  if (typeof state.cloudAuth.signInWithUsernameAndPassword === "function") {
+    return state.cloudAuth.signInWithUsernameAndPassword(account, password);
+  }
+
+  return state.cloudAuth.signInWithEmailAndPassword(account, password);
+}
+
+async function signUpCloudWithEmail(email, password) {
+  const result =
+    typeof state.cloudAuth.signUp === "function"
+      ? await state.cloudAuth.signUp({ email, password })
+      : await state.cloudAuth.signUpWithEmailAndPassword(email, password);
+  throwCloudResultError(result);
+  return result;
+}
+
+function throwCloudResultError(result) {
+  if (result?.error) {
+    throw result.error;
+  }
+
+  if (result?.code && result.code !== "SUCCESS") {
+    throw new Error(result.message || result.msg || String(result.code));
+  }
+}
+
+function isEmailAddress(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function requestVerificationCode(account) {
+  elements.verifyForm.reset();
+  elements.verifyState.textContent = `验证码已发送至 ${account}，请输入验证码完成注册。`;
+
+  if (typeof elements.verifyDialog.showModal === "function") {
+    elements.verifyDialog.showModal();
+  } else {
+    elements.verifyDialog.setAttribute("open", "");
+  }
+
+  refreshIcons();
+  requestAnimationFrame(() => elements.verifyCodeInput.focus());
+
+  return new Promise((resolve) => {
+    state.verifyDialogResolve = resolve;
+  });
+}
+
+function submitVerificationCode(event) {
+  event.preventDefault();
+  const code = elements.verifyCodeInput.value.trim();
+  if (!code) {
+    return;
+  }
+
+  closeVerifyDialog(code);
+}
+
+function closeVerifyDialog(code) {
+  if (elements.verifyDialog.open) {
+    elements.verifyDialog.close();
+  } else {
+    elements.verifyDialog.removeAttribute("open");
+  }
+
+  if (state.verifyDialogResolve) {
+    state.verifyDialogResolve(code);
+    state.verifyDialogResolve = null;
   }
 }
 

@@ -159,8 +159,8 @@
         </div>
         <p class="auth-state" id="authState">登录后可以跨设备同步歌谱。</p>
         <label class="field">
-          <span>邮箱账号</span>
-          <input id="authEmail" name="email" type="email" autocomplete="email" placeholder="name@example.com" required />
+          <span>账号或邮箱</span>
+          <input id="authEmail" name="account" type="text" autocomplete="username" placeholder="请输入账号或邮箱" required />
         </label>
         <label class="field">
           <span>密码</span>
@@ -172,6 +172,38 @@
           <button class="confirm-delete-button folder-save-button" id="signInButton" type="submit">
             <i data-lucide="log-in" aria-hidden="true"></i>
             <span>登录</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="auth-dialog" id="verifyDialog" aria-labelledby="verifyDialogTitle">
+      <form class="auth-surface" id="verifyForm">
+        <div class="auth-head">
+          <h2 id="verifyDialogTitle">验证邮箱</h2>
+          <button class="icon-button" id="cancelVerifyButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p class="auth-state" id="verifyState">请输入 CloudBase 发送到邮箱的验证码。</p>
+        <label class="field">
+          <span>验证码</span>
+          <input
+            id="verifyCodeInput"
+            name="verifyCode"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="12"
+            placeholder="请输入验证码"
+            required
+          />
+        </label>
+        <div class="auth-actions">
+          <button class="cancel-delete-button" id="closeVerifyButton" type="button">取消</button>
+          <button class="confirm-delete-button folder-save-button" id="confirmVerifyButton" type="submit">
+            <i data-lucide="check" aria-hidden="true"></i>
+            <span>完成验证</span>
           </button>
         </div>
       </form>
