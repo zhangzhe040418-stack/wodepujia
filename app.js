@@ -23,6 +23,9 @@ const IMAGE_WEBP_QUALITY = 0.78;
 const IMAGE_JPEG_QUALITY = 0.82;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
+const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
+)}`;
 
 const state = {
   db: null,
@@ -1379,6 +1382,7 @@ async function migrateNestedScorePages(scores) {
         size: Number(page.size) || page.blob?.size || 0,
         blob: page.blob,
         storagePath: page.storagePath || null,
+        storageSyncedAt: page.storageSyncedAt || null,
         createdAt: page.createdAt || score.createdAt || new Date().toISOString(),
         updatedAt: page.updatedAt || score.updatedAt || new Date().toISOString(),
         deletedAt: page.deletedAt || null,
@@ -1457,6 +1461,7 @@ function normalizeLocalPageRecord(page) {
     size: Number(page.size) || page.blob?.size || 0,
     blob: page.blob,
     storagePath: page.storagePath || null,
+    storageSyncedAt: page.storageSyncedAt || null,
     createdAt: page.createdAt || new Date().toISOString(),
     updatedAt: page.updatedAt || page.createdAt || new Date().toISOString(),
     deletedAt: page.deletedAt || null,
@@ -1926,15 +1931,26 @@ async function uploadLocalChanges() {
 
   for (const page of pages) {
     let storagePath = page.storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
-    if (page.blob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)) {
+    let storageSyncedAt = page.storageSyncedAt || null;
+    let pageSize = page.size;
+    const shouldUploadBlob =
+      page.blob &&
+      page.blob.size > 0 &&
+      (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED || !page.storageSyncedAt);
+
+    if (shouldUploadBlob) {
       const cloudPath = page.storagePath?.startsWith("cloud://")
         ? createStoragePath(userId, page.scoreId, page.id, page.type)
         : storagePath;
-      storagePath = await uploadCloudFile(cloudPath, page.blob);
+      storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
+      storageSyncedAt = new Date().toISOString();
+      pageSize = page.blob.size;
     }
     uploadedPages.push({
       ...page,
+      size: pageSize,
       storagePath,
+      storageSyncedAt,
       syncStatus: SYNC_STATUS_SYNCED,
     });
   }
@@ -1972,17 +1988,23 @@ async function pullCloudChanges() {
   for (const row of pages) {
     const page = fromCloudPage(row);
     const localPage = localPageById.get(page.id);
-    if (localPage?.blob) {
+    if (localPage?.blob?.size > 0) {
       cloudPages.push({ ...page, blob: localPage.blob });
       continue;
     }
 
-    const data = await downloadCloudFile(page.storagePath);
-    cloudPages.push({
-      ...page,
-      blob: data,
-      size: page.size || data.size,
-    });
+    try {
+      const data = await downloadCloudFile(page.storagePath, page.size);
+      cloudPages.push({
+        ...page,
+        blob: data,
+        size: page.size || data.size,
+        storageSyncedAt: page.updatedAt || new Date().toISOString(),
+      });
+    } catch (error) {
+      console.warn(error);
+      cloudPages.push(page);
+    }
   }
 
   await putCloudReadyRecords(
@@ -2072,16 +2094,27 @@ function assertCloudResult(result) {
   }
 }
 
-async function uploadCloudFile(cloudPath, blob) {
+async function uploadCloudFile(cloudPath, blob, fileName = "score-page.jpg") {
   const result = await state.cloudApp.uploadFile({
     cloudPath,
-    fileContent: blob,
+    filePath: toUploadFile(blob, fileName),
   });
   assertCloudResult(result);
   return result.fileID || result.fileId || result.data?.fileID || cloudPath;
 }
 
-async function downloadCloudFile(fileID) {
+function toUploadFile(blob, fileName) {
+  if (typeof File === "function" && !(blob instanceof File)) {
+    return new File([blob], fileName, {
+      type: blob.type || "image/jpeg",
+      lastModified: Date.now(),
+    });
+  }
+
+  return blob;
+}
+
+async function downloadCloudFile(fileID, expectedSize = 0) {
   if (!fileID) {
     throw new Error("歌谱图片缺少云端文件 ID。");
   }
@@ -2109,7 +2142,12 @@ async function downloadCloudFile(fileID) {
     throw new Error("歌谱图片下载失败。");
   }
 
-  return response.blob();
+  const blob = await response.blob();
+  if (Number(expectedSize) > 0 && blob.size === 0) {
+    throw new Error("云端歌谱图片文件为空，需要在保留本地图片的设备上重新同步。");
+  }
+
+  return blob;
 }
 
 async function deleteCloudFiles(fileIDs) {
@@ -2435,7 +2473,7 @@ async function importScoresByShareCode(code) {
       const blob = await downloadCloudFile(pageRow.storage_path);
       const newPageId = createId();
       const storagePath = createStoragePath(userId, newScore.id, newPageId, pageRow.type);
-      const fileID = await uploadCloudFile(storagePath, blob);
+      const fileID = await uploadCloudFile(storagePath, blob, `${newPageId}.${getExtensionFromType(pageRow.type)}`);
       newPages.push({
         id: newPageId,
         scoreId: newScore.id,
@@ -2806,6 +2844,10 @@ function closeDeleteDialog(confirmed) {
 }
 
 function getScoreUrl(page) {
+  if (!page?.blob || page.blob.size === 0) {
+    return SCORE_IMAGE_PLACEHOLDER;
+  }
+
   if (!state.scoreUrls.has(page.id)) {
     state.scoreUrls.set(page.id, URL.createObjectURL(page.blob));
   }
