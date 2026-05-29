@@ -388,8 +388,7 @@ noscript {
 }
 
 .folder-card {
-  background:
-    linear-gradient(180deg, rgba(255, 250, 238, 0.96), rgba(255, 255, 255, 0.98));
+  background: var(--surface);
 }
 
 .folder-preview {
@@ -635,8 +634,8 @@ body.add-screen-open .bottom-nav {
   position: fixed;
   right: 24px;
   right: calc(24px + env(safe-area-inset-right));
-  bottom: 142px;
-  bottom: calc(142px + env(safe-area-inset-bottom));
+  bottom: 82px;
+  bottom: calc(82px + env(safe-area-inset-bottom));
   z-index: 10;
   width: min(185px, calc(100vw - 56px));
   aspect-ratio: 1144 / 385;

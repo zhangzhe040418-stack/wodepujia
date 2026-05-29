@@ -185,6 +185,7 @@ function bindElements() {
   elements.resetFormButton = document.querySelector("#resetFormButton");
   elements.statusMessage = document.querySelector("#statusMessage");
   elements.deleteDialog = document.querySelector("#deleteDialog");
+  elements.deleteDialogTitle = document.querySelector("#deleteDialogTitle");
   elements.deleteDialogMessage = document.querySelector("#deleteDialogMessage");
   elements.cancelDeleteButton = document.querySelector("#cancelDeleteButton");
   elements.confirmDeleteButton = document.querySelector("#confirmDeleteButton");
@@ -1379,7 +1380,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=38");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=39");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -1972,6 +1973,30 @@ function deleteScoreRecord(id) {
     pageRequest.onerror = () => reject(pageRequest.error);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+function deleteFolderRecord(folderId, scoreIds) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const pageIndex = pageStore.index("scoreId");
+
+    folderStore.delete(folderId);
+    scoreIds.filter(Boolean).forEach((scoreId) => {
+      scoreStore.delete(scoreId);
+      const pageRequest = pageIndex.getAllKeys(scoreId);
+      pageRequest.onsuccess = () => {
+        pageRequest.result.forEach((key) => pageStore.delete(key));
+      };
+      pageRequest.onerror = () => reject(pageRequest.error);
+    });
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
   });
 }
 
@@ -3111,7 +3136,20 @@ function createFolderCard(folder) {
   detail.className = "score-detail";
   detail.textContent = `${folderScores.length} 份歌谱`;
 
-  card.append(previewButton, name, detail);
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "danger-button";
+  deleteButton.type = "button";
+  deleteButton.append(createIcon("trash-2"), document.createTextNode("删除"));
+  deleteButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    deleteFolder(folder.id);
+  });
+
+  actions.append(deleteButton);
+  card.append(previewButton, name, detail, actions);
   return card;
 }
 
@@ -3278,6 +3316,45 @@ async function deleteScore(id) {
   }
 }
 
+async function deleteFolder(id) {
+  const folder = state.folders.find((item) => item.id === id);
+  if (!folder) {
+    return;
+  }
+
+  const folderScores = state.scores.filter((score) => score.folderId === id);
+  const confirmed = await requestDeleteConfirmation({
+    title: "删除文件夹？",
+    message: `确定删除《${folder.name}》文件夹吗？其中 ${folderScores.length} 份歌谱也会一起删除，删除后无法恢复。`,
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    if (state.cloudReady && state.session && folder.userId === state.session.user.id) {
+      await deleteCloudFolder(folder, folderScores);
+    }
+    await deleteFolderRecord(
+      id,
+      folderScores.map((score) => score.id),
+    );
+    folderScores.forEach(revokeScoreUrls);
+    state.folders = state.folders.filter((item) => item.id !== id);
+    state.scores = state.scores.filter((score) => score.folderId !== id);
+    const folderScoreIds = new Set(folderScores.map((score) => score.id));
+    state.scorePages = state.scorePages.filter((page) => !folderScoreIds.has(page.scoreId));
+    if (state.currentFolderId === id) {
+      state.currentFolderId = null;
+    }
+    renderScores();
+    setStatus(`已删除《${folder.name}》文件夹。`);
+  } catch (error) {
+    console.error(error);
+    setStatus("删除文件夹失败，请稍后再试。", true);
+  }
+}
+
 async function deleteCloudScore(score) {
   const pageIds = (score.pages || []).map((page) => page.id);
   const paths = (score.pages || []).map((page) => page.storagePath).filter(Boolean);
@@ -3291,8 +3368,30 @@ async function deleteCloudScore(score) {
   await deleteCloudRowsByIds(CLOUD_TABLES.scores, [score.id]);
 }
 
-function requestDeleteConfirmation(score) {
-  elements.deleteDialogMessage.textContent = `确定删除《${score.name}》吗？删除后无法恢复。`;
+async function deleteCloudFolder(folder, folderScores) {
+  const pageIds = folderScores.flatMap((score) => (score.pages || []).map((page) => page.id));
+  const paths = folderScores.flatMap((score) => (score.pages || []).map((page) => page.storagePath).filter(Boolean));
+  const scoreIds = folderScores.map((score) => score.id);
+
+  if (paths.length) {
+    await deleteCloudFiles(paths);
+  }
+  if (pageIds.length) {
+    await deleteCloudRowsByIds(CLOUD_TABLES.pages, pageIds);
+  }
+  if (scoreIds.length) {
+    await deleteCloudRowsByIds(CLOUD_TABLES.scores, scoreIds);
+  }
+  await deleteCloudRowsByIds(CLOUD_TABLES.folders, [folder.id]);
+}
+
+function requestDeleteConfirmation(target) {
+  const title = target.title || "删除歌谱？";
+  const message = target.message || `确定删除《${target.name}》吗？删除后无法恢复。`;
+  if (elements.deleteDialogTitle) {
+    elements.deleteDialogTitle.textContent = title;
+  }
+  elements.deleteDialogMessage.textContent = message;
   refreshIcons();
 
   return new Promise((resolve) => {
