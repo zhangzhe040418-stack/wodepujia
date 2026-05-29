@@ -1,4 +1,4 @@
 window.MY_SCORE_FOLDER_CLOUDBASE = {
-  envId: "",
+  envId: "wodepujia-d3goqgpyba640972d",
   storageRoot: "score-pages",
 };
