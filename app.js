@@ -89,9 +89,6 @@ function bindElements() {
   elements.scoreGrid = document.querySelector("#scoreGrid");
   elements.searchInput = document.querySelector("#searchInput");
   elements.clearSearchButton = document.querySelector("#clearSearchButton");
-  elements.exportDataButton = document.querySelector("#exportDataButton");
-  elements.importDataButton = document.querySelector("#importDataButton");
-  elements.backupInput = document.querySelector("#backupInput");
   elements.syncNowButton = document.querySelector("#syncNowButton");
   elements.shareScoresButton = document.querySelector("#shareScoresButton");
   elements.importShareButton = document.querySelector("#importShareButton");
@@ -175,10 +172,7 @@ function bindEvents() {
     renderScores();
     elements.searchInput.blur();
   });
-  elements.exportDataButton.addEventListener("click", exportBackup);
-  elements.importDataButton.addEventListener("click", openBackupPicker);
-  elements.backupInput.addEventListener("change", importBackupFile);
-  elements.syncNowButton.addEventListener("click", () => syncNow({ manual: true }));
+  elements.syncNowButton.addEventListener("click", handleManualSync);
   elements.accountButton.addEventListener("click", openAuthDialog);
   elements.closeAuthButton.addEventListener("click", closeAuthDialog);
   elements.authForm.addEventListener("submit", signInWithPassword);
@@ -640,7 +634,7 @@ function extractCloudUser(source) {
 function updateAccountUi() {
   const email = state.session?.user?.email;
   elements.accountButtonText.textContent = email ? "已登录" : state.cloudInitializing ? "连接中" : "登录";
-  elements.syncNowButton.disabled = !state.cloudReady || !state.session || state.syncing;
+  elements.syncNowButton.disabled = state.syncing || Boolean(state.cloudInitializing);
   elements.shareScoresButton.disabled = !state.cloudReady || !state.session;
   elements.importShareButton.disabled = !state.cloudReady || !state.session;
 
@@ -802,13 +796,13 @@ async function ensureCloudReady() {
   }
 
   setAuthStatus("正在连接 CloudBase，请稍候...");
-  setStatus("正在连接 CloudBase...");
-  const ready = await initializeCloud();
-  if (!ready) {
-    setAuthStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
-    setStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
-    return false;
-  }
+    setStatus("正在连接 CloudBase...");
+    const ready = await initializeCloud();
+    if (!ready) {
+      setAuthStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
+      setStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
+      return false;
+    }
 
   setAuthStatus("CloudBase 已连接，可以登录或注册。");
   setStatus("");
@@ -1267,11 +1261,6 @@ function openFilePicker(input) {
   input.click();
 }
 
-function openBackupPicker() {
-  elements.backupInput.value = "";
-  elements.backupInput.click();
-}
-
 async function loadScores() {
   const [scoreRecords, pageRecords, folders] = await Promise.all([getAllScores(), getAllScorePages(), getAllFolders()]);
   const migrated = await migrateNestedScorePages(scoreRecords);
@@ -1546,31 +1535,6 @@ function putFolder(folder) {
   });
 }
 
-function putImportedRecords(folders, scores) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-
-    folders.forEach((folder) => folderStore.put(folder));
-    scores.forEach((score) => {
-      scoreStore.put(toScoreRecord(score));
-      (score.pages || []).forEach((page, index) => {
-        pageStore.put({
-          ...page,
-          scoreId: score.id,
-          pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
-        });
-      });
-    });
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
-}
-
 function deleteScoreRecord(id) {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
@@ -1818,159 +1782,6 @@ async function createFolder(event) {
   }
 }
 
-async function exportBackup() {
-  elements.exportDataButton.disabled = true;
-
-  try {
-    const backup = {
-      app: DB_NAME,
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      folders: state.folders.map((folder) => ({
-        id: folder.id,
-        name: folder.name,
-        normalizedName: folder.normalizedName,
-        createdAt: folder.createdAt,
-        updatedAt: folder.updatedAt,
-      })),
-      scores: await Promise.all(
-        state.scores.map(async (score) => ({
-          id: score.id,
-          name: score.name,
-          normalizedName: score.normalizedName,
-          folderId: score.folderId || null,
-          createdAt: score.createdAt,
-          updatedAt: score.updatedAt,
-          pages: await Promise.all(
-            score.pages.map(async (page, index) => ({
-              id: page.id || createId(),
-              name: page.name || `第 ${index + 1} 页`,
-              type: page.type || page.blob?.type || "image/jpeg",
-              size: page.size || page.blob?.size || 0,
-              dataUrl: await blobToDataUrl(page.blob),
-            })),
-          ),
-        })),
-      ),
-    };
-
-    downloadJsonBackup(backup);
-    setStatus("已导出备份文件。");
-  } catch (error) {
-    console.error(error);
-    setStatus("导出失败，请稍后再试。", true);
-  } finally {
-    elements.exportDataButton.disabled = false;
-  }
-}
-
-async function importBackupFile(event) {
-  const file = event.target.files?.[0];
-  if (!file) {
-    return;
-  }
-
-  elements.importDataButton.disabled = true;
-  setStatus("正在导入备份...");
-
-  try {
-    const backup = JSON.parse(await file.text());
-    const imported = await normalizeBackupData(backup);
-    await putImportedRecords(imported.folders, imported.scores);
-    revokeAllUrls();
-    elements.searchInput.value = "";
-    state.currentFolderId = null;
-    await loadScores();
-    queueSync();
-    setStatus(`已导入 ${imported.folders.length} 个文件夹、${imported.scores.length} 份歌谱。`);
-  } catch (error) {
-    console.error(error);
-    setStatus("导入失败，请确认选择的是我的谱夹备份文件。", true);
-  } finally {
-    elements.backupInput.value = "";
-    elements.importDataButton.disabled = false;
-  }
-}
-
-async function normalizeBackupData(backup) {
-  if (!backup || backup.app !== DB_NAME || !Array.isArray(backup.scores)) {
-    throw new Error("Invalid backup file.");
-  }
-
-  const now = new Date().toISOString();
-  const folders = Array.isArray(backup.folders)
-    ? backup.folders.map((folder) => normalizeImportedFolder(folder, now))
-    : [];
-  const knownFolderIds = new Set([...state.folders.map((folder) => folder.id), ...folders.map((folder) => folder.id)]);
-  const scores = await Promise.all(
-    backup.scores.map((score) => normalizeImportedScore(score, knownFolderIds, now)),
-  );
-
-  return {
-    folders,
-    scores: scores.filter((score) => score.pages.length),
-  };
-}
-
-function normalizeImportedFolder(folder, now) {
-  const name = String(folder?.name || "未命名文件夹").trim() || "未命名文件夹";
-  const userId = state.session?.user?.id || null;
-
-  return {
-    id: String(folder?.id || createId()),
-    userId,
-    name,
-    normalizedName: normalizeText(folder?.normalizedName || name),
-    createdAt: folder?.createdAt || now,
-    updatedAt: folder?.updatedAt || folder?.createdAt || now,
-    deletedAt: folder?.deletedAt || null,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-  };
-}
-
-async function normalizeImportedScore(score, knownFolderIds, now) {
-  const name = String(score?.name || "未命名歌谱").trim() || "未命名歌谱";
-  const userId = state.session?.user?.id || null;
-  const folderId = score?.folderId && knownFolderIds.has(score.folderId) ? score.folderId : null;
-  const pages = Array.isArray(score?.pages) ? score.pages : [];
-  const scoreId = String(score?.id || createId());
-
-  return {
-    id: scoreId,
-    userId,
-    name,
-    normalizedName: normalizeText(score?.normalizedName || name),
-    folderId,
-    createdAt: score?.createdAt || now,
-    updatedAt: score?.updatedAt || score?.createdAt || now,
-    deletedAt: score?.deletedAt || null,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-    pages: await Promise.all(
-      pages
-        .filter((page) => typeof page?.dataUrl === "string")
-        .map(async (page, index) => {
-          const blob = dataUrlToBlob(page.dataUrl);
-
-          return {
-            id: String(page.id || createId()),
-            scoreId,
-            userId,
-            pageIndex: index,
-            name: page.name || `第 ${index + 1} 页`,
-            type: page.type || blob.type || "image/jpeg",
-            size: Number(page.size) || blob.size,
-            blob,
-            storagePath: page.storagePath || null,
-            createdAt: page.createdAt || now,
-            updatedAt: page.updatedAt || now,
-            deletedAt: page.deletedAt || null,
-            syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-          };
-        }),
-    ),
-  };
-}
-
 async function claimLocalRecordsForUser(userId) {
   const [scores, pages, folders] = await Promise.all([getAllScores(), getAllScorePages(), getAllFolders()]);
   const now = new Date().toISOString();
@@ -2030,6 +1841,34 @@ function queueSync() {
   }
 
   window.setTimeout(() => syncNow(), 250);
+}
+
+async function handleManualSync() {
+  if (state.syncing) {
+    return;
+  }
+
+  setStatus("准备同步...");
+  elements.syncNowButton.classList.add("is-syncing");
+  elements.syncNowButton.disabled = true;
+
+  try {
+    if (!(await ensureCloudReady())) {
+      openAuthDialog();
+      return;
+    }
+
+    if (!state.session) {
+      setStatus("请先登录账号。", true);
+      openAuthDialog();
+      return;
+    }
+
+    await syncNow({ manual: true });
+  } finally {
+    elements.syncNowButton.classList.remove("is-syncing");
+    updateAccountUi();
+  }
 }
 
 async function syncNow(options = {}) {
@@ -2995,47 +2834,6 @@ function revokeAllUrls() {
   clearPendingUrls();
 }
 
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
-
-function dataUrlToBlob(dataUrl) {
-  const [header, content] = dataUrl.split(",");
-  const match = /^data:([^;]+);base64$/i.exec(header || "");
-
-  if (!match || !content) {
-    throw new Error("Invalid image data.");
-  }
-
-  const binary = atob(content);
-  const bytes = new Uint8Array(binary.length);
-
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-
-  return new Blob([bytes], { type: match[1] });
-}
-
-function downloadJsonBackup(backup) {
-  const json = JSON.stringify(backup);
-  const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-
-  link.href = url;
-  link.download = `我的谱夹备份-${formatBackupDate(new Date())}.json`;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
 function createIcon(name) {
   const icon = document.createElement("i");
   icon.setAttribute("data-lucide", name);
@@ -3074,18 +2872,6 @@ function createId() {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function formatBackupDate(date) {
-  const pad = (value) => String(value).padStart(2, "0");
-
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-  ].join("");
 }
 
 function formatCompressionMeta(page) {

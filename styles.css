@@ -334,6 +334,21 @@ noscript {
   pointer-events: none;
 }
 
+.icon-button.is-syncing {
+  opacity: 1;
+}
+
+.icon-button.is-syncing .lucide,
+.icon-button.is-syncing [data-lucide] {
+  animation: sync-spin 0.75s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .score-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
