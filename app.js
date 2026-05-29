@@ -21,6 +21,8 @@ const VIEWER_DOUBLE_TAP_DELAY = 320;
 const IMAGE_MAX_EDGE = 1800;
 const IMAGE_WEBP_QUALITY = 0.78;
 const IMAGE_JPEG_QUALITY = 0.82;
+const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
+const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 
 const state = {
   db: null,
@@ -29,6 +31,9 @@ const state = {
   cloudDb: null,
   session: null,
   cloudReady: false,
+  cloudInitializing: null,
+  cloudError: "",
+  cloudAuthListenerBound: false,
   syncing: false,
   scores: [],
   scorePages: [],
@@ -63,10 +68,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     state.db = await openDatabase();
-    initializeCloud();
     await loadScores();
-    await restoreCloudSession();
     setStatus("");
+    updateAccountUi();
+    queueCloudConnect();
   } catch (error) {
     console.error(error);
     setStatus("本地谱夹读取失败，请确认浏览器允许本地存储。", true);
@@ -379,28 +384,64 @@ function closeFolderDialog() {
   elements.saveFolderButton.disabled = false;
 }
 
-function initializeCloud() {
+function queueCloudConnect() {
+  window.setTimeout(async () => {
+    if (await initializeCloud()) {
+      await restoreCloudSession();
+    }
+  }, 100);
+}
+
+async function initializeCloud() {
+  if (state.cloudReady) {
+    return true;
+  }
+  if (state.cloudInitializing) {
+    return state.cloudInitializing;
+  }
+
+  state.cloudInitializing = connectCloud();
+  updateAccountUi();
+
+  try {
+    return await state.cloudInitializing;
+  } finally {
+    state.cloudInitializing = null;
+    updateAccountUi();
+  }
+}
+
+async function connectCloud() {
   const config = window.MY_SCORE_FOLDER_CLOUDBASE || {};
   const envId = String(config.envId || config.env || "").trim();
 
-  if (!envId || !window.cloudbase?.init) {
+  if (!envId) {
     state.cloudReady = false;
-    updateAccountUi();
-    return;
+    state.cloudError = "请先填写 cloudbase-config.js 中的 CloudBase 环境 ID。";
+    return false;
   }
 
   try {
+    state.cloudError = "";
+    await loadCloudbaseSdk();
+
+    const cloudbase = window.cloudbase?.init ? window.cloudbase : window.cloudbase?.default;
+    if (!cloudbase?.init) {
+      throw new Error("CloudBase SDK 没有加载成功。");
+    }
+
     const initOptions = { env: envId };
     if (config.region) {
       initOptions.region = config.region;
     }
 
-    state.cloudApp = window.cloudbase.init(initOptions);
+    state.cloudApp = cloudbase.init(initOptions);
     state.cloudAuth = state.cloudApp.auth({ persistence: config.persistence || "local" });
     state.cloudDb = state.cloudApp.database();
     state.cloudReady = true;
 
-    if (typeof state.cloudAuth.onLoginStateChanged === "function") {
+    if (!state.cloudAuthListenerBound && typeof state.cloudAuth.onLoginStateChanged === "function") {
+      state.cloudAuthListenerBound = true;
       state.cloudAuth.onLoginStateChanged(async (loginState) => {
         state.session = await createCloudSession(loginState);
         updateAccountUi();
@@ -411,12 +452,43 @@ function initializeCloud() {
         }
       });
     }
+
+    return true;
   } catch (error) {
     console.error(error);
     state.cloudReady = false;
+    state.cloudError = `CloudBase 连接失败：${getErrorMessage(error)}`;
+    return false;
+  }
+}
+
+function loadCloudbaseSdk() {
+  if (window.cloudbase?.init || window.cloudbase?.default?.init) {
+    return Promise.resolve();
   }
 
-  updateAccountUi();
+  return loadScript(CLOUDBASE_SDK_LOCAL).catch((localError) => {
+    console.warn("Local CloudBase SDK failed, trying CDN.", localError);
+    return loadScript(CLOUDBASE_SDK_CDN);
+  });
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error(`${src} 加载失败`)), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`${src} 加载失败`));
+    document.head.append(script);
+  });
 }
 
 async function restoreCloudSession() {
@@ -543,17 +615,19 @@ function extractCloudUser(source) {
 
 function updateAccountUi() {
   const email = state.session?.user?.email;
-  elements.accountButtonText.textContent = email ? "已登录" : "登录";
+  elements.accountButtonText.textContent = email ? "已登录" : state.cloudInitializing ? "连接中" : "登录";
   elements.syncNowButton.disabled = !state.cloudReady || !state.session || state.syncing;
   elements.shareScoresButton.disabled = !state.cloudReady || !state.session;
   elements.importShareButton.disabled = !state.cloudReady || !state.session;
 
   if (elements.authState) {
-    elements.authState.textContent = state.cloudReady
-      ? email
-        ? `当前账号：${email}`
-        : "登录后可以跨设备同步歌谱。"
-      : "请先填写 cloudbase-config.js 中的 CloudBase 环境 ID。";
+    if (state.cloudReady) {
+      elements.authState.textContent = email ? `当前账号：${email}` : "登录后可以跨设备同步歌谱。";
+    } else if (state.cloudInitializing) {
+      elements.authState.textContent = "正在连接 CloudBase，请稍候...";
+    } else {
+      elements.authState.textContent = state.cloudError || "登录后可以跨设备同步歌谱。";
+    }
   }
 
   if (elements.signOutButton) {
@@ -563,7 +637,7 @@ function updateAccountUi() {
 
 function requireCloudSession() {
   if (!state.cloudReady) {
-    setStatus("请先填写 CloudBase 配置并重新部署。", true);
+    setStatus(state.cloudError || "CloudBase 尚未连接，请稍后再试。", true);
     openAuthDialog();
     return false;
   }
@@ -577,7 +651,7 @@ function requireCloudSession() {
   return true;
 }
 
-function openAuthDialog() {
+async function openAuthDialog() {
   updateAccountUi();
   if (typeof elements.authDialog.showModal === "function") {
     elements.authDialog.showModal();
@@ -585,6 +659,13 @@ function openAuthDialog() {
     elements.authDialog.setAttribute("open", "");
   }
   refreshIcons();
+
+  if (!state.cloudReady) {
+    const ready = await initializeCloud();
+    if (ready) {
+      await restoreCloudSession();
+    }
+  }
 }
 
 function closeAuthDialog() {
@@ -597,7 +678,7 @@ function closeAuthDialog() {
 
 async function signInWithPassword(event) {
   event.preventDefault();
-  if (!state.cloudReady) {
+  if (!(await ensureCloudReady())) {
     updateAccountUi();
     return;
   }
@@ -624,7 +705,7 @@ async function signInWithPassword(event) {
 }
 
 async function signUpWithPassword() {
-  if (!state.cloudReady) {
+  if (!(await ensureCloudReady())) {
     updateAccountUi();
     return;
   }
@@ -665,6 +746,22 @@ async function signUpWithPassword() {
   }
 }
 
+async function ensureCloudReady() {
+  if (state.cloudReady) {
+    return true;
+  }
+
+  setStatus("正在连接 CloudBase...");
+  const ready = await initializeCloud();
+  if (!ready) {
+    setStatus(state.cloudError || "CloudBase 连接失败，请检查配置。", true);
+    return false;
+  }
+
+  setStatus("");
+  return true;
+}
+
 async function signInCloudWithPassword(account, password) {
   if (typeof state.cloudAuth.signIn === "function") {
     return state.cloudAuth.signIn({ username: account, password });
@@ -694,6 +791,18 @@ function throwCloudResultError(result) {
   if (result?.code && result.code !== "SUCCESS") {
     throw new Error(result.message || result.msg || String(result.code));
   }
+}
+
+function getErrorMessage(error) {
+  if (!error) {
+    return "未知错误";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return error.message || error.msg || error.error_description || error.code || "未知错误";
 }
 
 function isEmailAddress(value) {
