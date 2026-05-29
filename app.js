@@ -178,10 +178,10 @@ function bindEvents() {
   elements.authForm.addEventListener("submit", signInWithPassword);
   elements.signUpButton.addEventListener("click", signUpWithPassword);
   elements.signOutButton.addEventListener("click", signOut);
-  elements.verifyForm.addEventListener("submit", submitVerificationCode);
-  elements.cancelVerifyButton.addEventListener("click", () => closeVerifyDialog(""));
-  elements.closeVerifyButton.addEventListener("click", () => closeVerifyDialog(""));
-  elements.verifyDialog.addEventListener("cancel", (event) => {
+  elements.verifyForm?.addEventListener("submit", submitVerificationCode);
+  elements.cancelVerifyButton?.addEventListener("click", () => closeVerifyDialog(""));
+  elements.closeVerifyButton?.addEventListener("click", () => closeVerifyDialog(""));
+  elements.verifyDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
     closeVerifyDialog("");
   });
@@ -701,6 +701,10 @@ function isEmailAddress(value) {
 }
 
 function requestVerificationCode(account) {
+  if (!elements.verifyDialog || !elements.verifyForm || !elements.verifyCodeInput) {
+    return Promise.resolve(window.prompt(`请输入发送至 ${account} 的验证码`)?.trim() || "");
+  }
+
   elements.verifyForm.reset();
   elements.verifyState.textContent = `验证码已发送至 ${account}，请输入验证码完成注册。`;
 
@@ -729,6 +733,14 @@ function submitVerificationCode(event) {
 }
 
 function closeVerifyDialog(code) {
+  if (!elements.verifyDialog) {
+    if (state.verifyDialogResolve) {
+      state.verifyDialogResolve(code);
+      state.verifyDialogResolve = null;
+    }
+    return;
+  }
+
   if (elements.verifyDialog.open) {
     elements.verifyDialog.close();
   } else {
@@ -784,7 +796,18 @@ async function registerServiceWorker() {
   }
 
   try {
-    await navigator.serviceWorker.register("./sw.js");
+    let reloadingForNewWorker = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (reloadingForNewWorker) {
+        return;
+      }
+
+      reloadingForNewWorker = true;
+      window.location.reload();
+    });
+
+    const registration = await navigator.serviceWorker.register("./sw.js");
+    await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
   }
