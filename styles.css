@@ -645,6 +645,15 @@ body.add-screen-open .bottom-nav {
   background: transparent;
   color: #fce8ae;
   box-shadow: 0 8px 18px rgba(66, 9, 18, 0.24);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+
+.fab-button.is-dragging {
+  cursor: grabbing;
+  filter: drop-shadow(0 10px 18px rgba(66, 9, 18, 0.3));
 }
 
 .fab-button::before {

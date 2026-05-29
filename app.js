@@ -25,6 +25,8 @@ const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 const STORAGE_UPLOAD_VERSION = 2;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
+const FAB_LONG_PRESS_DELAY = 520;
+const FAB_VIEWPORT_MARGIN = 8;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -55,6 +57,9 @@ const state = {
   authRegisterAccount: "",
   authRegisterCode: "",
   authRegisterVerifyOtp: null,
+  fabLongPressTimer: null,
+  fabDrag: null,
+  fabSuppressClick: false,
   appTouchY: 0,
   deleteDialogResolve: null,
   verifyDialogResolve: null,
@@ -258,6 +263,11 @@ function bindEvents() {
   elements.importShareForm.addEventListener("submit", importSharedScores);
   elements.installAppButton.addEventListener("click", installApp);
   elements.addScoreButton.addEventListener("click", handleAddButtonClick);
+  elements.addScoreButton.addEventListener("pointerdown", handleFabPointerDown);
+  elements.addScoreButton.addEventListener("pointermove", handleFabPointerMove);
+  elements.addScoreButton.addEventListener("pointerup", handleFabPointerEnd);
+  elements.addScoreButton.addEventListener("pointercancel", handleFabPointerEnd);
+  elements.addScoreButton.addEventListener("lostpointercapture", handleFabPointerEnd);
   if (elements.addScoreButtonArt) {
     if (elements.addScoreButtonArt.complete && elements.addScoreButtonArt.naturalWidth > 0) {
       elements.addScoreButton.classList.add("fab-image-ready");
@@ -392,13 +402,127 @@ function handleAppTouchMove(event) {
   }
 }
 
-function handleAddButtonClick() {
+function handleAddButtonClick(event) {
+  if (state.fabSuppressClick) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    state.fabSuppressClick = false;
+    return;
+  }
+
   if (state.currentFolderId) {
     openAddScreen();
     return;
   }
 
   openAddChoiceDialog();
+}
+
+function handleFabPointerDown(event) {
+  if (event.button !== undefined && event.button !== 0) {
+    return;
+  }
+
+  window.clearTimeout(state.fabLongPressTimer);
+  const rect = elements.addScoreButton.getBoundingClientRect();
+  state.fabDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    currentX: event.clientX,
+    currentY: event.clientY,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+    active: false,
+  };
+
+  try {
+    elements.addScoreButton.setPointerCapture(event.pointerId);
+  } catch (error) {
+    console.warn(error);
+  }
+
+  state.fabLongPressTimer = window.setTimeout(() => {
+    startFabDrag(event.pointerId);
+  }, FAB_LONG_PRESS_DELAY);
+}
+
+function handleFabPointerMove(event) {
+  const drag = state.fabDrag;
+  if (!drag || drag.pointerId !== event.pointerId) {
+    return;
+  }
+
+  drag.currentX = event.clientX;
+  drag.currentY = event.clientY;
+
+  if (!drag.active) {
+    return;
+  }
+
+  event.preventDefault();
+  moveFabToPointer(event.clientX, event.clientY);
+}
+
+function handleFabPointerEnd(event) {
+  const drag = state.fabDrag;
+  if (!drag || drag.pointerId !== event.pointerId) {
+    return;
+  }
+
+  window.clearTimeout(state.fabLongPressTimer);
+  state.fabLongPressTimer = null;
+
+  if (drag.active) {
+    event.preventDefault();
+    state.fabSuppressClick = true;
+    window.setTimeout(() => {
+      state.fabSuppressClick = false;
+    }, 360);
+  }
+
+  elements.addScoreButton.classList.remove("is-dragging");
+  try {
+    elements.addScoreButton.releasePointerCapture(event.pointerId);
+  } catch (error) {
+    console.warn(error);
+  }
+
+  state.fabDrag = null;
+}
+
+function startFabDrag(pointerId) {
+  const drag = state.fabDrag;
+  if (!drag || drag.pointerId !== pointerId) {
+    return;
+  }
+
+  drag.active = true;
+  state.fabSuppressClick = true;
+  const rect = elements.addScoreButton.getBoundingClientRect();
+  elements.addScoreButton.style.left = `${rect.left}px`;
+  elements.addScoreButton.style.top = `${rect.top}px`;
+  elements.addScoreButton.style.right = "auto";
+  elements.addScoreButton.style.bottom = "auto";
+  elements.addScoreButton.classList.add("is-dragging");
+  moveFabToPointer(drag.currentX, drag.currentY);
+}
+
+function moveFabToPointer(clientX, clientY) {
+  const drag = state.fabDrag;
+  if (!drag) {
+    return;
+  }
+
+  const rect = elements.addScoreButton.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  const maxLeft = window.innerWidth - width - FAB_VIEWPORT_MARGIN;
+  const maxTop = window.innerHeight - height - FAB_VIEWPORT_MARGIN;
+  const nextLeft = clamp(clientX - drag.offsetX, FAB_VIEWPORT_MARGIN, maxLeft);
+  const nextTop = clamp(clientY - drag.offsetY, FAB_VIEWPORT_MARGIN, maxTop);
+  elements.addScoreButton.style.left = `${nextLeft}px`;
+  elements.addScoreButton.style.top = `${nextTop}px`;
 }
 
 function switchMainTab(tab) {
@@ -1380,7 +1504,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=39");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=40");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
