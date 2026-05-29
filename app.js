@@ -24,6 +24,7 @@ const IMAGE_JPEG_QUALITY = 0.82;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 const STORAGE_UPLOAD_VERSION = 2;
+const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -689,13 +690,79 @@ function normalizeCloudSession(source, fallbackEmail = "") {
     return null;
   }
 
-  const email = user.email || user.username || user.loginName || fallbackEmail || "";
+  const accountLabel = getPreferredAccountLabel(user, fallbackEmail, id);
   return {
     user: {
       id: String(id),
-      email: email ? String(email) : String(id),
+      email: accountLabel || String(id),
+      accountLabel: accountLabel || String(id),
     },
   };
+}
+
+function getPreferredAccountLabel(user, fallbackAccount = "", userId = "") {
+  const fallback = String(fallbackAccount || "").trim();
+  const stored = readStoredAccountLabel(userId);
+  const phoneCandidates = [
+    fallback,
+    user.phoneNumber,
+    user.phone_number,
+    user.phone,
+    user.mobile,
+    user.mobilePhone,
+    user.phoneNum,
+    user.tel,
+    user.telephone,
+    stored,
+  ];
+  const phone = phoneCandidates.map((value) => normalizePhoneNumber(value)).find(isLikelyPhoneNumber);
+  if (phone) {
+    writeStoredAccountLabel(userId, phone);
+    return phone;
+  }
+
+  const emailCandidates = [user.email, fallback, stored, user.loginName, user.username];
+  const email = emailCandidates.map((value) => String(value || "").trim()).find(isEmailAddress);
+  if (email) {
+    writeStoredAccountLabel(userId, email);
+    return email;
+  }
+
+  const readableAccount = [stored, fallback, user.loginName, user.username]
+    .map((value) => String(value || "").trim())
+    .find((value) => value && value !== String(userId));
+
+  if (readableAccount) {
+    writeStoredAccountLabel(userId, readableAccount);
+    return readableAccount;
+  }
+
+  return "";
+}
+
+function readStoredAccountLabel(userId) {
+  if (!userId || !window.localStorage) {
+    return "";
+  }
+
+  try {
+    return window.localStorage.getItem(`${ACCOUNT_LABEL_STORAGE_PREFIX}${userId}`) || "";
+  } catch (error) {
+    console.warn(error);
+    return "";
+  }
+}
+
+function writeStoredAccountLabel(userId, accountLabel) {
+  if (!userId || !accountLabel || !window.localStorage) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(`${ACCOUNT_LABEL_STORAGE_PREFIX}${userId}`, accountLabel);
+  } catch (error) {
+    console.warn(error);
+  }
 }
 
 function extractCloudUser(source) {
@@ -755,7 +822,7 @@ function updateAccountUi() {
 }
 
 function getCurrentAccountLabel() {
-  return state.session?.user?.email || "";
+  return state.session?.user?.accountLabel || state.session?.user?.email || "";
 }
 
 function setAuthStatus(message, isError = false) {
@@ -1312,7 +1379,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=37");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=38");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
