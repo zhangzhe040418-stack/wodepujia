@@ -24,7 +24,9 @@ const IMAGE_JPEG_QUALITY = 0.82;
 
 const state = {
   db: null,
-  supabase: null,
+  cloudApp: null,
+  cloudAuth: null,
+  cloudDb: null,
   session: null,
   cloudReady: false,
   syncing: false,
@@ -363,26 +365,42 @@ function closeFolderDialog() {
 }
 
 function initializeCloud() {
-  const config = window.MY_SCORE_FOLDER_SUPABASE || {};
-  const hasConfig = Boolean(config.url && config.anonKey);
+  const config = window.MY_SCORE_FOLDER_CLOUDBASE || {};
+  const envId = String(config.envId || config.env || "").trim();
 
-  if (!hasConfig || !window.supabase?.createClient) {
+  if (!envId || !window.cloudbase?.init) {
     state.cloudReady = false;
     updateAccountUi();
     return;
   }
 
-  state.supabase = window.supabase.createClient(config.url, config.anonKey);
-  state.cloudReady = true;
-  state.supabase.auth.onAuthStateChange(async (_event, session) => {
-    state.session = session;
-    updateAccountUi();
-    await loadScores();
-    if (session) {
-      await claimLocalRecordsForUser(session.user.id);
-      await syncNow();
+  try {
+    const initOptions = { env: envId };
+    if (config.region) {
+      initOptions.region = config.region;
     }
-  });
+
+    state.cloudApp = window.cloudbase.init(initOptions);
+    state.cloudAuth = state.cloudApp.auth({ persistence: config.persistence || "local" });
+    state.cloudDb = state.cloudApp.database();
+    state.cloudReady = true;
+
+    if (typeof state.cloudAuth.onLoginStateChanged === "function") {
+      state.cloudAuth.onLoginStateChanged(async (loginState) => {
+        state.session = await createCloudSession(loginState);
+        updateAccountUi();
+        await loadScores();
+        if (state.session) {
+          await claimLocalRecordsForUser(state.session.user.id);
+          await syncNow();
+        }
+      });
+    }
+  } catch (error) {
+    console.error(error);
+    state.cloudReady = false;
+  }
+
   updateAccountUi();
 }
 
@@ -392,20 +410,120 @@ async function restoreCloudSession() {
     return;
   }
 
-  const { data, error } = await state.supabase.auth.getSession();
-  if (error) {
+  try {
+    const loginState =
+      typeof state.cloudAuth.getLoginState === "function"
+        ? await state.cloudAuth.getLoginState()
+        : state.cloudAuth.hasLoginState?.();
+    state.session = await createCloudSession(loginState);
+  } catch (error) {
     console.error(error);
     updateAccountUi();
     return;
   }
 
-  state.session = data.session;
   updateAccountUi();
   await loadScores();
   if (state.session) {
     await claimLocalRecordsForUser(state.session.user.id);
     await syncNow();
   }
+}
+
+async function createCloudSession(loginState, fallbackEmail = "") {
+  const directSession = normalizeCloudSession(loginState, fallbackEmail);
+  if (directSession) {
+    return directSession;
+  }
+
+  const candidates = [];
+
+  if (loginState && typeof loginState.getUserInfo === "function") {
+    try {
+      candidates.push(await loginState.getUserInfo());
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+
+  if (state.cloudAuth) {
+    if (typeof state.cloudAuth.getCurrentUser === "function") {
+      try {
+        candidates.push(await state.cloudAuth.getCurrentUser());
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+
+    if (typeof state.cloudAuth.getUserInfo === "function") {
+      try {
+        candidates.push(await state.cloudAuth.getUserInfo());
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+
+    candidates.push(state.cloudAuth.currentUser);
+  }
+
+  for (const candidate of candidates) {
+    const session = normalizeCloudSession(candidate, fallbackEmail);
+    if (session) {
+      return session;
+    }
+  }
+
+  return null;
+}
+
+function normalizeCloudSession(source, fallbackEmail = "") {
+  const user = extractCloudUser(source);
+  if (!user) {
+    return null;
+  }
+
+  const id =
+    user.uid ||
+    user.uuid ||
+    user.userId ||
+    user.user_id ||
+    user._id ||
+    user.openId ||
+    user.openid ||
+    user.email ||
+    user.username ||
+    fallbackEmail;
+
+  if (!id) {
+    return null;
+  }
+
+  const email = user.email || user.username || user.loginName || fallbackEmail || "";
+  return {
+    user: {
+      id: String(id),
+      email: email ? String(email) : String(id),
+    },
+  };
+}
+
+function extractCloudUser(source) {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  const candidates = [
+    source.user,
+    source.userInfo,
+    source.userinfo,
+    source.data?.user,
+    source.data?.userInfo,
+    source.data?.userinfo,
+    source.data,
+    source,
+  ];
+
+  return candidates.find((candidate) => candidate && typeof candidate === "object") || null;
 }
 
 function updateAccountUi() {
@@ -420,7 +538,7 @@ function updateAccountUi() {
       ? email
         ? `当前账号：${email}`
         : "登录后可以跨设备同步歌谱。"
-      : "请先填写 supabase-config.js 中的 Supabase URL 和 anon key。";
+      : "请先填写 cloudbase-config.js 中的 CloudBase 环境 ID。";
   }
 
   if (elements.signOutButton) {
@@ -430,7 +548,7 @@ function updateAccountUi() {
 
 function requireCloudSession() {
   if (!state.cloudReady) {
-    setStatus("请先填写 Supabase 配置并重新部署。", true);
+    setStatus("请先填写 CloudBase 配置并重新部署。", true);
     openAuthDialog();
     return false;
   }
@@ -471,17 +589,15 @@ async function signInWithPassword(event) {
 
   elements.signInButton.disabled = true;
   try {
-    const { data, error } = await state.supabase.auth.signInWithPassword({
-      email: elements.authEmail.value.trim(),
-      password: elements.authPassword.value,
-    });
-    if (error) {
-      throw error;
+    const email = elements.authEmail.value.trim();
+    const loginState = await state.cloudAuth.signInWithEmailAndPassword(email, elements.authPassword.value);
+    state.session = await createCloudSession(loginState, email);
+    if (!state.session) {
+      throw new Error("登录状态读取失败，请重新登录。");
     }
-    state.session = data.session;
     closeAuthDialog();
     setStatus("已登录，正在同步...");
-    await claimLocalRecordsForUser(data.session.user.id);
+    await claimLocalRecordsForUser(state.session.user.id);
     await syncNow({ manual: true });
   } catch (error) {
     console.error(error);
@@ -500,20 +616,17 @@ async function signUpWithPassword() {
 
   elements.signUpButton.disabled = true;
   try {
-    const { data, error } = await state.supabase.auth.signUp({
-      email: elements.authEmail.value.trim(),
-      password: elements.authPassword.value,
-    });
-    if (error) {
-      throw error;
+    const email = elements.authEmail.value.trim();
+    await state.cloudAuth.signUpWithEmailAndPassword(email, elements.authPassword.value);
+    const loginState = await state.cloudAuth.signInWithEmailAndPassword(email, elements.authPassword.value);
+    state.session = await createCloudSession(loginState, email);
+    if (!state.session) {
+      throw new Error("注册成功，但登录状态读取失败，请重新登录。");
     }
-    state.session = data.session || state.session;
-    setStatus(data.session ? "注册成功，正在同步..." : "注册成功，请按邮件提示确认账号后登录。");
-    if (data.session) {
-      closeAuthDialog();
-      await claimLocalRecordsForUser(data.session.user.id);
-      await syncNow({ manual: true });
-    }
+    setStatus("注册成功，正在同步...");
+    closeAuthDialog();
+    await claimLocalRecordsForUser(state.session.user.id);
+    await syncNow({ manual: true });
   } catch (error) {
     console.error(error);
     setStatus(error.message || "注册失败，请稍后再试。", true);
@@ -528,7 +641,7 @@ async function signOut() {
     return;
   }
 
-  await state.supabase.auth.signOut();
+  await state.cloudAuth.signOut();
   state.session = null;
   closeAuthDialog();
   await loadScores();
@@ -1652,7 +1765,7 @@ async function syncNow(options = {}) {
     }
   } catch (error) {
     console.error(error);
-    setStatus(error.message || "同步失败，请检查网络和 Supabase 配置。", true);
+    setStatus(error.message || "同步失败，请检查网络和 CloudBase 配置。", true);
   } finally {
     state.syncing = false;
     updateAccountUi();
@@ -1661,7 +1774,6 @@ async function syncNow(options = {}) {
 
 async function uploadLocalChanges() {
   const userId = state.session.user.id;
-  const bucket = getStorageBucket();
   const folders = state.folders.map((folder) => ({ ...folder, userId }));
   const scores = state.scores.map((score) => ({ ...toScoreRecord(score), userId }));
   const pages = state.scorePages
@@ -1670,15 +1782,12 @@ async function uploadLocalChanges() {
   const uploadedPages = [];
 
   for (const page of pages) {
-    const storagePath = page.storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
+    let storagePath = page.storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
     if (page.blob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)) {
-      const { error } = await bucket.upload(storagePath, page.blob, {
-        upsert: true,
-        contentType: page.type || page.blob.type || "image/jpeg",
-      });
-      if (error) {
-        throw error;
-      }
+      const cloudPath = page.storagePath?.startsWith("cloud://")
+        ? createStoragePath(userId, page.scoreId, page.id, page.type)
+        : storagePath;
+      storagePath = await uploadCloudFile(cloudPath, page.blob);
     }
     uploadedPages.push({
       ...page,
@@ -1706,25 +1815,18 @@ async function uploadLocalChanges() {
 
 async function pullCloudChanges() {
   const userId = state.session.user.id;
-  const [foldersResult, scoresResult, pagesResult] = await Promise.all([
-    state.supabase.from(CLOUD_TABLES.folders).select("*").eq("user_id", userId).is("deleted_at", null),
-    state.supabase.from(CLOUD_TABLES.scores).select("*").eq("user_id", userId).is("deleted_at", null),
-    state.supabase
-      .from(CLOUD_TABLES.pages)
-      .select("*")
-      .eq("user_id", userId)
-      .is("deleted_at", null)
-      .order("page_index"),
+  const [folders, scores, pages] = await Promise.all([
+    queryCloudRows(CLOUD_TABLES.folders, { user_id: userId, deleted_at: null }),
+    queryCloudRows(CLOUD_TABLES.scores, { user_id: userId, deleted_at: null }),
+    queryCloudRows(CLOUD_TABLES.pages, { user_id: userId, deleted_at: null }, {
+      orderBy: [["page_index", "asc"]],
+    }),
   ]);
-
-  if (foldersResult.error) throw foldersResult.error;
-  if (scoresResult.error) throw scoresResult.error;
-  if (pagesResult.error) throw pagesResult.error;
 
   const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
   const cloudPages = [];
 
-  for (const row of pagesResult.data || []) {
+  for (const row of pages) {
     const page = fromCloudPage(row);
     const localPage = localPageById.get(page.id);
     if (localPage?.blob) {
@@ -1732,10 +1834,7 @@ async function pullCloudChanges() {
       continue;
     }
 
-    const { data, error } = await getStorageBucket().download(page.storagePath);
-    if (error) {
-      throw error;
-    }
+    const data = await downloadCloudFile(page.storagePath);
     cloudPages.push({
       ...page,
       blob: data,
@@ -1744,8 +1843,8 @@ async function pullCloudChanges() {
   }
 
   await putCloudReadyRecords(
-    (foldersResult.data || []).map(fromCloudFolder),
-    (scoresResult.data || []).map(fromCloudScore),
+    folders.map(fromCloudFolder),
+    scores.map(fromCloudScore),
     cloudPages,
   );
 }
@@ -1755,19 +1854,144 @@ function markLocalSynced(folders, scores, pages) {
 }
 
 async function upsertCloud(table, rows) {
-  const { error } = await state.supabase.from(table).upsert(rows, { onConflict: "id" });
-  if (error) {
-    throw error;
+  const collection = state.cloudDb.collection(table);
+  for (const row of rows) {
+    const { _id, ...document } = row;
+    const result = await collection.doc(String(row.id)).set(document);
+    assertCloudResult(result);
   }
 }
 
-function getStorageBucket() {
-  const bucket = window.MY_SCORE_FOLDER_SUPABASE?.storageBucket || "score-pages";
-  return state.supabase.storage.from(bucket);
+async function queryCloudRows(collectionName, where, options = {}) {
+  const pageSize = 1000;
+  const rows = [];
+  let offset = 0;
+  let batch = [];
+
+  do {
+    let query = state.cloudDb.collection(collectionName).where(where);
+    (options.orderBy || []).forEach(([field, direction]) => {
+      query = query.orderBy(field, direction || "asc");
+    });
+
+    const result = await query.skip(offset).limit(pageSize).get();
+    assertCloudResult(result);
+    batch = Array.isArray(result.data) ? result.data : [];
+    rows.push(...batch);
+    offset += batch.length;
+  } while (batch.length === pageSize);
+
+  return rows;
+}
+
+async function queryCloudRowsByIds(collectionName, field, values, where = {}, options = {}) {
+  const uniqueValues = Array.from(new Set(values.filter(Boolean)));
+  if (!uniqueValues.length) {
+    return [];
+  }
+
+  const rows = [];
+  for (const chunk of chunkArray(uniqueValues, 50)) {
+    rows.push(
+      ...(await queryCloudRows(
+        collectionName,
+        {
+          ...where,
+          [field]: state.cloudDb.command.in(chunk),
+        },
+        options,
+      )),
+    );
+  }
+
+  return rows;
+}
+
+async function deleteCloudRowsByIds(collectionName, ids) {
+  const collection = state.cloudDb.collection(collectionName);
+  for (const id of ids.filter(Boolean)) {
+    const result = await collection.doc(String(id)).remove();
+    assertCloudResult(result);
+  }
+}
+
+function assertCloudResult(result) {
+  if (!result) {
+    return;
+  }
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.code && result.code !== "SUCCESS") {
+    throw new Error(result.message || result.msg || String(result.code));
+  }
+}
+
+async function uploadCloudFile(cloudPath, blob) {
+  const result = await state.cloudApp.uploadFile({
+    cloudPath,
+    fileContent: blob,
+  });
+  assertCloudResult(result);
+  return result.fileID || result.fileId || result.data?.fileID || cloudPath;
+}
+
+async function downloadCloudFile(fileID) {
+  if (!fileID) {
+    throw new Error("歌谱图片缺少云端文件 ID。");
+  }
+
+  const result = await state.cloudApp.getTempFileURL({
+    fileList: [fileID],
+  });
+  assertCloudResult(result);
+
+  const fileInfo = result.fileList?.[0] || result.data?.fileList?.[0];
+  if (!fileInfo) {
+    throw new Error("无法获取歌谱图片下载地址。");
+  }
+  if (fileInfo.code && fileInfo.code !== "SUCCESS") {
+    throw new Error(fileInfo.message || fileInfo.msg || "歌谱图片下载地址获取失败。");
+  }
+
+  const url = fileInfo.tempFileURL || fileInfo.download_url || fileInfo.url;
+  if (!url) {
+    throw new Error("歌谱图片下载地址为空。");
+  }
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("歌谱图片下载失败。");
+  }
+
+  return response.blob();
+}
+
+async function deleteCloudFiles(fileIDs) {
+  const targets = fileIDs.filter(Boolean);
+  if (!targets.length) {
+    return;
+  }
+
+  const result = await state.cloudApp.deleteFile({
+    fileList: targets,
+  });
+  assertCloudResult(result);
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function createStoragePath(userId, scoreId, pageId, type) {
-  return `${userId}/${scoreId}/${pageId}.${getExtensionFromType(type)}`;
+  const root = String(window.MY_SCORE_FOLDER_CLOUDBASE?.storageRoot || "score-pages").replace(/^\/+|\/+$/g, "");
+  return `${root}/${userId}/${scoreId}/${pageId}.${getExtensionFromType(type)}`;
 }
 
 function getExtensionFromType(type) {
@@ -1940,33 +2164,32 @@ async function createShareCode(event) {
 async function insertShareBatch(scoreIds) {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const code = createShareCodeValue();
-    const { data, error } = await state.supabase
-      .from(CLOUD_TABLES.shareBatches)
-      .insert({
+    const existing = await queryCloudRows(CLOUD_TABLES.shareBatches, { code });
+    if (existing.length) {
+      continue;
+    }
+
+    const now = new Date().toISOString();
+    const shareId = createId();
+    await upsertCloud(CLOUD_TABLES.shareBatches, [
+      {
+        id: shareId,
         owner_id: state.session.user.id,
         code,
-      })
-      .select("id, code")
-      .single();
-
-    if (error) {
-      if (String(error.code) === "23505") {
-        continue;
-      }
-      throw error;
-    }
-
-    const { error: itemError } = await state.supabase.from(CLOUD_TABLES.shareItems).insert(
+        created_at: now,
+      },
+    ]);
+    await upsertCloud(
+      CLOUD_TABLES.shareItems,
       scoreIds.map((scoreId) => ({
-        share_id: data.id,
+        id: createId(),
+        share_id: shareId,
         score_id: scoreId,
+        created_at: now,
       })),
     );
-    if (itemError) {
-      throw itemError;
-    }
 
-    return data.code;
+    return code;
   }
 
   throw new Error("同步码生成失败，请重试。");
@@ -2022,40 +2245,30 @@ async function importSharedScores(event) {
 }
 
 async function importScoresByShareCode(code) {
-  const { data: batch, error: batchError } = await state.supabase
-    .from(CLOUD_TABLES.shareBatches)
-    .select("id, owner_id, code")
-    .eq("code", code)
-    .single();
-  if (batchError) {
-    throw batchError;
+  const batches = await queryCloudRows(CLOUD_TABLES.shareBatches, { code });
+  const batch = batches[0];
+  if (!batch) {
+    throw new Error("同步码不存在，请检查后再试。");
   }
 
-  const { data: items, error: itemError } = await state.supabase
-    .from(CLOUD_TABLES.shareItems)
-    .select("score_id")
-    .eq("share_id", batch.id);
-  if (itemError) {
-    throw itemError;
-  }
-
-  const scoreIds = (items || []).map((item) => item.score_id);
+  const items = await queryCloudRows(CLOUD_TABLES.shareItems, { share_id: batch.id });
+  const scoreIds = items.map((item) => item.score_id);
   if (!scoreIds.length) {
     return 0;
   }
 
-  const [{ data: sharedScores, error: scoreError }, { data: sharedPages, error: pageError }] = await Promise.all([
-    state.supabase.from(CLOUD_TABLES.scores).select("*").in("id", scoreIds).is("deleted_at", null),
-    state.supabase.from(CLOUD_TABLES.pages).select("*").in("score_id", scoreIds).is("deleted_at", null).order("page_index"),
+  const [sharedScores, sharedPages] = await Promise.all([
+    queryCloudRowsByIds(CLOUD_TABLES.scores, "id", scoreIds, { deleted_at: null }),
+    queryCloudRowsByIds(CLOUD_TABLES.pages, "score_id", scoreIds, { deleted_at: null }, {
+      orderBy: [["page_index", "asc"]],
+    }),
   ]);
-  if (scoreError) throw scoreError;
-  if (pageError) throw pageError;
 
   const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
   const userId = state.session.user.id;
   let importedCount = 0;
 
-  for (const sharedScore of sharedScores || []) {
+  for (const sharedScore of sharedScores) {
     if (existingNames.has(normalizeText(sharedScore.name))) {
       continue;
     }
@@ -2072,23 +2285,14 @@ async function importScoresByShareCode(code) {
       deletedAt: null,
       syncStatus: SYNC_STATUS_PENDING,
     };
-    const pageRows = (sharedPages || []).filter((page) => page.score_id === sharedScore.id);
+    const pageRows = sharedPages.filter((page) => page.score_id === sharedScore.id);
     const newPages = [];
 
     for (const [index, pageRow] of pageRows.entries()) {
-      const { data: blob, error } = await getStorageBucket().download(pageRow.storage_path);
-      if (error) {
-        throw error;
-      }
+      const blob = await downloadCloudFile(pageRow.storage_path);
       const newPageId = createId();
       const storagePath = createStoragePath(userId, newScore.id, newPageId, pageRow.type);
-      const { error: uploadError } = await getStorageBucket().upload(storagePath, blob, {
-        upsert: true,
-        contentType: pageRow.type || blob.type || "image/jpeg",
-      });
-      if (uploadError) {
-        throw uploadError;
-      }
+      const fileID = await uploadCloudFile(storagePath, blob);
       newPages.push({
         id: newPageId,
         scoreId: newScore.id,
@@ -2098,11 +2302,11 @@ async function importScoresByShareCode(code) {
         type: pageRow.type || blob.type || "image/jpeg",
         size: Number(pageRow.size) || blob.size,
         blob,
-        storagePath,
+        storagePath: fileID,
         createdAt: now,
         updatedAt: now,
         deletedAt: null,
-        syncStatus: SYNC_STATUS_PENDING,
+        syncStatus: SYNC_STATUS_SYNCED,
       });
     }
 
@@ -2112,7 +2316,7 @@ async function importScoresByShareCode(code) {
 
     await putScoreWithPages(newScore, newPages);
     await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(newScore)]);
-    await upsertCloud(CLOUD_TABLES.pages, newPages.map((page) => toCloudPage({ ...page, syncStatus: SYNC_STATUS_SYNCED })));
+    await upsertCloud(CLOUD_TABLES.pages, newPages.map(toCloudPage));
     existingNames.add(newScore.normalizedName);
     importedCount += 1;
   }
@@ -2420,15 +2624,12 @@ async function deleteCloudScore(score) {
   const paths = (score.pages || []).map((page) => page.storagePath).filter(Boolean);
 
   if (paths.length) {
-    const { error } = await getStorageBucket().remove(paths);
-    if (error) throw error;
+    await deleteCloudFiles(paths);
   }
   if (pageIds.length) {
-    const { error } = await state.supabase.from(CLOUD_TABLES.pages).delete().in("id", pageIds);
-    if (error) throw error;
+    await deleteCloudRowsByIds(CLOUD_TABLES.pages, pageIds);
   }
-  const { error } = await state.supabase.from(CLOUD_TABLES.scores).delete().eq("id", score.id);
-  if (error) throw error;
+  await deleteCloudRowsByIds(CLOUD_TABLES.scores, [score.id]);
 }
 
 function requestDeleteConfirmation(score) {

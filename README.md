@@ -30,24 +30,25 @@ node server.js
 
 发布成功后，用公网 HTTPS 地址打开，例如 `https://你的站点名.vercel.app`。这个地址在手机移动网络、家里 Wi-Fi、教会 Wi-Fi 等任意网络中都可以访问。
 
-## Supabase 登录与同步
+## CloudBase 登录与同步
 
 当前代码已经预留账号密码登录、云端同步、图片上传和分享码导入功能。启用步骤：
 
-1. 在 Supabase 新建项目。
-2. 打开项目的 SQL Editor，运行 `supabase-schema.sql`。
-3. 在 Supabase Authentication 里开启 Email 登录方式。
-4. 打开 `supabase-config.js`，填写项目 URL 和 anon key：
+1. 打开腾讯云 CloudBase 控制台，新建一个 Web 应用可用的环境。
+2. 在“登录授权”中开启邮箱/密码登录方式。
+3. 在“数据库”中创建集合：`folders`、`scores`、`score_pages`、`share_batches`、`share_items`。
+4. 在“云存储”中开启存储能力。
+5. 在“安全配置”中把你的公网域名加入 Web 安全域名，例如 GitHub Pages 的 `https://zhangzhe040418-stack.github.io`。
+6. 打开 `cloudbase-config.js`，填写环境 ID：
 
 ```js
-window.MY_SCORE_FOLDER_SUPABASE = {
-  url: "https://你的项目.supabase.co",
-  anonKey: "你的 anon public key",
-  storageBucket: "score-pages",
+window.MY_SCORE_FOLDER_CLOUDBASE = {
+  envId: "你的 CloudBase 环境 ID",
+  storageRoot: "score-pages",
 };
 ```
 
-5. 提交并重新部署到 GitHub Pages。
+7. 提交并重新部署到 GitHub Pages。
 
 启用后，用户可以用邮箱和密码注册/登录。登录后，本地歌谱会上传到当前账号；换设备登录同一个账号后，会自动下载该账号的文件夹、歌谱和图片。
 
@@ -62,4 +63,4 @@ window.MY_SCORE_FOLDER_SUPABASE = {
 
 安装后会像普通 App 一样从桌面打开。应用外壳支持离线加载，歌谱数据保存在当前浏览器或已安装 App 的 IndexedDB 中；只要不清除站点数据，之前保存的歌谱都会保留。
 
-注意：没有填写 Supabase 配置时，App 会继续以本地离线模式运行。填写并部署 Supabase 配置后，才会启用账号登录和多设备同步。
+注意：没有填写 CloudBase 配置时，App 会继续以本地离线模式运行。填写并部署 CloudBase 配置后，才会启用账号登录和多设备同步。
