@@ -96,11 +96,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 function bindElements() {
   elements.appShell = document.querySelector(".app-shell");
+  elements.topbar = document.querySelector(".topbar");
   elements.librarySummary = document.querySelector("#librarySummary");
   elements.libraryScreen = document.querySelector("#libraryScreen");
   elements.myScreen = document.querySelector("#myScreen");
   elements.navLibraryButton = document.querySelector("#navLibraryButton");
   elements.navMineButton = document.querySelector("#navMineButton");
+  elements.bottomNav = document.querySelector(".bottom-nav");
   elements.myAccountButton = document.querySelector("#myAccountButton");
   elements.preferencesButton = document.querySelector("#preferencesButton");
   elements.myAuthState = document.querySelector("#myAuthState");
@@ -517,12 +519,43 @@ function moveFabToPointer(clientX, clientY) {
   const rect = elements.addScoreButton.getBoundingClientRect();
   const width = rect.width;
   const height = rect.height;
-  const maxLeft = window.innerWidth - width - FAB_VIEWPORT_MARGIN;
-  const maxTop = window.innerHeight - height - FAB_VIEWPORT_MARGIN;
-  const nextLeft = clamp(clientX - drag.offsetX, FAB_VIEWPORT_MARGIN, maxLeft);
-  const nextTop = clamp(clientY - drag.offsetY, FAB_VIEWPORT_MARGIN, maxTop);
+  const bounds = getFabDragBounds(width, height);
+  const nextLeft = clamp(clientX - drag.offsetX, bounds.minLeft, bounds.maxLeft);
+  const nextTop = clamp(clientY - drag.offsetY, bounds.minTop, bounds.maxTop);
   elements.addScoreButton.style.left = `${nextLeft}px`;
   elements.addScoreButton.style.top = `${nextTop}px`;
+}
+
+function getFabDragBounds(width, height) {
+  const topbarRect = getVisibleElementRect(elements.topbar);
+  const bottomNavRect = getVisibleElementRect(elements.bottomNav);
+  const minLeft = FAB_VIEWPORT_MARGIN;
+  const maxLeft = Math.max(minLeft, window.innerWidth - width - FAB_VIEWPORT_MARGIN);
+  const minTop = topbarRect
+    ? Math.max(FAB_VIEWPORT_MARGIN, topbarRect.bottom + FAB_VIEWPORT_MARGIN)
+    : FAB_VIEWPORT_MARGIN;
+  const bottomLimit = bottomNavRect ? bottomNavRect.top - FAB_VIEWPORT_MARGIN : window.innerHeight - FAB_VIEWPORT_MARGIN;
+  const maxTop = Math.max(minTop, bottomLimit - height);
+
+  return { minLeft, maxLeft, minTop, maxTop };
+}
+
+function getVisibleElementRect(element) {
+  if (!element || element.hidden) {
+    return null;
+  }
+
+  const style = window.getComputedStyle(element);
+  if (style.display === "none" || style.visibility === "hidden") {
+    return null;
+  }
+
+  const rect = element.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return null;
+  }
+
+  return rect;
 }
 
 function switchMainTab(tab) {
@@ -1504,7 +1537,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=40");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=41");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
