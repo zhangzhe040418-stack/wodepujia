@@ -159,6 +159,7 @@ function bindElements() {
   elements.shareDialog = document.querySelector("#shareDialog");
   elements.shareForm = document.querySelector("#shareForm");
   elements.shareList = document.querySelector("#shareList");
+  elements.shareSelectAll = document.querySelector("#shareSelectAll");
   elements.shareCodePanel = document.querySelector("#shareCodePanel");
   elements.shareCodeText = document.querySelector("#shareCodeText");
   elements.closeShareButton = document.querySelector("#closeShareButton");
@@ -257,6 +258,8 @@ function bindEvents() {
     closeShareDialog();
   });
   elements.shareForm.addEventListener("submit", createShareCode);
+  elements.shareSelectAll.addEventListener("change", handleShareSelectAllChange);
+  elements.shareList.addEventListener("change", handleShareSelectionChange);
   elements.importShareButton.addEventListener("click", openImportShareDialog);
   elements.closeImportShareButton.addEventListener("click", closeImportShareDialog);
   elements.importShareDialog.addEventListener("cancel", (event) => {
@@ -1573,7 +1576,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=42");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=43");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2763,6 +2766,10 @@ async function uploadLocalChanges() {
   if (deletedScoreIds.length) {
     await deleteCloudShareItemsForScores(deletedScoreIds);
   }
+  const deletedFolderIds = folders.filter((folder) => folder.deletedAt).map((folder) => folder.id);
+  if (deletedFolderIds.length) {
+    await deleteCloudShareItemsForFolders(deletedFolderIds);
+  }
 
   await markLocalSynced(
     folders.map((folder) => ({ ...folder, syncStatus: SYNC_STATUS_SYNCED })),
@@ -2892,6 +2899,19 @@ async function deleteCloudShareItemsForScores(scoreIds) {
   }
 
   const rows = await queryCloudRowsByIds(CLOUD_TABLES.shareItems, "score_id", ids);
+  await deleteCloudRowsByIds(
+    CLOUD_TABLES.shareItems,
+    rows.map((row) => row.id || row._id),
+  );
+}
+
+async function deleteCloudShareItemsForFolders(folderIds) {
+  const ids = Array.from(new Set(folderIds.filter(Boolean).map(String)));
+  if (!ids.length) {
+    return;
+  }
+
+  const rows = await queryCloudRowsByIds(CLOUD_TABLES.shareItems, "folder_id", ids);
   await deleteCloudRowsByIds(
     CLOUD_TABLES.shareItems,
     rows.map((row) => row.id || row._id),
@@ -3162,24 +3182,170 @@ function closeShareDialog() {
 
 function renderShareList() {
   elements.shareList.replaceChildren();
-  if (!state.scores.length) {
+  elements.shareSelectAll.checked = false;
+  elements.shareSelectAll.indeterminate = false;
+
+  if (!state.scores.length && !state.folders.length) {
     elements.shareList.append(createEmptyState("还没有歌谱", "保存歌谱后就可以分享。"));
     elements.createShareButton.disabled = true;
+    elements.shareSelectAll.disabled = true;
     return;
   }
 
   elements.createShareButton.disabled = false;
-  state.scores.forEach((score) => {
-    const label = document.createElement("label");
-    label.className = "share-option";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = score.id;
-    const text = document.createElement("span");
-    text.textContent = score.name;
-    label.append(checkbox, text);
-    elements.shareList.append(label);
+  elements.shareSelectAll.disabled = false;
+
+  state.folders.forEach((folder) => {
+    elements.shareList.append(createShareFolderGroup(folder));
   });
+
+  state.scores
+    .filter((score) => !score.folderId)
+    .forEach((score) => {
+      elements.shareList.append(createShareScoreOption(score));
+    });
+
+  updateShareSelectAllState();
+}
+
+function createShareScoreOption(score, options = {}) {
+  const label = document.createElement("label");
+  label.className = options.child ? "share-option share-child-option" : "share-option";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.value = score.id;
+  checkbox.dataset.shareSelect = "true";
+  checkbox.dataset.shareKind = "score";
+  checkbox.dataset.scoreId = score.id;
+  if (options.folderId) {
+    checkbox.dataset.folderId = options.folderId;
+  }
+  const text = document.createElement("span");
+  text.textContent = score.name;
+  label.append(checkbox, text);
+  return label;
+}
+
+function createShareFolderGroup(folder) {
+  const folderScores = state.scores.filter((score) => score.folderId === folder.id);
+  const group = document.createElement("div");
+  group.className = "share-folder-group";
+  group.dataset.folderId = folder.id;
+
+  const row = document.createElement("div");
+  row.className = "share-option share-folder-option";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.value = folder.id;
+  checkbox.dataset.shareSelect = "true";
+  checkbox.dataset.shareKind = "folder";
+  checkbox.dataset.folderId = folder.id;
+
+  const nameButton = document.createElement("button");
+  nameButton.className = "share-folder-name";
+  nameButton.type = "button";
+  nameButton.setAttribute("aria-expanded", "false");
+  const icon = createIcon("folder");
+  const text = document.createElement("span");
+  text.textContent = folder.name;
+  const count = document.createElement("small");
+  count.textContent = `${folderScores.length} 份歌谱`;
+  nameButton.append(icon, text, count);
+  nameButton.addEventListener("click", () => {
+    const expanded = group.classList.toggle("is-expanded");
+    childList.hidden = !expanded;
+    nameButton.setAttribute("aria-expanded", String(expanded));
+  });
+
+  row.append(checkbox, nameButton);
+  group.append(row);
+
+  const childList = document.createElement("div");
+  childList.className = "share-folder-children";
+  childList.hidden = true;
+  if (folderScores.length) {
+    folderScores.forEach((score) => childList.append(createShareScoreOption(score, { child: true, folderId: folder.id })));
+  } else {
+    const empty = document.createElement("p");
+    empty.className = "share-folder-empty";
+    empty.textContent = "这个文件夹里还没有歌谱";
+    childList.append(empty);
+  }
+  group.append(childList);
+
+  return group;
+}
+
+function handleShareSelectAllChange() {
+  const checked = elements.shareSelectAll.checked;
+  elements.shareList.querySelectorAll("input[data-share-select]").forEach((input) => {
+    input.checked = checked;
+    input.disabled = false;
+  });
+  elements.shareList.querySelectorAll("input[data-share-kind='folder']").forEach((input) => {
+    syncShareFolderChildren(input.dataset.folderId, checked);
+  });
+  updateShareSelectAllState();
+}
+
+function handleShareSelectionChange(event) {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || !input.dataset.shareSelect) {
+    return;
+  }
+
+  if (input.dataset.shareKind === "folder") {
+    syncShareFolderChildren(input.dataset.folderId, input.checked);
+  }
+  updateShareSelectAllState();
+}
+
+function syncShareFolderChildren(folderId, folderChecked) {
+  if (!folderId) {
+    return;
+  }
+
+  Array.from(elements.shareList.querySelectorAll("input[data-share-kind='score']")).forEach((input) => {
+    if (input.dataset.folderId !== folderId) {
+      return;
+    }
+    input.checked = folderChecked;
+    input.disabled = folderChecked;
+  });
+}
+
+function updateShareSelectAllState() {
+  const inputs = Array.from(elements.shareList.querySelectorAll("input[data-share-select]"));
+  if (!inputs.length) {
+    elements.shareSelectAll.checked = false;
+    elements.shareSelectAll.indeterminate = false;
+    return;
+  }
+
+  const checkedCount = inputs.filter((input) => input.checked).length;
+  elements.shareSelectAll.checked = checkedCount === inputs.length;
+  elements.shareSelectAll.indeterminate = checkedCount > 0 && checkedCount < inputs.length;
+}
+
+function getSelectedShareTargets() {
+  const folderIds = new Set();
+  const scoreIds = new Set();
+
+  elements.shareList.querySelectorAll("input[data-share-kind='folder']:checked").forEach((input) => {
+    folderIds.add(input.dataset.folderId || input.value);
+  });
+  elements.shareList.querySelectorAll("input[data-share-kind='score']:checked").forEach((input) => {
+    const folderId = input.dataset.folderId || "";
+    if (!folderId || !folderIds.has(folderId)) {
+      scoreIds.add(input.dataset.scoreId || input.value);
+    }
+  });
+
+  return {
+    folderIds: Array.from(folderIds),
+    scoreIds: Array.from(scoreIds),
+  };
 }
 
 async function createShareCode(event) {
@@ -3188,10 +3354,8 @@ async function createShareCode(event) {
     return;
   }
 
-  const selectedIds = Array.from(elements.shareList.querySelectorAll("input[type='checkbox']:checked")).map(
-    (input) => input.value,
-  );
-  if (!selectedIds.length) {
+  const selectedTargets = getSelectedShareTargets();
+  if (!selectedTargets.scoreIds.length && !selectedTargets.folderIds.length) {
     setStatus("请至少选择一份歌谱。", true);
     return;
   }
@@ -3199,7 +3363,7 @@ async function createShareCode(event) {
   elements.createShareButton.disabled = true;
   try {
     await syncNow();
-    const code = await insertShareBatch(selectedIds);
+    const code = await insertShareBatch(selectedTargets);
     elements.shareCodeText.textContent = code;
     elements.shareCodePanel.hidden = false;
     setStatus("同步码已生成。");
@@ -3211,7 +3375,10 @@ async function createShareCode(event) {
   }
 }
 
-async function insertShareBatch(scoreIds) {
+async function insertShareBatch(targets) {
+  const scoreIds = Array.from(new Set((targets.scoreIds || []).filter(Boolean)));
+  const folderIds = Array.from(new Set((targets.folderIds || []).filter(Boolean)));
+
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const code = createShareCodeValue();
     const existing = await queryCloudRows(CLOUD_TABLES.shareBatches, { code });
@@ -3231,12 +3398,24 @@ async function insertShareBatch(scoreIds) {
     ]);
     await upsertCloud(
       CLOUD_TABLES.shareItems,
-      scoreIds.map((scoreId) => ({
-        id: createId(),
-        share_id: shareId,
-        score_id: scoreId,
-        created_at: now,
-      })),
+      [
+        ...folderIds.map((folderId) => ({
+          id: createId(),
+          share_id: shareId,
+          item_type: "folder",
+          folder_id: folderId,
+          score_id: null,
+          created_at: now,
+        })),
+        ...scoreIds.map((scoreId) => ({
+          id: createId(),
+          share_id: shareId,
+          item_type: "score",
+          folder_id: null,
+          score_id: scoreId,
+          created_at: now,
+        })),
+      ],
     );
 
     return code;
@@ -3282,10 +3461,10 @@ async function importSharedScores(event) {
   setStatus("正在导入分享歌谱...");
 
   try {
-    const importedCount = await importScoresByShareCode(code);
+    const importResult = await importScoresByShareCode(code);
     closeImportShareDialog();
     await loadScores();
-    setStatus(`已导入 ${importedCount} 份分享歌谱。`);
+    setStatus(formatImportShareResult(importResult));
   } catch (error) {
     console.error(error);
     setStatus(error.message || "导入同步码失败。", true);
@@ -3302,79 +3481,148 @@ async function importScoresByShareCode(code) {
   }
 
   const items = await queryCloudRows(CLOUD_TABLES.shareItems, { share_id: batch.id });
-  const scoreIds = items.map((item) => item.score_id);
-  if (!scoreIds.length) {
-    return 0;
+  const explicitScoreIds = uniqueValues(items.map((item) => item.score_id));
+  const folderIds = uniqueValues(items.map((item) => item.folder_id));
+  if (!explicitScoreIds.length && !folderIds.length) {
+    return { scoreCount: 0, folderCount: 0 };
   }
 
-  const [sharedScores, sharedPages] = await Promise.all([
-    queryCloudRowsByIds(CLOUD_TABLES.scores, "id", scoreIds, { deleted_at: null }),
-    queryCloudRowsByIds(CLOUD_TABLES.pages, "score_id", scoreIds, { deleted_at: null }, {
-      orderBy: [["page_index", "asc"]],
-    }),
+  const [sharedFolders, explicitScores, folderScores] = await Promise.all([
+    folderIds.length ? queryCloudRowsByIds(CLOUD_TABLES.folders, "id", folderIds, { deleted_at: null }) : [],
+    explicitScoreIds.length ? queryCloudRowsByIds(CLOUD_TABLES.scores, "id", explicitScoreIds, { deleted_at: null }) : [],
+    folderIds.length ? queryCloudRowsByIds(CLOUD_TABLES.scores, "folder_id", folderIds, { deleted_at: null }) : [],
   ]);
+  const folderScoreSourceIds = new Set(folderScores.map((score) => score.id));
+  const allScoreIds = uniqueValues([
+    ...explicitScores.map((score) => score.id),
+    ...folderScores.map((score) => score.id),
+  ]);
+  const sharedPages = allScoreIds.length
+    ? await queryCloudRowsByIds(CLOUD_TABLES.pages, "score_id", allScoreIds, { deleted_at: null }, {
+      orderBy: [["page_index", "asc"]],
+    })
+    : [];
 
   const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
+  const sharedFolderById = new Map(sharedFolders.map((folder) => [folder.id, folder]));
   const userId = state.session.user.id;
-  let importedCount = 0;
+  const result = { scoreCount: 0, folderCount: 0 };
 
-  for (const sharedScore of sharedScores) {
-    if (existingNames.has(normalizeText(sharedScore.name))) {
+  for (const folderId of folderIds) {
+    const sharedFolder = sharedFolderById.get(folderId);
+    if (!sharedFolder) {
+      continue;
+    }
+
+    const sourceScores = folderScores.filter((score) => score.folder_id === folderId);
+    const hasImportableScores = sourceScores.some((score) => !existingNames.has(normalizeText(score.name)));
+    if (sourceScores.length && !hasImportableScores) {
       continue;
     }
 
     const now = new Date().toISOString();
-    const newScore = {
+    const newFolder = {
       id: createId(),
       userId,
-      name: sharedScore.name,
-      normalizedName: normalizeText(sharedScore.name),
-      folderId: null,
+      name: sharedFolder.name || "分享文件夹",
+      normalizedName: normalizeText(sharedFolder.name || "分享文件夹"),
       createdAt: now,
       updatedAt: now,
       deletedAt: null,
-      syncStatus: SYNC_STATUS_PENDING,
+      syncStatus: SYNC_STATUS_SYNCED,
     };
-    const pageRows = sharedPages.filter((page) => page.score_id === sharedScore.id);
-    const newPages = [];
+    await putFolder(newFolder);
+    await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(newFolder)]);
+    result.folderCount += 1;
 
-    for (const [index, pageRow] of pageRows.entries()) {
-      const blob = await downloadCloudFile(pageRow.storage_path);
-      const newPageId = createId();
-      const storagePath = createStoragePath(userId, newScore.id, newPageId, pageRow.type);
-      const fileID = await uploadCloudFile(storagePath, blob, `${newPageId}.${getExtensionFromType(pageRow.type)}`);
-      newPages.push({
-        id: newPageId,
-        scoreId: newScore.id,
-        userId,
-        pageIndex: index,
-        name: pageRow.name || `第 ${index + 1} 页`,
-        type: pageRow.type || blob.type || "image/jpeg",
-        size: Number(pageRow.size) || blob.size,
-        blob,
-        storagePath: fileID,
-        storageSyncedAt: new Date().toISOString(),
-        storageUploadVersion: STORAGE_UPLOAD_VERSION,
-        createdAt: now,
-        updatedAt: now,
-        deletedAt: null,
-        syncStatus: SYNC_STATUS_SYNCED,
-      });
+    for (const sharedScore of sourceScores) {
+      const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, newFolder.id, existingNames);
+      if (imported) {
+        result.scoreCount += 1;
+      }
     }
+  }
 
-    if (!newPages.length) {
+  for (const sharedScore of explicitScores) {
+    if (folderScoreSourceIds.has(sharedScore.id)) {
       continue;
     }
-
-    await putScoreWithPages(newScore, newPages);
-    await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(newScore)]);
-    await upsertCloud(CLOUD_TABLES.pages, newPages.map(toCloudPage));
-    existingNames.add(newScore.normalizedName);
-    importedCount += 1;
+    const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, null, existingNames);
+    if (imported) {
+      result.scoreCount += 1;
+    }
   }
 
   await syncNow();
-  return importedCount;
+  return result;
+}
+
+async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, existingNames) {
+  const normalizedName = normalizeText(sharedScore.name || "未命名歌谱");
+  if (existingNames.has(normalizedName)) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const newScore = {
+    id: createId(),
+    userId,
+    name: sharedScore.name || "未命名歌谱",
+    normalizedName,
+    folderId,
+    createdAt: now,
+    updatedAt: now,
+    deletedAt: null,
+    syncStatus: SYNC_STATUS_SYNCED,
+  };
+  const pageRows = sharedPages.filter((page) => page.score_id === sharedScore.id);
+  const newPages = [];
+
+  for (const [index, pageRow] of pageRows.entries()) {
+    const blob = await downloadCloudFile(pageRow.storage_path);
+    const newPageId = createId();
+    const storagePath = createStoragePath(userId, newScore.id, newPageId, pageRow.type);
+    const fileID = await uploadCloudFile(storagePath, blob, `${newPageId}.${getExtensionFromType(pageRow.type)}`);
+    newPages.push({
+      id: newPageId,
+      scoreId: newScore.id,
+      userId,
+      pageIndex: index,
+      name: pageRow.name || `第 ${index + 1} 页`,
+      type: pageRow.type || blob.type || "image/jpeg",
+      size: Number(pageRow.size) || blob.size,
+      blob,
+      storagePath: fileID,
+      storageSyncedAt: new Date().toISOString(),
+      storageUploadVersion: STORAGE_UPLOAD_VERSION,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      syncStatus: SYNC_STATUS_SYNCED,
+    });
+  }
+
+  if (!newPages.length) {
+    return null;
+  }
+
+  await putScoreWithPages(newScore, newPages);
+  await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(newScore)]);
+  await upsertCloud(CLOUD_TABLES.pages, newPages.map(toCloudPage));
+  existingNames.add(newScore.normalizedName);
+  return newScore;
+}
+
+function uniqueValues(values) {
+  return Array.from(new Set(values.filter(Boolean).map(String)));
+}
+
+function formatImportShareResult(result) {
+  if (result.folderCount) {
+    return `已导入 ${result.folderCount} 个文件夹 · ${result.scoreCount} 份歌谱。`;
+  }
+
+  return `已导入 ${result.scoreCount} 份分享歌谱。`;
 }
 
 function createShareCodeValue() {
@@ -3818,6 +4066,7 @@ async function deleteCloudFolder(folder, folderScores, deletedAt = new Date().to
     await upsertCloud(CLOUD_TABLES.scores, deletedScores.map(toCloudScore));
   }
   await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(deletedFolder)]);
+  await deleteCloudShareItemsForFolders([folder.id]);
   await deleteCloudShareItemsForScores(scoreIds);
   await cleanupCloudFilesAfterDelete(paths);
 }

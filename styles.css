@@ -874,6 +874,30 @@ body.add-screen-open .bottom-nav {
   overscroll-behavior: contain;
 }
 
+.share-select-all {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+
+.share-select-all input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.share-folder-group {
+  display: grid;
+  gap: 6px;
+}
+
 .share-option {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
@@ -888,6 +912,10 @@ body.add-screen-open .bottom-nav {
   font-weight: 700;
 }
 
+.share-folder-option {
+  min-height: 54px;
+}
+
 .share-option input {
   width: 18px;
   height: 18px;
@@ -898,6 +926,69 @@ body.add-screen-open .bottom-nav {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.share-folder-name {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.share-folder-name .lucide,
+.share-folder-name [data-lucide] {
+  width: 20px;
+  height: 20px;
+  color: #b7791f;
+}
+
+.share-folder-name span {
+  min-width: 0;
+}
+
+.share-folder-name small {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.share-folder-name:focus-visible {
+  outline: 2px solid rgba(15, 118, 110, 0.42);
+  outline-offset: 4px;
+}
+
+.share-folder-children {
+  display: grid;
+  gap: 6px;
+  padding-left: 24px;
+}
+
+.share-child-option {
+  min-height: 42px;
+  padding-block: 7px;
+  background: #f8faf9;
+  font-size: 0.92rem;
+}
+
+.share-child-option input:disabled + span {
+  color: var(--muted);
+}
+
+.share-folder-empty {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .share-code-panel {
