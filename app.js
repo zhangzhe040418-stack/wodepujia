@@ -57,6 +57,7 @@ const state = {
   authRegisterAccount: "",
   authRegisterCode: "",
   authRegisterVerifyOtp: null,
+  authRegisterPayload: null,
   fabLongPressTimer: null,
   fabDrag: null,
   fabSuppressClick: false,
@@ -339,6 +340,10 @@ function bindEvents() {
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("dragstart", handleDragStart);
   window.addEventListener("beforeunload", revokeAllUrls);
+  window.addEventListener("resize", clampFabIntoBounds);
+  window.addEventListener("orientationchange", () => {
+    window.setTimeout(clampFabIntoBounds, 250);
+  });
   window.addEventListener("popstate", () => {
     if (state.viewerHistoryActive) {
       closeViewer({ fromHistory: true });
@@ -538,6 +543,23 @@ function getFabDragBounds(width, height) {
   const maxTop = Math.max(minTop, bottomLimit - height);
 
   return { minLeft, maxLeft, minTop, maxTop };
+}
+
+function clampFabIntoBounds() {
+  if (!elements.addScoreButton || elements.addScoreButton.hidden) {
+    return;
+  }
+
+  const left = Number.parseFloat(elements.addScoreButton.style.left);
+  const top = Number.parseFloat(elements.addScoreButton.style.top);
+  if (!Number.isFinite(left) || !Number.isFinite(top)) {
+    return;
+  }
+
+  const rect = elements.addScoreButton.getBoundingClientRect();
+  const bounds = getFabDragBounds(rect.width, rect.height);
+  elements.addScoreButton.style.left = `${clamp(left, bounds.minLeft, bounds.maxLeft)}px`;
+  elements.addScoreButton.style.top = `${clamp(top, bounds.minTop, bounds.maxTop)}px`;
 }
 
 function getVisibleElementRect(element) {
@@ -1132,6 +1154,7 @@ function beginRegisterWithCode(method) {
   state.authRegisterAccount = "";
   state.authRegisterCode = "";
   state.authRegisterVerifyOtp = null;
+  state.authRegisterPayload = null;
   elements.registerContactInput.value = "";
   elements.registerCodeInput.value = "";
   elements.registerPassword.value = "";
@@ -1205,6 +1228,7 @@ async function sendRegisterCode() {
     state.authRegisterAccount =
       state.authRegisterMethod === "phone" ? normalizePhoneNumber(account) : account;
     state.authRegisterVerifyOtp = null;
+    state.authRegisterPayload = null;
 
     if (state.authRegisterMethod === "phone") {
       if (typeof state.cloudAuth.sendPhoneCode !== "function") {
@@ -1216,7 +1240,8 @@ async function sendRegisterCode() {
       if (typeof state.cloudAuth.signUp !== "function") {
         throw new Error("当前 CloudBase SDK 不支持邮箱验证码注册。");
       }
-      const result = await state.cloudAuth.signUp({ email: state.authRegisterAccount });
+      state.authRegisterPayload = { email: state.authRegisterAccount };
+      const result = await state.cloudAuth.signUp(state.authRegisterPayload);
       throwCloudResultError(result);
       state.authRegisterVerifyOtp = result?.data?.verifyOtp || null;
     }
@@ -1286,6 +1311,8 @@ async function completeRegisterWithPassword() {
     if (!state.session) {
       throw new Error("注册成功，但登录状态读取失败，请重新登录。");
     }
+    state.authRegisterVerifyOtp = null;
+    state.authRegisterPayload = null;
     closeAuthDialog();
     setStatus("注册成功，正在同步...");
     await claimLocalRecordsForUser(state.session.user.id);
@@ -1359,6 +1386,15 @@ async function signUpCloudWithPhoneCode(phoneNumber, phoneCode, password) {
 async function signUpCloudWithEmailCode(email, emailCode, password) {
   if (typeof state.cloudAuth.signUp !== "function") {
     throw new Error("当前 CloudBase SDK 不支持邮箱验证码注册。");
+  }
+
+  if (typeof state.authRegisterVerifyOtp === "function") {
+    if (state.authRegisterPayload?.email === email) {
+      state.authRegisterPayload.password = password;
+    }
+    const result = await state.authRegisterVerifyOtp({ token: emailCode });
+    throwCloudResultError(result);
+    return result;
   }
 
   const result = await state.cloudAuth.signUp({
@@ -1537,7 +1573,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=41");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=42");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2157,6 +2193,82 @@ function deleteFolderRecord(folderId, scoreIds) {
   });
 }
 
+function markScoreDeletedRecord(score, deletedAt) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const userId = score.userId || state.session?.user?.id || null;
+    const pages = score.pages || state.scorePages.filter((page) => page.scoreId === score.id);
+
+    scoreStore.put({
+      ...toScoreRecord(score),
+      userId,
+      deletedAt,
+      updatedAt: deletedAt,
+      syncStatus: SYNC_STATUS_PENDING,
+    });
+    pages.forEach((page) => {
+      pageStore.put({
+        ...page,
+        userId: page.userId || userId,
+        deletedAt,
+        updatedAt: deletedAt,
+        syncStatus: SYNC_STATUS_PENDING,
+      });
+    });
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+function markFolderDeletedRecord(folder, folderScores, deletedAt) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const userId = folder.userId || state.session?.user?.id || null;
+
+    folderStore.put({
+      ...folder,
+      userId,
+      deletedAt,
+      updatedAt: deletedAt,
+      syncStatus: SYNC_STATUS_PENDING,
+    });
+    folderScores.forEach((score) => {
+      const scoreUserId = score.userId || userId;
+      scoreStore.put({
+        ...toScoreRecord(score),
+        userId: scoreUserId,
+        deletedAt,
+        updatedAt: deletedAt,
+        syncStatus: SYNC_STATUS_PENDING,
+      });
+      (score.pages || []).forEach((page) => {
+        pageStore.put({
+          ...page,
+          userId: page.userId || scoreUserId,
+          deletedAt,
+          updatedAt: deletedAt,
+          syncStatus: SYNC_STATUS_PENDING,
+        });
+      });
+    });
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+function shouldKeepDeleteTombstone(record) {
+  return Boolean(record?.userId || state.session?.user?.id);
+}
+
 async function addPendingFiles(fileList) {
   const files = Array.from(fileList || []);
   const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -2457,10 +2569,12 @@ async function handleManualSync() {
   updateAccountUi();
 
   try {
+    setStatus("正在刷新...");
     await loadScores();
 
     const cloudReady = state.cloudReady || (await initializeCloud());
     if (!cloudReady) {
+      setStatus(state.cloudError || "CloudBase 连接失败，无法刷新。", true);
       await loadScores();
       return;
     }
@@ -2470,13 +2584,16 @@ async function handleManualSync() {
     }
 
     if (!state.session) {
+      setStatus("请先登录账号后再刷新同步。", true);
       await loadScores();
       return;
     }
 
     await performSync();
+    setStatus("刷新完成。");
   } catch (error) {
     console.error(error);
+    setStatus(error.message || "刷新失败，请检查网络和 CloudBase 配置。", true);
   } finally {
     state.syncing = false;
     elements.syncNowButton.classList.remove("is-syncing");
@@ -2513,35 +2630,111 @@ async function syncNow(options = {}) {
 }
 
 async function performSync() {
+  await pullCloudDeletions();
   await uploadLocalChanges();
   await pullCloudChanges();
   await loadScores();
 }
 
+async function pullCloudDeletions() {
+  const userId = state.session.user.id;
+  const [folders, scores] = await Promise.all([
+    queryCloudRows(CLOUD_TABLES.folders, { user_id: userId }),
+    queryCloudRows(CLOUD_TABLES.scores, { user_id: userId }),
+  ]);
+  const deletedFolderIds = folders.filter((folder) => folder.deleted_at).map((folder) => folder.id);
+  const deletedScoreIds = scores.filter((score) => score.deleted_at).map((score) => score.id);
+
+  await purgeCloudDeletedLocalRecords(deletedFolderIds, deletedScoreIds);
+}
+
+async function purgeCloudDeletedLocalRecords(folderIds, scoreIds) {
+  const folderIdSet = new Set(folderIds.filter(Boolean).map(String));
+  const scoreIdSet = new Set(scoreIds.filter(Boolean).map(String));
+
+  if (folderIdSet.size) {
+    const localScores = await getAllScores();
+    localScores.forEach((score) => {
+      if (score.folderId && folderIdSet.has(String(score.folderId))) {
+        scoreIdSet.add(String(score.id));
+      }
+    });
+  }
+
+  if (!folderIdSet.size && !scoreIdSet.size) {
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const pageIndex = pageStore.index("scoreId");
+
+    folderIdSet.forEach((folderId) => folderStore.delete(folderId));
+    scoreIdSet.forEach((scoreId) => {
+      scoreStore.delete(scoreId);
+      const pageRequest = pageIndex.getAllKeys(scoreId);
+      pageRequest.onsuccess = () => {
+        pageRequest.result.forEach((key) => pageStore.delete(key));
+      };
+      pageRequest.onerror = () => reject(pageRequest.error);
+    });
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+async function getSyncableLocalRecords(userId) {
+  const [folderRecords, scoreRecords, pageRecords] = await Promise.all([getAllFolders(), getAllScores(), getAllScorePages()]);
+  const ownerMatches = (record) => !record.userId || record.userId === userId;
+  const folders = folderRecords.map(normalizeLocalFolderRecord).filter(ownerMatches);
+  const scores = scoreRecords.map(normalizeLocalScoreRecord).filter(ownerMatches);
+  const scoreIds = new Set(scores.map((score) => score.id));
+  const pages = pageRecords
+    .map(normalizeLocalPageRecord)
+    .filter((page) => scoreIds.has(page.scoreId) && ownerMatches(page));
+
+  return { folders, scores, pages };
+}
+
 async function uploadLocalChanges() {
   const userId = state.session.user.id;
-  const folders = state.folders.map((folder) => ({ ...folder, userId }));
-  const scores = state.scores.map((score) => ({ ...toScoreRecord(score), userId }));
-  const pages = state.scorePages
-    .filter((page) => scores.some((score) => score.id === page.scoreId))
-    .map((page) => ({ ...page, userId }));
+  const localRecords = await getSyncableLocalRecords(userId);
+  const folders = localRecords.folders.map((folder) => ({ ...folder, userId }));
+  const scores = localRecords.scores.map((score) => ({ ...toScoreRecord(score), userId }));
+  const scoreById = new Map(scores.map((score) => [score.id, score]));
+  const pages = localRecords.pages
+    .filter((page) => scoreById.has(page.scoreId))
+    .map((page) => ({ ...page, userId: page.userId || userId }));
   const uploadedPages = [];
 
   for (const page of pages) {
-    let storagePath = page.storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
+    const score = scoreById.get(page.scoreId);
+    const pageDeleted = Boolean(page.deletedAt || score?.deletedAt);
+    let storagePath = page.storagePath || null;
     let storageSyncedAt = page.storageSyncedAt || null;
     let pageSize = page.size;
+    const hasBlob = Boolean(page.blob && page.blob.size > 0);
     const shouldUploadBlob =
-      page.blob &&
-      page.blob.size > 0 &&
+      !pageDeleted &&
+      hasBlob &&
       (!page.storagePath ||
         page.syncStatus !== SYNC_STATUS_SYNCED ||
         page.storageUploadVersion !== STORAGE_UPLOAD_VERSION);
 
+    if (!pageDeleted && !storagePath && !hasBlob) {
+      const scoreName = score?.name || "未命名歌谱";
+      throw new Error(`《${scoreName}》第 ${page.pageIndex + 1} 页缺少图片文件，无法上传同步。`);
+    }
+
     if (shouldUploadBlob) {
       const cloudPath = page.storagePath?.startsWith("cloud://")
         ? createStoragePath(userId, page.scoreId, page.id, page.type)
-        : storagePath;
+        : storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
       storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
       storageSyncedAt = new Date().toISOString();
       pageSize = page.blob.size;
@@ -2564,6 +2757,11 @@ async function uploadLocalChanges() {
   }
   if (uploadedPages.length) {
     await upsertCloud(CLOUD_TABLES.pages, uploadedPages.map(toCloudPage));
+  }
+
+  const deletedScoreIds = scores.filter((score) => score.deletedAt).map((score) => score.id);
+  if (deletedScoreIds.length) {
+    await deleteCloudShareItemsForScores(deletedScoreIds);
   }
 
   await markLocalSynced(
@@ -2685,6 +2883,19 @@ async function deleteCloudRowsByIds(collectionName, ids) {
     const result = await collection.doc(String(id)).remove();
     assertCloudResult(result);
   }
+}
+
+async function deleteCloudShareItemsForScores(scoreIds) {
+  const ids = Array.from(new Set(scoreIds.filter(Boolean).map(String)));
+  if (!ids.length) {
+    return;
+  }
+
+  const rows = await queryCloudRowsByIds(CLOUD_TABLES.shareItems, "score_id", ids);
+  await deleteCloudRowsByIds(
+    CLOUD_TABLES.shareItems,
+    rows.map((row) => row.id || row._id),
+  );
 }
 
 function assertCloudResult(result) {
@@ -3458,15 +3669,32 @@ async function deleteScore(id) {
   }
 
   try {
+    const deletedAt = new Date().toISOString();
+    let cloudDeleteQueued = false;
     if (state.cloudReady && state.session && score.userId === state.session.user.id) {
-      await deleteCloudScore(score);
+      try {
+        await deleteCloudScore(score, deletedAt);
+      } catch (error) {
+        cloudDeleteQueued = shouldKeepDeleteTombstone(score);
+        if (!cloudDeleteQueued) {
+          throw error;
+        }
+        console.warn(error);
+      }
+    } else {
+      cloudDeleteQueued = shouldKeepDeleteTombstone(score);
     }
-    await deleteScoreRecord(id);
+
+    if (cloudDeleteQueued) {
+      await markScoreDeletedRecord(score, deletedAt);
+    } else {
+      await deleteScoreRecord(id);
+    }
     revokeScoreUrls(score);
     state.scores = state.scores.filter((item) => item.id !== id);
     closeViewer();
     renderScores();
-    setStatus(`已删除《${score.name}》。`);
+    setStatus(cloudDeleteQueued ? `已删除《${score.name}》，下次刷新时会同步到云端。` : `已删除《${score.name}》。`);
   } catch (error) {
     console.error(error);
     setStatus("删除失败，请稍后再试。", true);
@@ -3489,13 +3717,30 @@ async function deleteFolder(id) {
   }
 
   try {
+    const deletedAt = new Date().toISOString();
+    let cloudDeleteQueued = false;
     if (state.cloudReady && state.session && folder.userId === state.session.user.id) {
-      await deleteCloudFolder(folder, folderScores);
+      try {
+        await deleteCloudFolder(folder, folderScores, deletedAt);
+      } catch (error) {
+        cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
+        if (!cloudDeleteQueued) {
+          throw error;
+        }
+        console.warn(error);
+      }
+    } else {
+      cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
     }
-    await deleteFolderRecord(
-      id,
-      folderScores.map((score) => score.id),
-    );
+
+    if (cloudDeleteQueued) {
+      await markFolderDeletedRecord(folder, folderScores, deletedAt);
+    } else {
+      await deleteFolderRecord(
+        id,
+        folderScores.map((score) => score.id),
+      );
+    }
     folderScores.forEach(revokeScoreUrls);
     state.folders = state.folders.filter((item) => item.id !== id);
     state.scores = state.scores.filter((score) => score.folderId !== id);
@@ -3505,41 +3750,84 @@ async function deleteFolder(id) {
       state.currentFolderId = null;
     }
     renderScores();
-    setStatus(`已删除《${folder.name}》文件夹。`);
+    setStatus(
+      cloudDeleteQueued
+        ? `已删除《${folder.name}》文件夹，下次刷新时会同步到云端。`
+        : `已删除《${folder.name}》文件夹。`,
+    );
   } catch (error) {
     console.error(error);
     setStatus("删除文件夹失败，请稍后再试。", true);
   }
 }
 
-async function deleteCloudScore(score) {
+async function deleteCloudScore(score, deletedAt = new Date().toISOString()) {
   const pageIds = (score.pages || []).map((page) => page.id);
   const paths = (score.pages || []).map((page) => page.storagePath).filter(Boolean);
+  const userId = score.userId || state.session?.user?.id || null;
+  const deletedScore = {
+    ...toScoreRecord(score),
+    userId,
+    deletedAt,
+    updatedAt: deletedAt,
+  };
+  const deletedPages = (score.pages || []).map((page) => ({
+    ...page,
+    userId: page.userId || userId,
+    deletedAt,
+    updatedAt: deletedAt,
+  }));
 
-  if (paths.length) {
-    await deleteCloudFiles(paths);
-  }
   if (pageIds.length) {
-    await deleteCloudRowsByIds(CLOUD_TABLES.pages, pageIds);
+    await upsertCloud(CLOUD_TABLES.pages, deletedPages.map(toCloudPage));
   }
-  await deleteCloudRowsByIds(CLOUD_TABLES.scores, [score.id]);
+  await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(deletedScore)]);
+  await deleteCloudShareItemsForScores([score.id]);
+  await cleanupCloudFilesAfterDelete(paths);
 }
 
-async function deleteCloudFolder(folder, folderScores) {
-  const pageIds = folderScores.flatMap((score) => (score.pages || []).map((page) => page.id));
+async function deleteCloudFolder(folder, folderScores, deletedAt = new Date().toISOString()) {
   const paths = folderScores.flatMap((score) => (score.pages || []).map((page) => page.storagePath).filter(Boolean));
   const scoreIds = folderScores.map((score) => score.id);
+  const userId = folder.userId || state.session?.user?.id || null;
+  const deletedFolder = {
+    ...folder,
+    userId,
+    deletedAt,
+    updatedAt: deletedAt,
+  };
+  const deletedScores = folderScores.map((score) => ({
+    ...toScoreRecord(score),
+    userId: score.userId || userId,
+    deletedAt,
+    updatedAt: deletedAt,
+  }));
+  const deletedPages = folderScores.flatMap((score) =>
+    (score.pages || []).map((page) => ({
+      ...page,
+      userId: page.userId || score.userId || userId,
+      deletedAt,
+      updatedAt: deletedAt,
+    })),
+  );
 
-  if (paths.length) {
+  if (deletedPages.length) {
+    await upsertCloud(CLOUD_TABLES.pages, deletedPages.map(toCloudPage));
+  }
+  if (deletedScores.length) {
+    await upsertCloud(CLOUD_TABLES.scores, deletedScores.map(toCloudScore));
+  }
+  await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(deletedFolder)]);
+  await deleteCloudShareItemsForScores(scoreIds);
+  await cleanupCloudFilesAfterDelete(paths);
+}
+
+async function cleanupCloudFilesAfterDelete(paths) {
+  try {
     await deleteCloudFiles(paths);
+  } catch (error) {
+    console.warn(error);
   }
-  if (pageIds.length) {
-    await deleteCloudRowsByIds(CLOUD_TABLES.pages, pageIds);
-  }
-  if (scoreIds.length) {
-    await deleteCloudRowsByIds(CLOUD_TABLES.scores, scoreIds);
-  }
-  await deleteCloudRowsByIds(CLOUD_TABLES.folders, [folder.id]);
 }
 
 function requestDeleteConfirmation(target) {
