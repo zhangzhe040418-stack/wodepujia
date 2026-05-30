@@ -23,7 +23,7 @@ const IMAGE_WEBP_QUALITY = 0.78;
 const IMAGE_JPEG_QUALITY = 0.82;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
-const STORAGE_UPLOAD_VERSION = 2;
+const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
 const FAB_LONG_PRESS_DELAY = 520;
 const FAB_VIEWPORT_MARGIN = 8;
@@ -1577,7 +1577,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=44");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=45");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
