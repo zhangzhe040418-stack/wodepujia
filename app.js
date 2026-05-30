@@ -48,6 +48,7 @@ const state = {
   pendingPages: [],
   scoreUrls: new Map(),
   pendingUrls: new Map(),
+  pageDownloads: new Set(),
   installPrompt: null,
   addScreenOpen: false,
   activeTab: "library",
@@ -1576,7 +1577,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=43");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=44");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2144,6 +2145,15 @@ function putScoreWithPages(score, pages) {
   });
 }
 
+function putScorePage(page) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(PAGE_STORE_NAME, "readwrite");
+    const request = transaction.objectStore(PAGE_STORE_NAME).put(page);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
 function putFolder(folder) {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction(FOLDER_STORE_NAME, "readwrite");
@@ -2609,6 +2619,9 @@ async function syncNow(options = {}) {
     if (options.manual && !state.session) {
       setStatus("请先登录账号。", true);
     }
+    if (options.throwOnError) {
+      throw new Error(state.syncing ? "正在同步，请稍后再试。" : "请先登录账号。");
+    }
     return;
   }
 
@@ -2626,6 +2639,9 @@ async function syncNow(options = {}) {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "同步失败，请检查网络和 CloudBase 配置。", true);
+    if (options.throwOnError) {
+      throw error;
+    }
   } finally {
     state.syncing = false;
     updateAccountUi();
@@ -2780,13 +2796,16 @@ async function uploadLocalChanges() {
 
 async function pullCloudChanges() {
   const userId = state.session.user.id;
-  const [folders, scores, pages] = await Promise.all([
-    queryCloudRows(CLOUD_TABLES.folders, { user_id: userId, deleted_at: null }),
-    queryCloudRows(CLOUD_TABLES.scores, { user_id: userId, deleted_at: null }),
-    queryCloudRows(CLOUD_TABLES.pages, { user_id: userId, deleted_at: null }, {
+  const [folderRows, scoreRows, pageRows] = await Promise.all([
+    queryCloudRows(CLOUD_TABLES.folders, { user_id: userId }),
+    queryCloudRows(CLOUD_TABLES.scores, { user_id: userId }),
+    queryCloudRows(CLOUD_TABLES.pages, { user_id: userId }, {
       orderBy: [["page_index", "asc"]],
     }),
   ]);
+  const folders = folderRows.filter(isCloudRowActive);
+  const scores = scoreRows.filter(isCloudRowActive);
+  const pages = pageRows.filter(isCloudRowActive);
 
   const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
   const cloudPages = [];
@@ -2828,6 +2847,10 @@ async function pullCloudChanges() {
 
 function markLocalSynced(folders, scores, pages) {
   return putCloudReadyRecords(folders, scores, pages);
+}
+
+function isCloudRowActive(row) {
+  return !row?.deleted_at;
 }
 
 async function upsertCloud(table, rows) {
@@ -2938,16 +2961,39 @@ async function uploadCloudFile(cloudPath, blob, fileName = "score-page.jpg") {
     throw new Error("歌谱图片文件为空，无法上传。");
   }
 
+  if (typeof state.cloudApp.uploadFile === "function") {
+    try {
+      const result = await state.cloudApp.uploadFile({
+        cloudPath,
+        filePath: file,
+      });
+      assertCloudResult(result);
+      return getUploadedFileID(result, cloudPath);
+    } catch (error) {
+      if (typeof state.cloudApp.getUploadMetadata !== "function") {
+        throw error;
+      }
+      console.warn(error);
+    }
+  }
+
   if (typeof state.cloudApp.getUploadMetadata === "function") {
     return uploadCloudFileWithSignedUrl(cloudPath, file);
   }
 
-  const result = await state.cloudApp.uploadFile({
-    cloudPath,
-    filePath: file,
-  });
-  assertCloudResult(result);
-  return result.fileID || result.fileId || result.data?.fileID || result.data?.fileId || cloudPath;
+  throw new Error("当前 CloudBase SDK 不支持图片上传。");
+}
+
+function getUploadedFileID(result, fallbackPath) {
+  return (
+    result?.fileID ||
+    result?.fileId ||
+    result?.file_id ||
+    result?.data?.fileID ||
+    result?.data?.fileId ||
+    result?.data?.file_id ||
+    fallbackPath
+  );
 }
 
 function toUploadFile(blob, fileName) {
@@ -2974,7 +3020,7 @@ async function uploadCloudFileWithSignedUrl(cloudPath, file) {
 
   const metadata = metadataResult.data || metadataResult;
   const url = metadata.url;
-  const fileID = metadata.fileId || metadata.fileID || metadata.file_id || cloudPath;
+  const fileID = metadata.fileID || metadata.fileId || metadata.file_id || cloudPath;
   const cosFileId = metadata.cosFileId || metadata.cosFileID || metadata.cos_file_id;
   const headers = {
     authorization: metadata.authorization,
@@ -3362,7 +3408,7 @@ async function createShareCode(event) {
 
   elements.createShareButton.disabled = true;
   try {
-    await syncNow();
+    await syncNow({ throwOnError: true });
     const code = await insertShareBatch(selectedTargets);
     elements.shareCodeText.textContent = code;
     elements.shareCodePanel.hidden = false;
@@ -3378,6 +3424,10 @@ async function createShareCode(event) {
 async function insertShareBatch(targets) {
   const scoreIds = Array.from(new Set((targets.scoreIds || []).filter(Boolean)));
   const folderIds = Array.from(new Set((targets.folderIds || []).filter(Boolean)));
+  const shareItems = buildShareItems(scoreIds, folderIds);
+  if (!shareItems.length) {
+    throw new Error("没有可分享的歌谱。");
+  }
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const code = createShareCodeValue();
@@ -3388,40 +3438,103 @@ async function insertShareBatch(targets) {
 
     const now = new Date().toISOString();
     const shareId = createId();
+    const items = shareItems.map((item) => ({
+      ...item,
+      id: createId(),
+      share_id: shareId,
+      created_at: now,
+    }));
     await upsertCloud(CLOUD_TABLES.shareBatches, [
       {
         id: shareId,
         owner_id: state.session.user.id,
         code,
+        payload_version: 2,
+        item_count: items.length,
+        items,
         created_at: now,
       },
     ]);
-    await upsertCloud(
-      CLOUD_TABLES.shareItems,
-      [
-        ...folderIds.map((folderId) => ({
-          id: createId(),
-          share_id: shareId,
-          item_type: "folder",
-          folder_id: folderId,
-          score_id: null,
-          created_at: now,
-        })),
-        ...scoreIds.map((scoreId) => ({
-          id: createId(),
-          share_id: shareId,
-          item_type: "score",
-          folder_id: null,
-          score_id: scoreId,
-          created_at: now,
-        })),
-      ],
-    );
+    await upsertCloud(CLOUD_TABLES.shareItems, items);
 
     return code;
   }
 
   throw new Error("同步码生成失败，请重试。");
+}
+
+function buildShareItems(scoreIds, folderIds) {
+  const items = [];
+  const addedScoreIds = new Set();
+
+  folderIds.forEach((folderId) => {
+    const folder = state.folders.find((item) => item.id === folderId);
+    if (!folder) {
+      return;
+    }
+
+    items.push(createFolderShareItem(folder));
+    state.scores
+      .filter((score) => score.folderId === folder.id)
+      .forEach((score) => {
+        const item = createScoreShareItem(score, folder.id);
+        if (item) {
+          items.push(item);
+          addedScoreIds.add(score.id);
+        }
+      });
+  });
+
+  scoreIds.forEach((scoreId) => {
+    if (addedScoreIds.has(scoreId)) {
+      return;
+    }
+
+    const score = state.scores.find((item) => item.id === scoreId);
+    const item = score ? createScoreShareItem(score, null) : null;
+    if (item) {
+      items.push(item);
+      addedScoreIds.add(scoreId);
+    }
+  });
+
+  return items;
+}
+
+function createFolderShareItem(folder) {
+  return {
+    item_type: "folder",
+    folder_id: folder.id,
+    score_id: null,
+    folder_name: folder.name,
+    folder_normalized_name: folder.normalizedName,
+  };
+}
+
+function createScoreShareItem(score, sharedFolderId) {
+  const pages = (score.pages || [])
+    .filter((page) => page.storagePath)
+    .sort((a, b) => a.pageIndex - b.pageIndex)
+    .map((page, index) => ({
+      page_index: index,
+      name: page.name || `第 ${index + 1} 页`,
+      type: page.type || "image/jpeg",
+      size: page.size || page.blob?.size || 0,
+      storage_path: page.storagePath,
+    }));
+
+  if (!pages.length) {
+    return null;
+  }
+
+  return {
+    item_type: "score",
+    folder_id: sharedFolderId || null,
+    score_id: score.id,
+    score_name: score.name,
+    score_normalized_name: score.normalizedName,
+    pages,
+  };
 }
 
 function openImportShareDialog() {
@@ -3480,28 +3593,42 @@ async function importScoresByShareCode(code) {
     throw new Error("同步码不存在，请检查后再试。");
   }
 
-  const items = await queryCloudRows(CLOUD_TABLES.shareItems, { share_id: batch.id });
+  const items = await loadShareItems(batch);
+  const snapshotItems = items.filter((item) => item.item_type === "folder" || item.item_type === "score");
+  const hasSnapshotPayload =
+    Number(batch.payload_version) >= 2 ||
+    snapshotItems.some((item) => Array.isArray(item.pages) || item.folder_name || item.score_name);
+  if (hasSnapshotPayload) {
+    const result = await importScoresFromShareSnapshot(snapshotItems);
+    await syncNow();
+    return result;
+  }
+
   const explicitScoreIds = uniqueValues(items.map((item) => item.score_id));
   const folderIds = uniqueValues(items.map((item) => item.folder_id));
   if (!explicitScoreIds.length && !folderIds.length) {
     return { scoreCount: 0, folderCount: 0 };
   }
 
-  const [sharedFolders, explicitScores, folderScores] = await Promise.all([
-    folderIds.length ? queryCloudRowsByIds(CLOUD_TABLES.folders, "id", folderIds, { deleted_at: null }) : [],
-    explicitScoreIds.length ? queryCloudRowsByIds(CLOUD_TABLES.scores, "id", explicitScoreIds, { deleted_at: null }) : [],
-    folderIds.length ? queryCloudRowsByIds(CLOUD_TABLES.scores, "folder_id", folderIds, { deleted_at: null }) : [],
+  const [sharedFoldersRaw, explicitScoresRaw, folderScoresRaw] = await Promise.all([
+    folderIds.length ? queryCloudRowsByIds(CLOUD_TABLES.folders, "id", folderIds) : [],
+    explicitScoreIds.length ? queryCloudRowsByIds(CLOUD_TABLES.scores, "id", explicitScoreIds) : [],
+    folderIds.length ? queryCloudRowsByIds(CLOUD_TABLES.scores, "folder_id", folderIds) : [],
   ]);
+  const sharedFolders = sharedFoldersRaw.filter(isCloudRowActive);
+  const explicitScores = explicitScoresRaw.filter(isCloudRowActive);
+  const folderScores = folderScoresRaw.filter(isCloudRowActive);
   const folderScoreSourceIds = new Set(folderScores.map((score) => score.id));
   const allScoreIds = uniqueValues([
     ...explicitScores.map((score) => score.id),
     ...folderScores.map((score) => score.id),
   ]);
-  const sharedPages = allScoreIds.length
-    ? await queryCloudRowsByIds(CLOUD_TABLES.pages, "score_id", allScoreIds, { deleted_at: null }, {
+  const sharedPageRows = allScoreIds.length
+    ? await queryCloudRowsByIds(CLOUD_TABLES.pages, "score_id", allScoreIds, {}, {
       orderBy: [["page_index", "asc"]],
     })
     : [];
+  const sharedPages = sharedPageRows.filter(isCloudRowActive);
 
   const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
   const sharedFolderById = new Map(sharedFolders.map((folder) => [folder.id, folder]));
@@ -3555,6 +3682,84 @@ async function importScoresByShareCode(code) {
 
   await syncNow();
   return result;
+}
+
+async function loadShareItems(batch) {
+  if (Array.isArray(batch.items) && batch.items.length) {
+    return batch.items;
+  }
+
+  try {
+    return await queryCloudRows(CLOUD_TABLES.shareItems, { share_id: batch.id });
+  } catch (error) {
+    if (Array.isArray(batch.items) && batch.items.length) {
+      return batch.items;
+    }
+    throw error;
+  }
+}
+
+async function importScoresFromShareSnapshot(items) {
+  const folders = items.filter((item) => item.item_type === "folder");
+  const scores = items.filter((item) => item.item_type === "score" && Array.isArray(item.pages));
+  const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
+  const userId = state.session.user.id;
+  const folderIdMap = new Map();
+  const result = { scoreCount: 0, folderCount: 0 };
+
+  for (const folderItem of folders) {
+    const folderScores = scores.filter((score) => score.folder_id === folderItem.folder_id);
+    const hasImportableScores = folderScores.some((score) => !existingNames.has(normalizeText(score.score_name || "未命名歌谱")));
+    if (folderScores.length && !hasImportableScores) {
+      continue;
+    }
+
+    const now = new Date().toISOString();
+    const newFolder = {
+      id: createId(),
+      userId,
+      name: folderItem.folder_name || "分享文件夹",
+      normalizedName: normalizeText(folderItem.folder_name || "分享文件夹"),
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      syncStatus: SYNC_STATUS_SYNCED,
+    };
+    await putFolder(newFolder);
+    await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(newFolder)]);
+    folderIdMap.set(folderItem.folder_id, newFolder.id);
+    result.folderCount += 1;
+  }
+
+  for (const scoreItem of scores) {
+    const targetFolderId = scoreItem.folder_id ? folderIdMap.get(scoreItem.folder_id) || null : null;
+    const imported = await importSharedScoreSnapshot(scoreItem, userId, targetFolderId, existingNames);
+    if (imported) {
+      result.scoreCount += 1;
+    }
+  }
+
+  return result;
+}
+
+async function importSharedScoreSnapshot(scoreItem, userId, folderId, existingNames) {
+  return importSharedScoreRow(
+    {
+      id: scoreItem.score_id,
+      name: scoreItem.score_name || "未命名歌谱",
+    },
+    (scoreItem.pages || []).map((page) => ({
+      score_id: scoreItem.score_id,
+      page_index: page.page_index,
+      name: page.name,
+      type: page.type,
+      size: page.size,
+      storage_path: page.storage_path,
+    })),
+    userId,
+    folderId,
+    existingNames,
+  );
 }
 
 async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, existingNames) {
@@ -3788,6 +3993,7 @@ function createScoreCard(score) {
   if (firstPage) {
     const image = document.createElement("img");
     image.draggable = false;
+    image.dataset.pageId = firstPage.id;
     image.src = getScoreUrl(firstPage);
     image.alt = `《${score.name}》第 1 页`;
     previewButton.append(image);
@@ -3850,6 +4056,7 @@ function openViewer(id) {
 
     const image = document.createElement("img");
     image.draggable = false;
+    image.dataset.pageId = page.id;
     image.src = getScoreUrl(page);
     image.alt = `《${score.name}》第 ${index + 1} 页`;
 
@@ -4116,6 +4323,7 @@ function closeDeleteDialog(confirmed) {
 
 function getScoreUrl(page) {
   if (!page?.blob || page.blob.size === 0) {
+    hydrateScorePage(page);
     return SCORE_IMAGE_PLACEHOLDER;
   }
 
@@ -4123,6 +4331,55 @@ function getScoreUrl(page) {
     state.scoreUrls.set(page.id, URL.createObjectURL(page.blob));
   }
   return state.scoreUrls.get(page.id);
+}
+
+async function hydrateScorePage(page) {
+  if (!page?.id || !page.storagePath || state.pageDownloads.has(page.id) || !state.cloudReady) {
+    return;
+  }
+
+  state.pageDownloads.add(page.id);
+  try {
+    const blob = await downloadCloudFile(page.storagePath, page.size);
+    const updatedPage = {
+      ...page,
+      blob,
+      size: page.size || blob.size,
+      storageSyncedAt: new Date().toISOString(),
+      storageUploadVersion: STORAGE_UPLOAD_VERSION,
+      syncStatus: SYNC_STATUS_SYNCED,
+    };
+    await putScorePage(updatedPage);
+    replaceLocalPage(updatedPage);
+    refreshPageImages(updatedPage);
+  } catch (error) {
+    console.warn(error);
+  } finally {
+    state.pageDownloads.delete(page.id);
+  }
+}
+
+function replaceLocalPage(updatedPage) {
+  state.scorePages = state.scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page));
+  state.scores = state.scores.map((score) => {
+    if (score.id !== updatedPage.scoreId) {
+      return score;
+    }
+
+    return {
+      ...score,
+      pages: score.pages.map((page) => (page.id === updatedPage.id ? updatedPage : page)),
+    };
+  });
+}
+
+function refreshPageImages(page) {
+  const src = getScoreUrl(page);
+  document.querySelectorAll("img[data-page-id]").forEach((image) => {
+    if (image.dataset.pageId === page.id) {
+      image.src = src;
+    }
+  });
 }
 
 function getPendingUrl(page) {
