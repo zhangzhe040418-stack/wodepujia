@@ -27,6 +27,12 @@ const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
 const FAB_LONG_PRESS_DELAY = 520;
 const FAB_VIEWPORT_MARGIN = 8;
+const IMAGE_COMPRESSION_TIMEOUT = 15000;
+const CLOUD_QUERY_TIMEOUT = 20000;
+const CLOUD_UPLOAD_TIMEOUT = 45000;
+const CLOUD_DOWNLOAD_TIMEOUT = 45000;
+const SHARE_SYNC_WAIT_TIMEOUT = 12000;
+const LOCAL_SAVE_TIMEOUT = 20000;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -1577,7 +1583,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=45");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=46");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2291,18 +2297,40 @@ async function addPendingFiles(fileList) {
     return;
   }
 
-  setStatus(`正在压缩 ${imageFiles.length} 张图片...`);
+  setStatus(`正在压缩 1 / ${imageFiles.length} 张图片...`);
 
-  for (const file of imageFiles) {
-    const compressed = await compressImageFile(file);
-    state.pendingPages.push({
-      id: createId(),
-      name: file.name,
-      originalSize: file.size,
-      type: compressed.type || file.type || "image/jpeg",
-      size: compressed.size,
-      blob: compressed,
-    });
+  for (const [index, file] of imageFiles.entries()) {
+    try {
+      const compressed = await withTimeout(
+        compressImageFile(file),
+        IMAGE_COMPRESSION_TIMEOUT,
+        `《${file.name}》压缩超时，已使用原图。`,
+      );
+      state.pendingPages.push({
+        id: createId(),
+        name: file.name,
+        originalSize: file.size,
+        type: compressed.type || file.type || "image/jpeg",
+        size: compressed.size,
+        blob: compressed,
+      });
+    } catch (error) {
+      console.warn(error);
+      state.pendingPages.push({
+        id: createId(),
+        name: file.name,
+        originalSize: file.size,
+        type: file.type || "image/jpeg",
+        size: file.size,
+        blob: file,
+      });
+    }
+
+    renderPending();
+    updateSaveState();
+    if (index < imageFiles.length - 1) {
+      setStatus(`正在压缩 ${index + 2} / ${imageFiles.length} 张图片...`);
+    }
   }
 
   if (imageFiles.length !== files.length) {
@@ -2457,7 +2485,7 @@ async function saveScore(event) {
   setStatus("正在保存...");
 
     try {
-      await putScoreWithPages(score, pages);
+      await withTimeout(putScoreWithPages(score, pages), LOCAL_SAVE_TIMEOUT, "本地保存超时，请减少单次图片数量后重试。");
       resetForm(false);
       elements.searchInput.value = "";
       await loadScores();
@@ -2857,7 +2885,11 @@ async function upsertCloud(table, rows) {
   const collection = state.cloudDb.collection(table);
   for (const row of rows) {
     const { _id, ...document } = row;
-    const result = await collection.doc(String(row.id)).set(document);
+    const result = await withTimeout(
+      collection.doc(String(row.id)).set(document),
+      CLOUD_QUERY_TIMEOUT,
+      "云端数据保存超时，请检查网络后重试。",
+    );
     assertCloudResult(result);
   }
 }
@@ -2874,7 +2906,11 @@ async function queryCloudRows(collectionName, where, options = {}) {
       query = query.orderBy(field, direction || "asc");
     });
 
-    const result = await query.skip(offset).limit(pageSize).get();
+    const result = await withTimeout(
+      query.skip(offset).limit(pageSize).get(),
+      CLOUD_QUERY_TIMEOUT,
+      "云端数据读取超时，请检查网络后重试。",
+    );
     assertCloudResult(result);
     batch = Array.isArray(result.data) ? result.data : [];
     rows.push(...batch);
@@ -2910,7 +2946,11 @@ async function queryCloudRowsByIds(collectionName, field, values, where = {}, op
 async function deleteCloudRowsByIds(collectionName, ids) {
   const collection = state.cloudDb.collection(collectionName);
   for (const id of ids.filter(Boolean)) {
-    const result = await collection.doc(String(id)).remove();
+    const result = await withTimeout(
+      collection.doc(String(id)).remove(),
+      CLOUD_QUERY_TIMEOUT,
+      "云端数据删除超时，请检查网络后重试。",
+    );
     assertCloudResult(result);
   }
 }
@@ -2963,10 +3003,14 @@ async function uploadCloudFile(cloudPath, blob, fileName = "score-page.jpg") {
 
   if (typeof state.cloudApp.uploadFile === "function") {
     try {
-      const result = await state.cloudApp.uploadFile({
-        cloudPath,
-        filePath: file,
-      });
+      const result = await withTimeout(
+        state.cloudApp.uploadFile({
+          cloudPath,
+          filePath: file,
+        }),
+        CLOUD_UPLOAD_TIMEOUT,
+        "歌谱图片上传超时，请检查网络后重试。",
+      );
       assertCloudResult(result);
       return getUploadedFileID(result, cloudPath);
     } catch (error) {
@@ -3009,13 +3053,17 @@ function toUploadFile(blob, fileName) {
 
 async function uploadCloudFileWithSignedUrl(cloudPath, file) {
   const contentType = file.type || "application/octet-stream";
-  const metadataResult = await state.cloudApp.getUploadMetadata({
-    cloudPath,
-    method: "put",
-    headers: {
-      "content-type": contentType,
-    },
-  });
+  const metadataResult = await withTimeout(
+    state.cloudApp.getUploadMetadata({
+      cloudPath,
+      method: "put",
+      headers: {
+        "content-type": contentType,
+      },
+    }),
+    CLOUD_QUERY_TIMEOUT,
+    "歌谱图片上传授权超时，请检查网络后重试。",
+  );
   assertCloudResult(metadataResult);
 
   const metadata = metadataResult.data || metadataResult;
@@ -3035,11 +3083,16 @@ async function uploadCloudFileWithSignedUrl(cloudPath, file) {
     }
   });
 
-  const response = await fetch(url, {
-    method: "PUT",
-    headers,
-    body: file,
-  });
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: "PUT",
+      headers,
+      body: file,
+    },
+    CLOUD_UPLOAD_TIMEOUT,
+    "歌谱图片上传超时，请检查网络后重试。",
+  );
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
@@ -3054,9 +3107,13 @@ async function downloadCloudFile(fileID, expectedSize = 0) {
     throw new Error("歌谱图片缺少云端文件 ID。");
   }
 
-  const result = await state.cloudApp.getTempFileURL({
-    fileList: [fileID],
-  });
+  const result = await withTimeout(
+    state.cloudApp.getTempFileURL({
+      fileList: [fileID],
+    }),
+    CLOUD_QUERY_TIMEOUT,
+    "歌谱图片下载授权超时，请检查网络后重试。",
+  );
   assertCloudResult(result);
 
   const fileInfo = result.fileList?.[0] || result.data?.fileList?.[0];
@@ -3072,7 +3129,7 @@ async function downloadCloudFile(fileID, expectedSize = 0) {
     throw new Error("歌谱图片下载地址为空。");
   }
 
-  const response = await fetch(url);
+  const response = await fetchWithTimeout(url, {}, CLOUD_DOWNLOAD_TIMEOUT, "歌谱图片下载超时，请检查网络后重试。");
   if (!response.ok) {
     throw new Error("歌谱图片下载失败。");
   }
@@ -3091,10 +3148,48 @@ async function deleteCloudFiles(fileIDs) {
     return;
   }
 
-  const result = await state.cloudApp.deleteFile({
-    fileList: targets,
-  });
+  const result = await withTimeout(
+    state.cloudApp.deleteFile({
+      fileList: targets,
+    }),
+    CLOUD_QUERY_TIMEOUT,
+    "云端图片删除超时。",
+  );
   assertCloudResult(result);
+}
+
+function withTimeout(promise, timeoutMs, message = "操作超时，请重试。") {
+  let timeoutId = 0;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    window.clearTimeout(timeoutId);
+  });
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = CLOUD_QUERY_TIMEOUT, message = "网络请求超时，请重试。") {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = window.setTimeout(() => controller?.abort(), timeoutMs);
+
+  try {
+    return await withTimeout(
+      fetch(url, {
+        ...options,
+        signal: controller?.signal || options.signal,
+      }),
+      timeoutMs,
+      message,
+    );
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(message);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 function chunkArray(items, size) {
@@ -3394,6 +3489,122 @@ function getSelectedShareTargets() {
   };
 }
 
+async function ensureShareTargetsReady(targets) {
+  if (!state.cloudReady || !state.session) {
+    throw new Error("请先登录账号后再生成同步码。");
+  }
+
+  await waitForBackgroundSync();
+
+  const userId = state.session.user.id;
+  const folderIds = new Set((targets.folderIds || []).filter(Boolean));
+  const scoreIds = new Set((targets.scoreIds || []).filter(Boolean));
+  const selectedFolders = state.folders.filter((folder) => folderIds.has(folder.id)).map((folder) => ({ ...folder, userId }));
+  const selectedScores = state.scores
+    .filter((score) => scoreIds.has(score.id) || folderIds.has(score.folderId))
+    .map((score) => ({
+      ...toScoreRecord(score),
+      userId,
+    }));
+  const selectedScoreIds = new Set(selectedScores.map((score) => score.id));
+  const selectedPages = state.scorePages
+    .filter((page) => selectedScoreIds.has(page.scoreId))
+    .map((page) => ({ ...page, userId: page.userId || userId }));
+
+  if (!selectedScores.length) {
+    throw new Error("没有可分享的歌谱。");
+  }
+
+  const uploadedPages = [];
+  let uploadIndex = 0;
+  const uploadTotal = selectedPages.filter((page) => page.blob?.size > 0 && (!page.storagePath || page.storageUploadVersion !== STORAGE_UPLOAD_VERSION)).length;
+
+  for (const page of selectedPages) {
+    let storagePath = page.storagePath || null;
+    let storageSyncedAt = page.storageSyncedAt || null;
+    let pageSize = page.size;
+    const hasBlob = Boolean(page.blob && page.blob.size > 0);
+    const shouldUploadBlob =
+      hasBlob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED || page.storageUploadVersion !== STORAGE_UPLOAD_VERSION);
+
+    if (!storagePath && !hasBlob) {
+      const score = state.scores.find((item) => item.id === page.scoreId);
+      throw new Error(`《${score?.name || "未命名歌谱"}》第 ${page.pageIndex + 1} 页还没有云端图片，请在原设备刷新同步后再分享。`);
+    }
+
+    if (shouldUploadBlob) {
+      uploadIndex += 1;
+      if (uploadTotal > 0) {
+        setStatus(`正在上传分享图片 ${uploadIndex} / ${uploadTotal}...`);
+      }
+      const cloudPath = page.storagePath?.startsWith("cloud://")
+        ? createStoragePath(userId, page.scoreId, page.id, page.type)
+        : storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
+      storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
+      storageSyncedAt = new Date().toISOString();
+      pageSize = page.blob.size;
+    }
+
+    const readyPage = {
+      ...page,
+      size: pageSize,
+      storagePath,
+      storageSyncedAt,
+      storageUploadVersion: storageSyncedAt ? STORAGE_UPLOAD_VERSION : page.storageUploadVersion,
+      syncStatus: SYNC_STATUS_SYNCED,
+    };
+    uploadedPages.push(readyPage);
+    replaceLocalPage(readyPage);
+  }
+
+  if (selectedFolders.length) {
+    await upsertCloud(CLOUD_TABLES.folders, selectedFolders.map(toCloudFolder));
+  }
+  if (selectedScores.length) {
+    await upsertCloud(CLOUD_TABLES.scores, selectedScores.map(toCloudScore));
+  }
+  if (uploadedPages.length) {
+    await upsertCloud(CLOUD_TABLES.pages, uploadedPages.map(toCloudPage));
+    await markLocalSynced(
+      selectedFolders.map((folder) => ({ ...folder, syncStatus: SYNC_STATUS_SYNCED })),
+      selectedScores.map((score) => ({ ...score, syncStatus: SYNC_STATUS_SYNCED })),
+      uploadedPages,
+    );
+    await loadScores();
+  }
+}
+
+async function waitForBackgroundSync() {
+  if (!state.syncing) {
+    return;
+  }
+
+  setStatus("正在等待后台同步结束...");
+  try {
+    await waitUntil(() => !state.syncing, SHARE_SYNC_WAIT_TIMEOUT, "后台同步耗时较久，已先为本次分享单独准备图片。");
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function waitUntil(predicate, timeoutMs, timeoutMessage) {
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        reject(new Error(timeoutMessage || "等待超时。"));
+        return;
+      }
+      window.setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
 async function createShareCode(event) {
   event.preventDefault();
   if (!requireCloudSession()) {
@@ -3408,7 +3619,8 @@ async function createShareCode(event) {
 
   elements.createShareButton.disabled = true;
   try {
-    await syncNow({ throwOnError: true });
+    setStatus("正在准备分享歌谱...");
+    await ensureShareTargetsReady(selectedTargets);
     const code = await insertShareBatch(selectedTargets);
     elements.shareCodeText.textContent = code;
     elements.shareCodePanel.hidden = false;
@@ -3455,12 +3667,17 @@ async function insertShareBatch(targets) {
         created_at: now,
       },
     ]);
-    await upsertCloud(CLOUD_TABLES.shareItems, items);
+    await upsertCloud(CLOUD_TABLES.shareItems, items.map(toShareIndexItem));
 
     return code;
   }
 
   throw new Error("同步码生成失败，请重试。");
+}
+
+function toShareIndexItem(item) {
+  const { pages, ...indexItem } = item;
+  return indexItem;
 }
 
 function buildShareItems(scoreIds, folderIds) {
