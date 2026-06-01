@@ -62,7 +62,9 @@ const state = {
   addScreenOpen: false,
   accountSyncTimer: 0,
   scoreUploads: new Set(),
+  scoreUploadTasks: new Map(),
   folderUploads: new Set(),
+  copyFeedbackTimer: 0,
   activeTab: "library",
   currentFolderId: null,
   authMode: "guest",
@@ -176,6 +178,7 @@ function bindElements() {
   elements.shareCodePanel = document.querySelector("#shareCodePanel");
   elements.shareCodeText = document.querySelector("#shareCodeText");
   elements.copyShareCodeButton = document.querySelector("#copyShareCodeButton");
+  elements.shareDialogStatus = document.querySelector("#shareDialogStatus");
   elements.closeShareButton = document.querySelector("#closeShareButton");
   elements.createShareButton = document.querySelector("#createShareButton");
   elements.importShareDialog = document.querySelector("#importShareDialog");
@@ -1602,7 +1605,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=51");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=52");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2699,16 +2702,33 @@ function queueScoreCloudUpload(scoreId, message = "") {
     setStatus(message);
   }
 
-  if (!state.cloudReady || !state.session || !scoreId || state.scoreUploads.has(scoreId)) {
+  if (!state.cloudReady || !state.session || !scoreId) {
     return;
   }
 
   window.setTimeout(() => {
-    uploadScoreToCloud(scoreId).catch((error) => {
+    startScoreCloudUpload(scoreId).catch((error) => {
       console.error(error);
       setStatus(error.message || "歌谱云端上传失败，请稍后点刷新重试。", true);
     });
   }, 0);
+}
+
+function startScoreCloudUpload(scoreId) {
+  if (!scoreId) {
+    return Promise.resolve();
+  }
+
+  const existingTask = state.scoreUploadTasks.get(scoreId);
+  if (existingTask) {
+    return existingTask;
+  }
+
+  const task = uploadScoreToCloud(scoreId).finally(() => {
+    state.scoreUploadTasks.delete(scoreId);
+  });
+  state.scoreUploadTasks.set(scoreId, task);
+  return task;
 }
 
 function queueFolderCloudUpload(folderId) {
@@ -2807,7 +2827,9 @@ async function uploadScoreToCloud(scoreId) {
         if (shouldUploadBlob) {
           uploadIndex += 1;
           if (uploadTotal > 0) {
-            setStatus(`正在直传《${score.name}》图片 ${uploadIndex} / ${uploadTotal}...`);
+            const message = `正在直传《${score.name}》图片 ${uploadIndex} / ${uploadTotal}...`;
+            setStatus(message);
+            setShareDialogStatus(message);
           }
           const cloudPath = getPageUploadPath(userId, page, storagePath);
           storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
@@ -2843,7 +2865,9 @@ async function uploadScoreToCloud(scoreId) {
     await markLocalSynced(syncedFolders, [syncedScore], readyPages);
     readyPages.forEach(replaceLocalPage);
     await loadScores();
-    setStatus(`《${score.name}》已上传云端。`);
+    const doneMessage = `《${score.name}》已上传云端。`;
+    setStatus(doneMessage);
+    setShareDialogStatus(doneMessage);
   } finally {
     state.scoreUploads.delete(scoreId);
   }
@@ -3589,6 +3613,9 @@ function openShareDialog() {
 
   elements.shareCodePanel.hidden = true;
   elements.shareCodeText.textContent = "";
+  setShareDialogStatus("");
+  resetCopyShareCodeButton();
+  setCreateShareButtonLabel("生成同步码");
   renderShareList();
   if (typeof elements.shareDialog.showModal === "function") {
     elements.shareDialog.showModal();
@@ -3603,6 +3630,34 @@ function closeShareDialog() {
     elements.shareDialog.close();
   } else {
     elements.shareDialog.removeAttribute("open");
+  }
+  setShareDialogStatus("");
+  resetCopyShareCodeButton();
+}
+
+function setShareDialogStatus(message, isError = false) {
+  if (!elements.shareDialogStatus) {
+    return;
+  }
+
+  elements.shareDialogStatus.textContent = message || "";
+  elements.shareDialogStatus.hidden = !message;
+  elements.shareDialogStatus.classList.toggle("is-error", Boolean(isError));
+}
+
+function setCreateShareButtonLabel(text) {
+  const label = elements.createShareButton?.querySelector("span");
+  if (label && text) {
+    label.textContent = text;
+  }
+}
+
+function resetCopyShareCodeButton() {
+  window.clearTimeout(state.copyFeedbackTimer);
+  state.copyFeedbackTimer = 0;
+  const label = elements.copyShareCodeButton?.querySelector("span");
+  if (label) {
+    label.textContent = "复制";
   }
 }
 
@@ -3785,20 +3840,30 @@ async function ensureShareTargetsReady(targets) {
   const folderIds = new Set((targets.folderIds || []).filter(Boolean));
   const scoreIds = new Set((targets.scoreIds || []).filter(Boolean));
   const selectedFolders = state.folders.filter((folder) => folderIds.has(folder.id)).map((folder) => ({ ...folder, userId }));
-  const selectedScores = state.scores
+  let selectedScores = state.scores
     .filter((score) => scoreIds.has(score.id) || folderIds.has(score.folderId))
     .map((score) => ({
       ...toScoreRecord(score),
       userId,
     }));
-  const selectedScoreIds = new Set(selectedScores.map((score) => score.id));
-  const selectedPages = state.scorePages
-    .filter((page) => selectedScoreIds.has(page.scoreId))
-    .map((page) => ({ ...page, userId: page.userId || userId }));
 
   if (!selectedScores.length) {
     throw new Error("没有可分享的歌谱。");
   }
+
+  const selectedScoreIds = new Set(selectedScores.map((score) => score.id));
+  const uploadedBeforeShare = await ensureShareScoresUploaded(selectedScoreIds);
+  if (uploadedBeforeShare) {
+    selectedScores = state.scores
+      .filter((score) => scoreIds.has(score.id) || folderIds.has(score.folderId))
+      .map((score) => ({
+        ...toScoreRecord(score),
+        userId,
+      }));
+  }
+  const selectedPages = state.scorePages
+    .filter((page) => selectedScoreIds.has(page.scoreId))
+    .map((page) => ({ ...page, userId: page.userId || userId }));
 
   let uploadIndex = 0;
   const pageNeedsUpload = (page) => page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
@@ -3818,7 +3883,9 @@ async function ensureShareTargetsReady(targets) {
     if (shouldUploadBlob) {
       uploadIndex += 1;
       if (uploadTotal > 0) {
-        setStatus(`正在上传分享图片 ${uploadIndex} / ${uploadTotal}...`);
+        const message = `正在上传分享图片 ${uploadIndex} / ${uploadTotal}...`;
+        setStatus(message);
+        setShareDialogStatus(message);
       }
       const cloudPath = getPageUploadPath(userId, page, storagePath);
       storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
@@ -3856,12 +3923,31 @@ async function ensureShareTargetsReady(targets) {
   }
 }
 
+async function ensureShareScoresUploaded(selectedScoreIds) {
+  const scoreIds = Array.from(selectedScoreIds || []).filter(Boolean);
+  const scoreIdsNeedingUpload = scoreIds.filter((scoreId) =>
+    state.scorePages.some((page) => page.scoreId === scoreId && page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)),
+  );
+
+  if (!scoreIdsNeedingUpload.length) {
+    return false;
+  }
+
+  setShareDialogStatus(`正在直传 ${scoreIdsNeedingUpload.length} 份歌谱的图片，请稍候...`);
+  await runWithConcurrency(scoreIdsNeedingUpload, 1, async (scoreId) => {
+    await startScoreCloudUpload(scoreId);
+  });
+  await loadScores();
+  return true;
+}
+
 async function waitForBackgroundSync() {
   if (!state.syncing) {
     return;
   }
 
   setStatus("正在等待后台同步结束...");
+  setShareDialogStatus("正在等待后台同步结束...");
   try {
     await waitUntil(() => !state.syncing, SHARE_SYNC_WAIT_TIMEOUT, "后台同步耗时较久，已先为本次分享单独准备图片。");
   } catch (error) {
@@ -3917,22 +4003,29 @@ async function createShareCode(event) {
   const selectedTargets = getSelectedShareTargets();
   if (!selectedTargets.scoreIds.length && !selectedTargets.folderIds.length) {
     setStatus("请至少选择一份歌谱。", true);
+    setShareDialogStatus("请至少选择一份歌谱。", true);
     return;
   }
 
   elements.createShareButton.disabled = true;
+  setCreateShareButtonLabel("生成中...");
   try {
     setStatus("正在准备分享歌谱...");
+    setShareDialogStatus("正在准备分享歌谱...");
     await ensureShareTargetsReady(selectedTargets);
+    setShareDialogStatus("正在保存同步码...");
     const code = await insertShareBatch(selectedTargets);
     elements.shareCodeText.textContent = code;
     elements.shareCodePanel.hidden = false;
     setStatus("同步码已生成。");
+    setShareDialogStatus("同步码已生成，可以复制分享。");
   } catch (error) {
     console.error(error);
     setStatus(error.message || "生成同步码失败。", true);
+    setShareDialogStatus(error.message || "生成同步码失败。", true);
   } finally {
     elements.createShareButton.disabled = false;
+    setCreateShareButtonLabel("生成同步码");
   }
 }
 
@@ -3949,10 +4042,27 @@ async function copyShareCode() {
       copyTextWithFallback(code);
     }
     setStatus("同步码已复制。");
+    setShareDialogStatus("同步码已复制。");
+    showCopyShareCodeFeedback();
   } catch (error) {
     console.error(error);
     setStatus("复制失败，请长按同步码手动复制。", true);
+    setShareDialogStatus("复制失败，请长按同步码手动复制。", true);
   }
+}
+
+function showCopyShareCodeFeedback() {
+  const label = elements.copyShareCodeButton?.querySelector("span");
+  if (!label) {
+    return;
+  }
+
+  window.clearTimeout(state.copyFeedbackTimer);
+  label.textContent = "已复制";
+  state.copyFeedbackTimer = window.setTimeout(() => {
+    label.textContent = "复制";
+    state.copyFeedbackTimer = 0;
+  }, 1600);
 }
 
 function copyTextWithFallback(text) {
@@ -4006,6 +4116,7 @@ async function insertShareBatch(targets) {
 
     if (!canEmbedItems) {
       setStatus("分享内容较多，正在保存分享索引...");
+      setShareDialogStatus("分享内容较多，正在保存分享索引...");
       await upsertCloud(CLOUD_TABLES.shareItems, items);
     }
 
