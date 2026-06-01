@@ -34,6 +34,7 @@ const CLOUD_DOWNLOAD_TIMEOUT = 90000;
 const CLOUD_WRITE_CONCURRENCY = 4;
 const SHARE_SYNC_WAIT_TIMEOUT = 1200;
 const SHARE_UPLOAD_CONCURRENCY = 3;
+const SHARE_BATCH_EMBED_LIMIT = 700 * 1024;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -58,6 +59,7 @@ const state = {
   pageDownloads: new Set(),
   installPrompt: null,
   addScreenOpen: false,
+  accountSyncTimer: 0,
   activeTab: "library",
   currentFolderId: null,
   authMode: "guest",
@@ -732,8 +734,7 @@ async function connectCloud() {
         updateAccountUi();
         await loadScores();
         if (state.session) {
-          await claimLocalRecordsForUser(state.session.user.id);
-          await syncNow();
+          queueAccountBackgroundSync(state.session.user.id);
         }
       });
     }
@@ -808,8 +809,7 @@ async function restoreCloudSession() {
   updateAccountUi();
   await loadScores();
   if (state.session) {
-    await claimLocalRecordsForUser(state.session.user.id);
-    await syncNow();
+    queueAccountBackgroundSync(state.session.user.id);
   }
 }
 
@@ -1203,9 +1203,7 @@ async function signInWithPassword(event) {
       throw new Error("登录状态读取失败，请重新登录。");
     }
     closeAuthDialog();
-    setStatus("已登录，正在同步...");
-    await claimLocalRecordsForUser(state.session.user.id);
-    await syncNow({ manual: true });
+    queueAccountBackgroundSync(state.session.user.id, "已登录，正在后台同步...");
   } catch (error) {
     console.error(error);
     const message = getErrorMessage(error) || "登录失败，请检查账号密码。";
@@ -1325,9 +1323,7 @@ async function completeRegisterWithPassword() {
     state.authRegisterVerifyOtp = null;
     state.authRegisterPayload = null;
     closeAuthDialog();
-    setStatus("注册成功，正在同步...");
-    await claimLocalRecordsForUser(state.session.user.id);
-    await syncNow({ manual: true });
+    queueAccountBackgroundSync(state.session.user.id, "注册成功，正在后台同步...");
   } catch (error) {
     console.error(error);
     const message = getErrorMessage(error) || "注册失败，请稍后再试。";
@@ -1540,6 +1536,8 @@ async function signOut() {
 
   const keepAuthDialogOpen = Boolean(elements.authDialog?.open);
   await state.cloudAuth.signOut();
+  window.clearTimeout(state.accountSyncTimer);
+  state.accountSyncTimer = 0;
   state.session = null;
   if (keepAuthDialogOpen) {
     setAuthMode("guest");
@@ -1599,7 +1597,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=48");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=49");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2635,6 +2633,32 @@ async function claimLocalRecordsForUser(userId) {
   await loadScores();
 }
 
+function queueAccountBackgroundSync(userId, message = "") {
+  if (!userId) {
+    return;
+  }
+
+  if (message) {
+    setStatus(message);
+  }
+
+  window.clearTimeout(state.accountSyncTimer);
+  state.accountSyncTimer = window.setTimeout(async () => {
+    state.accountSyncTimer = 0;
+    if (!state.session || state.session.user.id !== userId) {
+      return;
+    }
+
+    try {
+      await claimLocalRecordsForUser(userId);
+      await syncNow();
+    } catch (error) {
+      console.error(error);
+      setStatus(error.message || "后台同步失败，请稍后点刷新重试。", true);
+    }
+  }, 100);
+}
+
 function putCloudReadyRecords(folders, scores, pages) {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
@@ -2737,10 +2761,10 @@ async function syncNow(options = {}) {
   }
 }
 
-async function performSync() {
+async function performSync(options = {}) {
   await pullCloudDeletions();
   await uploadLocalChanges();
-  await pullCloudChanges();
+  await pullCloudChanges(options);
   await loadScores();
 }
 
@@ -2812,9 +2836,11 @@ async function getSyncableLocalRecords(userId) {
 async function uploadLocalChanges() {
   const userId = state.session.user.id;
   const localRecords = await getSyncableLocalRecords(userId);
-  const folders = localRecords.folders.map((folder) => ({ ...folder, userId }));
-  const scores = localRecords.scores.map((score) => ({ ...toScoreRecord(score), userId }));
-  const scoreById = new Map(scores.map((score) => [score.id, score]));
+  const allFolders = localRecords.folders.map((folder) => ({ ...folder, userId }));
+  const allScores = localRecords.scores.map((score) => ({ ...toScoreRecord(score), userId }));
+  const folders = allFolders.filter(needsCloudMetadataSync);
+  const scores = allScores.filter(needsCloudMetadataSync);
+  const scoreById = new Map(allScores.map((score) => [score.id, score]));
   const pages = localRecords.pages
     .filter((page) => scoreById.has(page.scoreId))
     .map((page) => ({ ...page, userId: page.userId || userId }));
@@ -2831,6 +2857,11 @@ async function uploadLocalChanges() {
       !pageDeleted &&
       hasBlob &&
       (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
+    const shouldSyncMetadata = page.syncStatus !== SYNC_STATUS_SYNCED || shouldUploadBlob || (!pageDeleted && !storagePath);
+
+    if (!shouldSyncMetadata) {
+      continue;
+    }
 
     if (!pageDeleted && !storagePath && !hasBlob) {
       const scoreName = score?.name || "未命名歌谱";
@@ -2879,7 +2910,12 @@ async function uploadLocalChanges() {
   );
 }
 
-async function pullCloudChanges() {
+function needsCloudMetadataSync(record) {
+  return record?.syncStatus !== SYNC_STATUS_SYNCED;
+}
+
+async function pullCloudChanges(options = {}) {
+  const downloadImages = Boolean(options.downloadImages);
   const userId = state.session.user.id;
   const [folderRows, scoreRows, pageRows] = await Promise.all([
     queryCloudRows(CLOUD_TABLES.folders, { user_id: userId }),
@@ -2904,6 +2940,16 @@ async function pullCloudChanges() {
         blob: localPage.blob,
         storageSyncedAt: localPage.storageSyncedAt || page.updatedAt || null,
         storageUploadVersion: localPage.storageUploadVersion || 0,
+      });
+      continue;
+    }
+
+    if (!downloadImages) {
+      cloudPages.push({
+        ...page,
+        blob: localPage?.blob,
+        storageSyncedAt: localPage?.storageSyncedAt || page.updatedAt || null,
+        storageUploadVersion: localPage?.storageUploadVersion || STORAGE_UPLOAD_VERSION,
       });
       continue;
     }
@@ -3743,23 +3789,23 @@ async function insertShareBatch(targets) {
       share_id: shareId,
       created_at: now,
     }));
+    const canEmbedItems = estimateJsonBytes(items) <= SHARE_BATCH_EMBED_LIMIT;
     await upsertCloud(CLOUD_TABLES.shareBatches, [
       {
         id: shareId,
         owner_id: state.session.user.id,
         code,
-        payload_version: 2,
+        payload_version: canEmbedItems ? 2 : 3,
         item_count: items.length,
-        items,
+        items: canEmbedItems ? items : [],
         created_at: now,
       },
     ]);
 
-    window.setTimeout(() => {
-      upsertCloud(CLOUD_TABLES.shareItems, items.map(toShareIndexItem)).catch((error) => {
-        console.warn("Share item index write failed; share batch snapshot is still usable.", error);
-      });
-    }, 0);
+    if (!canEmbedItems) {
+      setStatus("分享内容较多，正在保存分享索引...");
+      await upsertCloud(CLOUD_TABLES.shareItems, items);
+    }
 
     return code;
   }
@@ -3767,9 +3813,12 @@ async function insertShareBatch(targets) {
   throw new Error("同步码生成失败，请重试。");
 }
 
-function toShareIndexItem(item) {
-  const { pages, ...indexItem } = item;
-  return indexItem;
+function estimateJsonBytes(value) {
+  const json = JSON.stringify(value);
+  if (typeof TextEncoder === "function") {
+    return new TextEncoder().encode(json).length;
+  }
+  return json.length * 2;
 }
 
 function buildShareItems(scoreIds, folderIds) {
@@ -3909,7 +3958,7 @@ async function importScoresByShareCode(code) {
     snapshotItems.some((item) => Array.isArray(item.pages) || item.folder_name || item.score_name);
   if (hasSnapshotPayload) {
     const result = await importScoresFromShareSnapshot(snapshotItems);
-    await syncNow();
+    queueSync();
     return result;
   }
 
@@ -3989,7 +4038,7 @@ async function importScoresByShareCode(code) {
     }
   }
 
-  await syncNow();
+  queueSync();
   return result;
 }
 
@@ -4093,17 +4142,19 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
   const newPages = [];
 
   for (const [index, pageRow] of pageRows.entries()) {
-    const blob = await downloadCloudFile(pageRow.storage_path);
+    if (!pageRow.storage_path) {
+      continue;
+    }
     const newPageId = createId();
+    const pageType = pageRow.type || "image/jpeg";
     newPages.push({
       id: newPageId,
       scoreId: newScore.id,
       userId,
       pageIndex: index,
       name: pageRow.name || `第 ${index + 1} 页`,
-      type: pageRow.type || blob.type || "image/jpeg",
-      size: Number(pageRow.size) || blob.size,
-      blob,
+      type: pageType,
+      size: Number(pageRow.size) || 0,
       storagePath: pageRow.storage_path,
       storageSyncedAt: new Date().toISOString(),
       storageUploadVersion: STORAGE_UPLOAD_VERSION,
