@@ -18,22 +18,22 @@ const VIEWER_MAX_ZOOM = 4;
 const VIEWER_DOUBLE_TAP_ZOOM = 2;
 const VIEWER_TAP_MAX_DISTANCE = 10;
 const VIEWER_DOUBLE_TAP_DELAY = 320;
-const IMAGE_MAX_EDGE = 1800;
-const IMAGE_WEBP_QUALITY = 0.78;
-const IMAGE_JPEG_QUALITY = 0.82;
+const IMAGE_MAX_EDGE = 1600;
+const IMAGE_WEBP_QUALITY = 0.7;
+const IMAGE_JPEG_QUALITY = 0.76;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
 const FAB_LONG_PRESS_DELAY = 520;
 const FAB_VIEWPORT_MARGIN = 8;
-const IMAGE_COMPRESSION_TIMEOUT = 15000;
-const CLOUD_QUERY_TIMEOUT = 20000;
-const CLOUD_UPLOAD_TIMEOUT = 45000;
-const CLOUD_DOWNLOAD_TIMEOUT = 45000;
+const IMAGE_COMPRESSION_TIMEOUT = 30000;
+const CLOUD_QUERY_TIMEOUT = 30000;
+const CLOUD_UPLOAD_TIMEOUT = 120000;
+const CLOUD_DOWNLOAD_TIMEOUT = 90000;
+const CLOUD_WRITE_CONCURRENCY = 4;
 const SHARE_SYNC_WAIT_TIMEOUT = 1200;
 const SHARE_UPLOAD_CONCURRENCY = 3;
-const LOCAL_SAVE_TIMEOUT = 20000;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -1448,6 +1448,21 @@ function getErrorMessage(error) {
   return error.message || error.msg || error.error_description || error.code || "未知错误";
 }
 
+function getStorageSaveErrorMessage(error) {
+  const message = getErrorMessage(error);
+  const errorName = String(error?.name || "");
+
+  if (/quota|storage|not enough|exceeded/i.test(`${errorName} ${message}`)) {
+    return "保存失败：手机或浏览器的本地存储空间不足，请删除一些旧歌谱或清理浏览器空间后再试。";
+  }
+
+  if (/transaction|abort|indexeddb|database/i.test(`${errorName} ${message}`)) {
+    return "保存失败：本地谱夹数据库写入中断，请重新打开 App 后再试。";
+  }
+
+  return message ? `保存失败：${message}` : "保存失败，请稍后再试。";
+}
+
 function isEmailAddress(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
@@ -1584,7 +1599,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=47");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=48");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2347,11 +2362,13 @@ async function addPendingFiles(fileList) {
 }
 
 async function compressImageFile(file) {
+  let source = null;
+
   try {
-    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
-    const width = Math.max(1, Math.round(bitmap.width * scale));
-    const height = Math.max(1, Math.round(bitmap.height * scale));
+    source = await loadImageSource(file);
+    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(source.width, source.height));
+    const width = Math.max(1, Math.round(source.width * scale));
+    const height = Math.max(1, Math.round(source.height * scale));
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", { alpha: false });
 
@@ -2359,8 +2376,9 @@ async function compressImageFile(file) {
     canvas.height = height;
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
-    context.drawImage(bitmap, 0, 0, width, height);
-    bitmap.close?.();
+    context.drawImage(source.image, 0, 0, width, height);
+    source.close?.();
+    source = null;
 
     const webpBlob = await canvasToBlob(canvas, "image/webp", IMAGE_WEBP_QUALITY);
     if (webpBlob && webpBlob.size < file.size) {
@@ -2373,9 +2391,49 @@ async function compressImageFile(file) {
     }
   } catch (error) {
     console.warn("Image compression failed, using original file.", error);
+  } finally {
+    source?.close?.();
   }
 
   return file;
+}
+
+async function loadImageSource(file) {
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      return {
+        image: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        close: () => bitmap.close?.(),
+      };
+    } catch (error) {
+      console.warn("createImageBitmap failed, trying image element.", error);
+    }
+  }
+
+  const { image, url } = await loadImageElement(file);
+  return {
+    image,
+    width: image.naturalWidth || image.width,
+    height: image.naturalHeight || image.height,
+    close: () => URL.revokeObjectURL(url),
+  };
+}
+
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => resolve({ image, url });
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("图片读取失败。"));
+    };
+    image.src = url;
+  });
 }
 
 function canvasToBlob(canvas, type, quality) {
@@ -2487,17 +2545,17 @@ async function saveScore(event) {
   elements.saveButton.disabled = true;
   setStatus("正在保存...");
 
-    try {
-      await withTimeout(putScoreWithPages(score, pages), LOCAL_SAVE_TIMEOUT, "本地保存超时，请减少单次图片数量后重试。");
-      resetForm(false);
-      elements.searchInput.value = "";
-      await loadScores();
-      queueSync();
-      closeAddScreen();
-      setStatus(`已保存《${name}》。`);
-    } catch (error) {
+  try {
+    await putScoreWithPages(score, pages);
+    resetForm(false);
+    elements.searchInput.value = "";
+    await loadScores();
+    queueSync();
+    closeAddScreen();
+    setStatus(`已保存《${name}》，正在后台同步。`);
+  } catch (error) {
     console.error(error);
-    setStatus("保存失败，请稍后再试。", true);
+    setStatus(getStorageSaveErrorMessage(error), true);
   } finally {
     updateSaveState();
   }
@@ -2599,7 +2657,7 @@ function queueSync() {
     return;
   }
 
-  window.setTimeout(() => syncNow(), 250);
+  window.setTimeout(() => syncNow(), 3500);
 }
 
 async function handleManualSync() {
@@ -2772,9 +2830,7 @@ async function uploadLocalChanges() {
     const shouldUploadBlob =
       !pageDeleted &&
       hasBlob &&
-      (!page.storagePath ||
-        page.syncStatus !== SYNC_STATUS_SYNCED ||
-        page.storageUploadVersion !== STORAGE_UPLOAD_VERSION);
+      (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
 
     if (!pageDeleted && !storagePath && !hasBlob) {
       const scoreName = score?.name || "未命名歌谱";
@@ -2782,9 +2838,7 @@ async function uploadLocalChanges() {
     }
 
     if (shouldUploadBlob) {
-      const cloudPath = page.storagePath?.startsWith("cloud://")
-        ? createStoragePath(userId, page.scoreId, page.id, page.type)
-        : storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
+      const cloudPath = getPageUploadPath(userId, page, storagePath);
       storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
       storageSyncedAt = new Date().toISOString();
       pageSize = page.blob.size;
@@ -2886,7 +2940,7 @@ function isCloudRowActive(row) {
 
 async function upsertCloud(table, rows) {
   const collection = state.cloudDb.collection(table);
-  for (const row of rows) {
+  await runWithConcurrency(rows, CLOUD_WRITE_CONCURRENCY, async (row) => {
     const { _id, ...document } = row;
     const result = await withTimeout(
       collection.doc(String(row.id)).set(document),
@@ -2894,7 +2948,7 @@ async function upsertCloud(table, rows) {
       "云端数据保存超时，请检查网络后重试。",
     );
     assertCloudResult(result);
-  }
+  });
 }
 
 async function queryCloudRows(collectionName, where, options = {}) {
@@ -3208,6 +3262,23 @@ function createStoragePath(userId, scoreId, pageId, type) {
   return `${root}/${userId}/${scoreId}/${pageId}.${getExtensionFromType(type)}`;
 }
 
+function getPageUploadPath(userId, page, storagePath = page?.storagePath || null) {
+  if (!storagePath || storagePath.startsWith("cloud://") || !isOwnStoragePath(storagePath, userId)) {
+    return createStoragePath(userId, page.scoreId, page.id, page.type);
+  }
+
+  return storagePath;
+}
+
+function isOwnStoragePath(storagePath, userId) {
+  if (!storagePath || !userId) {
+    return false;
+  }
+
+  const root = String(window.MY_SCORE_FOLDER_CLOUDBASE?.storageRoot || "score-pages").replace(/^\/+|\/+$/g, "");
+  return String(storagePath).includes(`/${root}/${userId}/`) || String(storagePath).startsWith(`${root}/${userId}/`);
+}
+
 function getExtensionFromType(type) {
   if (type === "image/png") return "png";
   if (type === "image/webp") return "webp";
@@ -3519,14 +3590,14 @@ async function ensureShareTargetsReady(targets) {
   }
 
   let uploadIndex = 0;
-  const uploadTotal = selectedPages.filter((page) => page.blob?.size > 0 && (!page.storagePath || page.storageUploadVersion !== STORAGE_UPLOAD_VERSION)).length;
+  const pageNeedsUpload = (page) => page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
+  const uploadTotal = selectedPages.filter(pageNeedsUpload).length;
   const uploadedPages = await runWithConcurrency(selectedPages, SHARE_UPLOAD_CONCURRENCY, async (page) => {
     let storagePath = page.storagePath || null;
     let storageSyncedAt = page.storageSyncedAt || null;
     let pageSize = page.size;
     const hasBlob = Boolean(page.blob && page.blob.size > 0);
-    const shouldUploadBlob =
-      hasBlob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED || page.storageUploadVersion !== STORAGE_UPLOAD_VERSION);
+    const shouldUploadBlob = pageNeedsUpload(page);
 
     if (!storagePath && !hasBlob) {
       const score = state.scores.find((item) => item.id === page.scoreId);
@@ -3538,9 +3609,7 @@ async function ensureShareTargetsReady(targets) {
       if (uploadTotal > 0) {
         setStatus(`正在上传分享图片 ${uploadIndex} / ${uploadTotal}...`);
       }
-      const cloudPath = page.storagePath?.startsWith("cloud://")
-        ? createStoragePath(userId, page.scoreId, page.id, page.type)
-        : storagePath || createStoragePath(userId, page.scoreId, page.id, page.type);
+      const cloudPath = getPageUploadPath(userId, page, storagePath);
       storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
       storageSyncedAt = new Date().toISOString();
       pageSize = page.blob.size;
@@ -3666,11 +3735,6 @@ async function insertShareBatch(targets) {
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const code = createShareCodeValue();
-    const existing = await queryCloudRows(CLOUD_TABLES.shareBatches, { code });
-    if (existing.length) {
-      continue;
-    }
-
     const now = new Date().toISOString();
     const shareId = createId();
     const items = shareItems.map((item) => ({
@@ -3690,11 +3754,12 @@ async function insertShareBatch(targets) {
         created_at: now,
       },
     ]);
-    try {
-      await upsertCloud(CLOUD_TABLES.shareItems, items.map(toShareIndexItem));
-    } catch (error) {
-      console.warn("Share item index write failed; share batch snapshot is still usable.", error);
-    }
+
+    window.setTimeout(() => {
+      upsertCloud(CLOUD_TABLES.shareItems, items.map(toShareIndexItem)).catch((error) => {
+        console.warn("Share item index write failed; share batch snapshot is still usable.", error);
+      });
+    }, 0);
 
     return code;
   }
@@ -4030,8 +4095,6 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
   for (const [index, pageRow] of pageRows.entries()) {
     const blob = await downloadCloudFile(pageRow.storage_path);
     const newPageId = createId();
-    const storagePath = createStoragePath(userId, newScore.id, newPageId, pageRow.type);
-    const fileID = await uploadCloudFile(storagePath, blob, `${newPageId}.${getExtensionFromType(pageRow.type)}`);
     newPages.push({
       id: newPageId,
       scoreId: newScore.id,
@@ -4041,7 +4104,7 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
       type: pageRow.type || blob.type || "image/jpeg",
       size: Number(pageRow.size) || blob.size,
       blob,
-      storagePath: fileID,
+      storagePath: pageRow.storage_path,
       storageSyncedAt: new Date().toISOString(),
       storageUploadVersion: STORAGE_UPLOAD_VERSION,
       createdAt: now,
@@ -4482,7 +4545,7 @@ async function deleteCloudScore(score, deletedAt = new Date().toISOString()) {
   }
   await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(deletedScore)]);
   await deleteCloudShareItemsForScores([score.id]);
-  await cleanupCloudFilesAfterDelete(paths);
+  await cleanupCloudFilesAfterDelete(paths, userId);
 }
 
 async function deleteCloudFolder(folder, folderScores, deletedAt = new Date().toISOString()) {
@@ -4519,12 +4582,12 @@ async function deleteCloudFolder(folder, folderScores, deletedAt = new Date().to
   await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(deletedFolder)]);
   await deleteCloudShareItemsForFolders([folder.id]);
   await deleteCloudShareItemsForScores(scoreIds);
-  await cleanupCloudFilesAfterDelete(paths);
+  await cleanupCloudFilesAfterDelete(paths, userId);
 }
 
-async function cleanupCloudFilesAfterDelete(paths) {
+async function cleanupCloudFilesAfterDelete(paths, userId) {
   try {
-    await deleteCloudFiles(paths);
+    await deleteCloudFiles(paths.filter((path) => isOwnStoragePath(path, userId)));
   } catch (error) {
     console.warn(error);
   }
