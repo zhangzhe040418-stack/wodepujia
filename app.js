@@ -34,6 +34,7 @@ const CLOUD_DOWNLOAD_TIMEOUT = 90000;
 const CLOUD_WRITE_CONCURRENCY = 4;
 const SHARE_SYNC_WAIT_TIMEOUT = 1200;
 const SHARE_UPLOAD_CONCURRENCY = 3;
+const SCORE_UPLOAD_CONCURRENCY = 3;
 const SHARE_BATCH_EMBED_LIMIT = 700 * 1024;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
@@ -60,6 +61,8 @@ const state = {
   installPrompt: null,
   addScreenOpen: false,
   accountSyncTimer: 0,
+  scoreUploads: new Set(),
+  folderUploads: new Set(),
   activeTab: "library",
   currentFolderId: null,
   authMode: "guest",
@@ -1597,7 +1600,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=49");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=50");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2548,9 +2551,12 @@ async function saveScore(event) {
     resetForm(false);
     elements.searchInput.value = "";
     await loadScores();
-    queueSync();
+    if (userId && state.cloudReady) {
+      queueScoreCloudUpload(score.id, `已保存《${name}》，正在直传云端。`);
+    } else {
+      setStatus(`已保存《${name}》。`);
+    }
     closeAddScreen();
-    setStatus(`已保存《${name}》，正在后台同步。`);
   } catch (error) {
     console.error(error);
     setStatus(getStorageSaveErrorMessage(error), true);
@@ -2589,7 +2595,9 @@ async function createFolder(event) {
     elements.searchInput.value = "";
     closeFolderDialog();
     await loadScores();
-    queueSync();
+    if (userId && state.cloudReady) {
+      queueFolderCloudUpload(folder.id);
+    }
     elements.appShell.scrollTo({ top: 0 });
   } catch (error) {
     console.error(error);
@@ -2682,6 +2690,161 @@ function queueSync() {
   }
 
   window.setTimeout(() => syncNow(), 3500);
+}
+
+function queueScoreCloudUpload(scoreId, message = "") {
+  if (message) {
+    setStatus(message);
+  }
+
+  if (!state.cloudReady || !state.session || !scoreId || state.scoreUploads.has(scoreId)) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    uploadScoreToCloud(scoreId).catch((error) => {
+      console.error(error);
+      setStatus(error.message || "歌谱云端上传失败，请稍后点刷新重试。", true);
+    });
+  }, 0);
+}
+
+function queueFolderCloudUpload(folderId) {
+  if (!state.cloudReady || !state.session || !folderId || state.folderUploads.has(folderId)) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    uploadFolderToCloud(folderId).catch((error) => {
+      console.error(error);
+      setStatus(error.message || "文件夹云端保存失败，请稍后点刷新重试。", true);
+    });
+  }, 0);
+}
+
+async function uploadFolderToCloud(folderId) {
+  if (!state.cloudReady || !state.session || state.folderUploads.has(folderId)) {
+    return;
+  }
+
+  const userId = state.session.user.id;
+  const folder = state.folders.find((item) => item.id === folderId);
+  if (!folder) {
+    return;
+  }
+
+  state.folderUploads.add(folderId);
+  try {
+    const syncedFolder = {
+      ...normalizeLocalFolderRecord(folder),
+      userId,
+      syncStatus: SYNC_STATUS_SYNCED,
+    };
+    await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(syncedFolder)]);
+    await putFolder(syncedFolder);
+    await loadScores();
+  } finally {
+    state.folderUploads.delete(folderId);
+  }
+}
+
+async function uploadScoreToCloud(scoreId) {
+  if (!state.cloudReady || !state.session || state.scoreUploads.has(scoreId)) {
+    return;
+  }
+
+  const userId = state.session.user.id;
+  let score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    await loadScores();
+    score = state.scores.find((item) => item.id === scoreId);
+  }
+  if (!score) {
+    return;
+  }
+
+  const pages = state.scorePages
+    .filter((page) => page.scoreId === scoreId)
+    .sort((a, b) => a.pageIndex - b.pageIndex);
+  if (!pages.length) {
+    return;
+  }
+
+  state.scoreUploads.add(scoreId);
+  try {
+    const folder = score.folderId ? state.folders.find((item) => item.id === score.folderId) : null;
+    const syncedFolders = folder && folder.syncStatus !== SYNC_STATUS_SYNCED
+      ? [
+        {
+          ...normalizeLocalFolderRecord(folder),
+          userId,
+          syncStatus: SYNC_STATUS_SYNCED,
+        },
+      ]
+      : [];
+
+    let uploadIndex = 0;
+    const uploadTotal = pages.filter((page) => page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)).length;
+    const readyPages = (
+      await runWithConcurrency(pages, SCORE_UPLOAD_CONCURRENCY, async (page) => {
+        let storagePath = page.storagePath || null;
+        let storageSyncedAt = page.storageSyncedAt || null;
+        let pageSize = page.size;
+        const hasBlob = Boolean(page.blob && page.blob.size > 0);
+        const shouldUploadBlob = hasBlob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
+        const shouldSyncMetadata = page.syncStatus !== SYNC_STATUS_SYNCED || shouldUploadBlob || !storagePath;
+
+        if (!shouldSyncMetadata) {
+          return null;
+        }
+
+        if (!storagePath && !hasBlob) {
+          throw new Error(`《${score.name}》第 ${page.pageIndex + 1} 页缺少图片文件，无法上传云端。`);
+        }
+
+        if (shouldUploadBlob) {
+          uploadIndex += 1;
+          if (uploadTotal > 0) {
+            setStatus(`正在直传《${score.name}》图片 ${uploadIndex} / ${uploadTotal}...`);
+          }
+          const cloudPath = getPageUploadPath(userId, page, storagePath);
+          storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
+          storageSyncedAt = new Date().toISOString();
+          pageSize = page.blob.size;
+        }
+
+        return {
+          ...page,
+          userId,
+          size: pageSize,
+          storagePath,
+          storageSyncedAt,
+          storageUploadVersion: storageSyncedAt ? STORAGE_UPLOAD_VERSION : page.storageUploadVersion,
+          syncStatus: SYNC_STATUS_SYNCED,
+        };
+      })
+    ).filter(Boolean);
+
+    const syncedScore = {
+      ...toScoreRecord(score),
+      userId,
+      syncStatus: SYNC_STATUS_SYNCED,
+    };
+
+    if (syncedFolders.length) {
+      await upsertCloud(CLOUD_TABLES.folders, syncedFolders.map(toCloudFolder));
+    }
+    await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(syncedScore)]);
+    if (readyPages.length) {
+      await upsertCloud(CLOUD_TABLES.pages, readyPages.map(toCloudPage));
+    }
+    await markLocalSynced(syncedFolders, [syncedScore], readyPages);
+    readyPages.forEach(replaceLocalPage);
+    await loadScores();
+    setStatus(`《${score.name}》已上传云端。`);
+  } finally {
+    state.scoreUploads.delete(scoreId);
+  }
 }
 
 async function handleManualSync() {
