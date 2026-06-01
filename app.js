@@ -31,7 +31,8 @@ const IMAGE_COMPRESSION_TIMEOUT = 15000;
 const CLOUD_QUERY_TIMEOUT = 20000;
 const CLOUD_UPLOAD_TIMEOUT = 45000;
 const CLOUD_DOWNLOAD_TIMEOUT = 45000;
-const SHARE_SYNC_WAIT_TIMEOUT = 12000;
+const SHARE_SYNC_WAIT_TIMEOUT = 1200;
+const SHARE_UPLOAD_CONCURRENCY = 3;
 const LOCAL_SAVE_TIMEOUT = 20000;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
@@ -1583,7 +1584,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=46");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=47");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2300,6 +2301,7 @@ async function addPendingFiles(fileList) {
   setStatus(`正在压缩 1 / ${imageFiles.length} 张图片...`);
 
   for (const [index, file] of imageFiles.entries()) {
+    await nextFrame();
     try {
       const compressed = await withTimeout(
         compressImageFile(file),
@@ -2328,6 +2330,7 @@ async function addPendingFiles(fileList) {
 
     renderPending();
     updateSaveState();
+    await nextFrame();
     if (index < imageFiles.length - 1) {
       setStatus(`正在压缩 ${index + 2} / ${imageFiles.length} 张图片...`);
     }
@@ -3515,11 +3518,9 @@ async function ensureShareTargetsReady(targets) {
     throw new Error("没有可分享的歌谱。");
   }
 
-  const uploadedPages = [];
   let uploadIndex = 0;
   const uploadTotal = selectedPages.filter((page) => page.blob?.size > 0 && (!page.storagePath || page.storageUploadVersion !== STORAGE_UPLOAD_VERSION)).length;
-
-  for (const page of selectedPages) {
+  const uploadedPages = await runWithConcurrency(selectedPages, SHARE_UPLOAD_CONCURRENCY, async (page) => {
     let storagePath = page.storagePath || null;
     let storageSyncedAt = page.storageSyncedAt || null;
     let pageSize = page.size;
@@ -3553,9 +3554,10 @@ async function ensureShareTargetsReady(targets) {
       storageUploadVersion: storageSyncedAt ? STORAGE_UPLOAD_VERSION : page.storageUploadVersion,
       syncStatus: SYNC_STATUS_SYNCED,
     };
-    uploadedPages.push(readyPage);
-    replaceLocalPage(readyPage);
-  }
+    return readyPage;
+  });
+
+  uploadedPages.forEach(replaceLocalPage);
 
   if (selectedFolders.length) {
     await upsertCloud(CLOUD_TABLES.folders, selectedFolders.map(toCloudFolder));
@@ -3603,6 +3605,27 @@ function waitUntil(predicate, timeoutMs, timeoutMessage) {
     };
     tick();
   });
+}
+
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, runWorker);
+  await Promise.all(workers);
+  return results;
 }
 
 async function createShareCode(event) {
@@ -3667,7 +3690,11 @@ async function insertShareBatch(targets) {
         created_at: now,
       },
     ]);
-    await upsertCloud(CLOUD_TABLES.shareItems, items.map(toShareIndexItem));
+    try {
+      await upsertCloud(CLOUD_TABLES.shareItems, items.map(toShareIndexItem));
+    } catch (error) {
+      console.warn("Share item index write failed; share batch snapshot is still usable.", error);
+    }
 
     return code;
   }
