@@ -1011,6 +1011,33 @@ body.add-screen-open .bottom-nav {
   letter-spacing: 0.08em;
 }
 
+.share-code-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.copy-code-button {
+  display: inline-grid;
+  grid-template-columns: 16px auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(15, 118, 110, 0.26);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.copy-code-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 .choice-surface h2,
 .folder-surface h2 {
   margin: 0;

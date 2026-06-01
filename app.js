@@ -175,6 +175,7 @@ function bindElements() {
   elements.shareSelectAll = document.querySelector("#shareSelectAll");
   elements.shareCodePanel = document.querySelector("#shareCodePanel");
   elements.shareCodeText = document.querySelector("#shareCodeText");
+  elements.copyShareCodeButton = document.querySelector("#copyShareCodeButton");
   elements.closeShareButton = document.querySelector("#closeShareButton");
   elements.createShareButton = document.querySelector("#createShareButton");
   elements.importShareDialog = document.querySelector("#importShareDialog");
@@ -273,6 +274,7 @@ function bindEvents() {
   elements.shareForm.addEventListener("submit", createShareCode);
   elements.shareSelectAll.addEventListener("change", handleShareSelectAllChange);
   elements.shareList.addEventListener("change", handleShareSelectionChange);
+  elements.copyShareCodeButton?.addEventListener("click", copyShareCode);
   elements.importShareButton.addEventListener("click", openImportShareDialog);
   elements.closeImportShareButton.addEventListener("click", closeImportShareDialog);
   elements.importShareDialog.addEventListener("cancel", (event) => {
@@ -1600,7 +1602,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=50");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=51");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3931,6 +3933,43 @@ async function createShareCode(event) {
     setStatus(error.message || "生成同步码失败。", true);
   } finally {
     elements.createShareButton.disabled = false;
+  }
+}
+
+async function copyShareCode() {
+  const code = elements.shareCodeText.textContent.trim();
+  if (!code) {
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      copyTextWithFallback(code);
+    }
+    setStatus("同步码已复制。");
+  } catch (error) {
+    console.error(error);
+    setStatus("复制失败，请长按同步码手动复制。", true);
+  }
+}
+
+function copyTextWithFallback(text) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.left = "-1000px";
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("Clipboard fallback failed.");
   }
 }
 
