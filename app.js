@@ -1614,7 +1614,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=58");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=59");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -4599,6 +4599,7 @@ async function importScoresByShareCode(code) {
 
   const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
   const sharedFolderById = new Map(sharedFolders.map((folder) => [folder.id, folder]));
+  const folderTargetByName = createFolderTargetMap();
   const userId = state.session.user.id;
   const result = { scoreCount: 0, folderCount: 0 };
 
@@ -4610,27 +4611,34 @@ async function importScoresByShareCode(code) {
 
     const sourceScores = folderScores.filter((score) => score.folder_id === folderId);
     const hasImportableScores = sourceScores.some((score) => !existingNames.has(normalizeText(score.name)));
-    if (sourceScores.length && !hasImportableScores) {
-      continue;
+    const folderName = getSharedFolderName(sharedFolder.name);
+    const normalizedFolderName = getSharedFolderNormalizedName(sharedFolder);
+    let targetFolderId = folderTargetByName.get(normalizedFolderName) || null;
+    if (!targetFolderId) {
+      if (sourceScores.length && !hasImportableScores) {
+        continue;
+      }
+
+      const now = new Date().toISOString();
+      const newFolder = {
+        id: createId(),
+        userId,
+        name: folderName,
+        normalizedName: normalizedFolderName,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+        syncStatus: SYNC_STATUS_SYNCED,
+      };
+      await putFolder(newFolder);
+      await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(newFolder)]);
+      folderTargetByName.set(normalizedFolderName, newFolder.id);
+      targetFolderId = newFolder.id;
+      result.folderCount += 1;
     }
 
-    const now = new Date().toISOString();
-    const newFolder = {
-      id: createId(),
-      userId,
-      name: sharedFolder.name || "分享文件夹",
-      normalizedName: normalizeText(sharedFolder.name || "分享文件夹"),
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-      syncStatus: SYNC_STATUS_SYNCED,
-    };
-    await putFolder(newFolder);
-    await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(newFolder)]);
-    result.folderCount += 1;
-
     for (const sharedScore of sourceScores) {
-      const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, newFolder.id, existingNames);
+      const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, targetFolderId, existingNames);
       if (imported) {
         result.scoreCount += 1;
       }
@@ -4672,6 +4680,7 @@ async function importScoresFromShareSnapshot(items) {
   const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
   const userId = state.session.user.id;
   const folderIdMap = new Map();
+  const folderTargetByName = createFolderTargetMap();
   const result = { scoreCount: 0, folderCount: 0 };
 
   for (const folderItem of folders) {
@@ -4684,8 +4693,12 @@ async function importScoresFromShareSnapshot(items) {
     const hasImportableScores = folderScores.some(
       (score) => !existingNames.has(normalizeText(score.score_name || "未命名歌谱")) && shareScoreHasReadyPages(score),
     );
-    if (existingSharedFolder) {
-      folderIdMap.set(folderItem.folder_id, existingSharedFolder.id);
+    const folderName = getSharedFolderName(folderItem.folder_name);
+    const normalizedFolderName = getSharedFolderNormalizedName(folderItem);
+    const existingNamedFolderId = folderTargetByName.get(normalizedFolderName) || null;
+    const targetFolderId = existingSharedFolder?.id || existingNamedFolderId;
+    if (targetFolderId) {
+      folderIdMap.set(folderItem.folder_id, targetFolderId);
       continue;
     }
     if (folderScores.length && !hasImportableScores) {
@@ -4696,8 +4709,8 @@ async function importScoresFromShareSnapshot(items) {
     const newFolder = {
       id: createId(),
       userId,
-      name: folderItem.folder_name || "分享文件夹",
-      normalizedName: normalizeText(folderItem.folder_name || "分享文件夹"),
+      name: folderName,
+      normalizedName: normalizedFolderName,
       sourceShareId,
       sourceFolderId,
       createdAt: now,
@@ -4707,6 +4720,7 @@ async function importScoresFromShareSnapshot(items) {
     };
     await putFolder(newFolder);
     await upsertCloud(CLOUD_TABLES.folders, [toCloudFolder(newFolder)]);
+    folderTargetByName.set(normalizedFolderName, newFolder.id);
     folderIdMap.set(folderItem.folder_id, newFolder.id);
     result.folderCount += 1;
   }
@@ -4832,6 +4846,36 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
 
 function uniqueValues(values) {
   return Array.from(new Set(values.filter(Boolean).map(String)));
+}
+
+function createFolderTargetMap() {
+  const targets = new Map();
+  state.folders.forEach((folder) => {
+    if (folder.deletedAt) {
+      return;
+    }
+
+    const normalizedName = getSharedFolderNormalizedName(folder);
+    if (normalizedName && !targets.has(normalizedName)) {
+      targets.set(normalizedName, folder.id);
+    }
+  });
+  return targets;
+}
+
+function getSharedFolderName(name) {
+  return String(name || "分享文件夹").trim() || "分享文件夹";
+}
+
+function getSharedFolderNormalizedName(folder) {
+  return normalizeText(
+    folder?.folder_normalized_name ||
+      folder?.normalized_name ||
+      folder?.normalizedName ||
+      folder?.folder_name ||
+      folder?.name ||
+      "分享文件夹",
+  );
 }
 
 function formatImportShareResult(result) {
