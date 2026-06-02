@@ -58,6 +58,7 @@ const state = {
   pendingPages: [],
   scoreUrls: new Map(),
   pendingUrls: new Map(),
+  pageTempUrls: new Map(),
   pageDownloads: new Set(),
   installPrompt: null,
   addScreenOpen: false,
@@ -1611,7 +1612,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=55");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=56");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3400,7 +3401,7 @@ async function uploadCloudFileWithSignedUrl(cloudPath, file) {
   return fileID;
 }
 
-async function downloadCloudFile(fileID, expectedSize = 0) {
+async function getCloudFileTempUrl(fileID) {
   if (!fileID) {
     throw new Error("歌谱图片缺少云端文件 ID。");
   }
@@ -3427,6 +3428,15 @@ async function downloadCloudFile(fileID, expectedSize = 0) {
     throw new Error("歌谱图片下载地址为空。");
   }
 
+  return url;
+}
+
+async function downloadCloudFile(fileID, expectedSize = 0) {
+  const url = await getCloudFileTempUrl(fileID);
+  return downloadCloudFileFromUrl(url, expectedSize);
+}
+
+async function downloadCloudFileFromUrl(url, expectedSize = 0) {
   const response = await fetchWithTimeout(url, {}, CLOUD_DOWNLOAD_TIMEOUT, "歌谱图片下载超时，请检查网络后重试。");
   if (!response.ok) {
     throw new Error("歌谱图片下载失败。");
@@ -5065,7 +5075,7 @@ function openViewer(id) {
 
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ left: 0, top: 0 });
-    hydrateScorePages(score.pages);
+    prepareViewerPages(score.id, score.pages);
   });
 }
 
@@ -5304,8 +5314,113 @@ function closeDeleteDialog(confirmed) {
   }
 }
 
+function getLatestScorePages(scoreId, fallbackPages = []) {
+  const latestScore = state.scores.find((score) => score.id === scoreId);
+  const pages = latestScore?.pages?.length ? latestScore.pages : fallbackPages;
+  return [...(pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
+}
+
+async function prepareViewerPages(scoreId, fallbackPages = []) {
+  try {
+    let pages = getLatestScorePages(scoreId, fallbackPages);
+    if (!pages.length) {
+      return;
+    }
+
+    const hasMissingCloudPath = pages.some((page) => (!page.blob || page.blob.size === 0) && !page.storagePath);
+    if (hasMissingCloudPath && await ensureCloudMediaReady()) {
+      await refreshScorePagesFromCloud(scoreId);
+      pages = getLatestScorePages(scoreId, pages);
+    }
+
+    await hydrateScorePages(pages);
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+async function ensureCloudMediaReady() {
+  if (!state.cloudReady) {
+    const ready = await initializeCloud();
+    if (!ready) {
+      return false;
+    }
+  }
+
+  if (!state.session) {
+    await restoreCloudSession();
+  }
+
+  return Boolean(state.cloudReady && state.session);
+}
+
+async function refreshScorePagesFromCloud(scoreId) {
+  if (!scoreId || !state.session || !state.cloudReady) {
+    return;
+  }
+
+  const rows = await queryCloudRows(
+    CLOUD_TABLES.pages,
+    {
+      user_id: state.session.user.id,
+      score_id: scoreId,
+    },
+    {
+      orderBy: [["page_index", "asc"]],
+    },
+  );
+  const cloudPages = rows.filter(isCloudRowActive).map(fromCloudPage);
+  if (!cloudPages.length) {
+    return;
+  }
+
+  const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
+  const mergedPages = cloudPages.map((page) => {
+    const localPage = localPageById.get(page.id);
+    return {
+      ...page,
+      blob: localPage?.blob,
+      storageSyncedAt: localPage?.storageSyncedAt || page.updatedAt || null,
+      storageUploadVersion: localPage?.storageUploadVersion || STORAGE_UPLOAD_VERSION,
+    };
+  });
+
+  await putCloudReadyRecords([], [], mergedPages);
+  upsertLocalPagesInMemory(mergedPages);
+}
+
+function upsertLocalPagesInMemory(pages) {
+  if (!Array.isArray(pages) || !pages.length) {
+    return;
+  }
+
+  const pageById = new Map(state.scorePages.map((page) => [page.id, page]));
+  pages.forEach((page) => {
+    pageById.set(page.id, page);
+  });
+  state.scorePages = Array.from(pageById.values());
+
+  const pagesByScoreId = new Map();
+  state.scorePages.forEach((page) => {
+    if (!pagesByScoreId.has(page.scoreId)) {
+      pagesByScoreId.set(page.scoreId, []);
+    }
+    pagesByScoreId.get(page.scoreId).push(page);
+  });
+
+  state.scores = state.scores.map((score) => ({
+    ...score,
+    pages: (pagesByScoreId.get(score.id) || score.pages || []).sort((a, b) => a.pageIndex - b.pageIndex),
+  }));
+}
+
 function getScoreUrl(page, options = {}) {
   if (!page?.blob || page.blob.size === 0) {
+    const tempUrl = page?.id ? state.pageTempUrls.get(page.id) : "";
+    if (tempUrl) {
+      return tempUrl;
+    }
+
     if (options.hydrate !== false) {
       hydrateScorePage(page);
     }
@@ -5320,7 +5435,11 @@ function getScoreUrl(page, options = {}) {
 
 async function hydrateScorePages(pages) {
   const pendingPages = (pages || []).filter((page) => page && (!page.blob || page.blob.size === 0) && page.storagePath);
-  if (!pendingPages.length || !state.cloudReady) {
+  if (!pendingPages.length) {
+    return;
+  }
+
+  if (!(await ensureCloudMediaReady())) {
     return;
   }
 
@@ -5332,13 +5451,21 @@ async function hydrateScorePages(pages) {
 }
 
 async function hydrateScorePage(page) {
-  if (!page?.id || !page.storagePath || state.pageDownloads.has(page.id) || !state.cloudReady) {
+  if (!page?.id || !page.storagePath || state.pageDownloads.has(page.id)) {
+    return;
+  }
+
+  if (!(await ensureCloudMediaReady())) {
     return;
   }
 
   state.pageDownloads.add(page.id);
   try {
-    const blob = await downloadCloudFile(page.storagePath, page.size);
+    const tempUrl = await getCloudFileTempUrl(page.storagePath);
+    state.pageTempUrls.set(page.id, tempUrl);
+    refreshPageImages(page);
+
+    const blob = await downloadCloudFileFromUrl(tempUrl, page.size);
     const updatedPage = {
       ...page,
       blob,
@@ -5358,15 +5485,24 @@ async function hydrateScorePage(page) {
 }
 
 function replaceLocalPage(updatedPage) {
-  state.scorePages = state.scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page));
+  const existingPage = state.scorePages.some((page) => page.id === updatedPage.id);
+  state.scorePages = existingPage
+    ? state.scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page))
+    : [...state.scorePages, updatedPage];
   state.scores = state.scores.map((score) => {
     if (score.id !== updatedPage.scoreId) {
       return score;
     }
 
+    const scorePages = score.pages || [];
+    const existingScorePage = scorePages.some((page) => page.id === updatedPage.id);
+    const pages = existingScorePage
+      ? scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page))
+      : [...scorePages, updatedPage];
+
     return {
       ...score,
-      pages: score.pages.map((page) => (page.id === updatedPage.id ? updatedPage : page)),
+      pages: pages.sort((a, b) => a.pageIndex - b.pageIndex),
     };
   });
 }
@@ -5394,6 +5530,7 @@ function revokeScoreUrls(score) {
       URL.revokeObjectURL(url);
       state.scoreUrls.delete(page.id);
     }
+    state.pageTempUrls.delete(page.id);
   });
 }
 
@@ -5413,6 +5550,7 @@ function clearPendingUrls() {
 function revokeAllUrls() {
   state.scoreUrls.forEach((url) => URL.revokeObjectURL(url));
   state.scoreUrls.clear();
+  state.pageTempUrls.clear();
   clearPendingUrls();
 }
 
