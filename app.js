@@ -92,6 +92,7 @@ const state = {
   viewerTapStart: null,
   viewerLastTap: null,
   viewerHistoryActive: false,
+  currentViewerScoreId: null,
 };
 
 const elements = {};
@@ -1612,7 +1613,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=56");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=57");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -5037,28 +5038,8 @@ function openViewer(id) {
 
   resetViewerGestureState();
   setViewerZoom(VIEWER_MIN_ZOOM);
-  elements.viewerPages.replaceChildren();
-  elements.viewerPages.classList.toggle("has-multiple-pages", score.pages.length > 1);
-
-  score.pages.forEach((page, index) => {
-    const figure = document.createElement("figure");
-    figure.className = "viewer-page";
-
-    const image = document.createElement("img");
-    image.draggable = false;
-    image.decoding = "async";
-    image.loading = "eager";
-    image.dataset.pageId = page.id;
-    image.src = getScoreUrl(page, { hydrate: false });
-    image.alt = `《${score.name}》第 ${index + 1} 页`;
-
-    const imageFrame = document.createElement("div");
-    imageFrame.className = "viewer-image-frame";
-    imageFrame.append(image);
-
-    figure.append(imageFrame);
-    elements.viewerPages.append(figure);
-  });
+  state.currentViewerScoreId = score.id;
+  renderViewerPages(score);
 
   if (typeof elements.viewerDialog.showModal === "function") {
     elements.viewerDialog.showModal();
@@ -5082,6 +5063,7 @@ function openViewer(id) {
 function closeViewer(options = {}) {
   const shouldReturnHistory = state.viewerHistoryActive && !options.fromHistory;
   state.viewerHistoryActive = false;
+  state.currentViewerScoreId = null;
 
   if (elements.viewerDialog.open) {
     elements.viewerDialog.close();
@@ -5314,6 +5296,32 @@ function closeDeleteDialog(confirmed) {
   }
 }
 
+function renderViewerPages(score) {
+  const pages = [...(score.pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
+  elements.viewerPages.replaceChildren();
+  elements.viewerPages.classList.toggle("has-multiple-pages", pages.length > 1);
+
+  pages.forEach((page, index) => {
+    const figure = document.createElement("figure");
+    figure.className = "viewer-page";
+
+    const image = document.createElement("img");
+    image.draggable = false;
+    image.decoding = "async";
+    image.loading = "eager";
+    image.dataset.pageId = page.id;
+    image.src = getScoreUrl(page, { hydrate: false });
+    image.alt = `《${score.name}》第 ${index + 1} 页`;
+
+    const imageFrame = document.createElement("div");
+    imageFrame.className = "viewer-image-frame";
+    imageFrame.append(image);
+
+    figure.append(imageFrame);
+    elements.viewerPages.append(figure);
+  });
+}
+
 function getLatestScorePages(scoreId, fallbackPages = []) {
   const latestScore = state.scores.find((score) => score.id === scoreId);
   const pages = latestScore?.pages?.length ? latestScore.pages : fallbackPages;
@@ -5327,16 +5335,41 @@ async function prepareViewerPages(scoreId, fallbackPages = []) {
       return;
     }
 
-    const hasMissingCloudPath = pages.some((page) => (!page.blob || page.blob.size === 0) && !page.storagePath);
-    if (hasMissingCloudPath && await ensureCloudMediaReady()) {
+    if (await ensureCloudMediaReady()) {
       await refreshScorePagesFromCloud(scoreId);
       pages = getLatestScorePages(scoreId, pages);
+      rerenderOpenViewerIfPageListChanged(scoreId);
     }
 
     await hydrateScorePages(pages);
   } catch (error) {
     console.warn(error);
   }
+}
+
+function rerenderOpenViewerIfPageListChanged(scoreId) {
+  if (!elements.viewerDialog.open || state.currentViewerScoreId !== scoreId) {
+    return;
+  }
+
+  const score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    return;
+  }
+
+  const renderedIds = Array.from(elements.viewerPages.querySelectorAll("img[data-page-id]")).map((image) => image.dataset.pageId);
+  const latestIds = (score.pages || []).map((page) => page.id);
+  const samePages = renderedIds.length === latestIds.length && renderedIds.every((id, index) => id === latestIds[index]);
+  if (samePages) {
+    return;
+  }
+
+  const previousScrollTop = elements.viewerPages.scrollTop;
+  const previousScrollLeft = elements.viewerPages.scrollLeft;
+  renderViewerPages(score);
+  requestAnimationFrame(() => {
+    elements.viewerPages.scrollTo({ top: previousScrollTop, left: previousScrollLeft });
+  });
 }
 
 async function ensureCloudMediaReady() {
@@ -5387,6 +5420,7 @@ async function refreshScorePagesFromCloud(scoreId) {
 
   await putCloudReadyRecords([], [], mergedPages);
   upsertLocalPagesInMemory(mergedPages);
+  renderScores();
 }
 
 function upsertLocalPagesInMemory(pages) {
