@@ -60,6 +60,7 @@ const state = {
   pendingUrls: new Map(),
   pageTempUrls: new Map(),
   pageDownloads: new Set(),
+  pageRecoveryAttempts: new Map(),
   installPrompt: null,
   addScreenOpen: false,
   accountSyncTimer: 0,
@@ -1613,7 +1614,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=57");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=58");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3152,7 +3153,7 @@ async function pullCloudChanges(options = {}) {
     }
 
     try {
-      const data = await downloadCloudFile(page.storagePath, page.size);
+      const data = await downloadCloudFile(page.storagePath, page.size, page.type);
       cloudPages.push({
         ...page,
         blob: data,
@@ -3432,23 +3433,51 @@ async function getCloudFileTempUrl(fileID) {
   return url;
 }
 
-async function downloadCloudFile(fileID, expectedSize = 0) {
+async function downloadCloudFile(fileID, expectedSize = 0, fallbackType = "") {
   const url = await getCloudFileTempUrl(fileID);
-  return downloadCloudFileFromUrl(url, expectedSize);
+  return downloadCloudFileFromUrl(url, expectedSize, fallbackType);
 }
 
-async function downloadCloudFileFromUrl(url, expectedSize = 0) {
+async function downloadCloudFileFromUrl(url, expectedSize = 0, fallbackType = "") {
   const response = await fetchWithTimeout(url, {}, CLOUD_DOWNLOAD_TIMEOUT, "歌谱图片下载超时，请检查网络后重试。");
   if (!response.ok) {
     throw new Error("歌谱图片下载失败。");
   }
 
+  const contentType = response.headers.get("content-type") || "";
   const blob = await response.blob();
   if (Number(expectedSize) > 0 && blob.size === 0) {
     throw new Error("云端歌谱图片文件为空，需要在保留本地图片的设备上重新同步。");
   }
 
-  return blob;
+  return normalizeDownloadedImageBlob(blob, fallbackType, contentType);
+}
+
+function normalizeDownloadedImageBlob(blob, fallbackType = "", contentType = "") {
+  const blobType = getNormalizedMimeType(blob?.type || contentType);
+  if (blobType && !blobType.startsWith("image/") && blobType !== "application/octet-stream") {
+    throw new Error("云端返回的不是有效图片文件，请重新同步这页歌谱。");
+  }
+
+  const safeType =
+    getSafeImageMimeType(blob?.type) ||
+    getSafeImageMimeType(contentType) ||
+    getSafeImageMimeType(fallbackType) ||
+    "image/jpeg";
+  if (blob?.type === safeType) {
+    return blob;
+  }
+
+  return new Blob([blob], { type: safeType });
+}
+
+function getSafeImageMimeType(value) {
+  const mimeType = getNormalizedMimeType(value);
+  return mimeType.startsWith("image/") ? mimeType : "";
+}
+
+function getNormalizedMimeType(value) {
+  return String(value || "").split(";")[0].trim().toLowerCase();
 }
 
 async function deleteCloudFiles(fileIDs) {
@@ -4985,6 +5014,7 @@ function createScoreCard(score) {
     const image = document.createElement("img");
     image.draggable = false;
     image.dataset.pageId = firstPage.id;
+    bindScoreImageRecovery(image, firstPage.id);
     image.src = getScoreUrl(firstPage);
     image.alt = `《${score.name}》第 1 页`;
     previewButton.append(image);
@@ -5310,6 +5340,7 @@ function renderViewerPages(score) {
     image.decoding = "async";
     image.loading = "eager";
     image.dataset.pageId = page.id;
+    bindScoreImageRecovery(image, page.id);
     image.src = getScoreUrl(page, { hydrate: false });
     image.alt = `《${score.name}》第 ${index + 1} 页`;
 
@@ -5467,6 +5498,42 @@ function getScoreUrl(page, options = {}) {
   return state.scoreUrls.get(page.id);
 }
 
+function bindScoreImageRecovery(image, pageId) {
+  if (!image || !pageId) {
+    return;
+  }
+
+  image.addEventListener("load", () => {
+    state.pageRecoveryAttempts.delete(pageId);
+  });
+  image.addEventListener("error", () => {
+    recoverBrokenScoreImage(pageId).catch((error) => console.warn(error));
+  });
+}
+
+async function recoverBrokenScoreImage(pageId) {
+  const page = state.scorePages.find((item) => item.id === pageId);
+  if (!page?.storagePath) {
+    return;
+  }
+
+  const attempts = state.pageRecoveryAttempts.get(pageId) || 0;
+  if (attempts >= 2) {
+    return;
+  }
+  state.pageRecoveryAttempts.set(pageId, attempts + 1);
+
+  revokeScoreUrlForPage(pageId);
+  state.pageTempUrls.delete(pageId);
+  const recoveryPage = {
+    ...page,
+    blob: null,
+  };
+  replaceLocalPage(recoveryPage);
+  await putScorePage(recoveryPage);
+  await hydrateScorePage(recoveryPage);
+}
+
 async function hydrateScorePages(pages) {
   const pendingPages = (pages || []).filter((page) => page && (!page.blob || page.blob.size === 0) && page.storagePath);
   if (!pendingPages.length) {
@@ -5499,7 +5566,7 @@ async function hydrateScorePage(page) {
     state.pageTempUrls.set(page.id, tempUrl);
     refreshPageImages(page);
 
-    const blob = await downloadCloudFileFromUrl(tempUrl, page.size);
+    const blob = await downloadCloudFileFromUrl(tempUrl, page.size, page.type);
     const updatedPage = {
       ...page,
       blob,
@@ -5559,13 +5626,17 @@ function getPendingUrl(page) {
 
 function revokeScoreUrls(score) {
   score.pages.forEach((page) => {
-    const url = state.scoreUrls.get(page.id);
-    if (url) {
-      URL.revokeObjectURL(url);
-      state.scoreUrls.delete(page.id);
-    }
+    revokeScoreUrlForPage(page.id);
     state.pageTempUrls.delete(page.id);
   });
+}
+
+function revokeScoreUrlForPage(pageId) {
+  const url = state.scoreUrls.get(pageId);
+  if (url) {
+    URL.revokeObjectURL(url);
+    state.scoreUrls.delete(pageId);
+  }
 }
 
 function revokePendingUrl(id) {
