@@ -1614,7 +1614,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=59");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=60");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -1942,6 +1942,7 @@ async function loadScores() {
     state.currentFolderId = null;
   }
 
+  await consolidateDuplicateFoldersByName();
   renderScores();
 }
 
@@ -2091,7 +2092,7 @@ function normalizeLocalFolderRecord(folder) {
     id: String(folder.id || createId()),
     userId: folder.userId || null,
     name,
-    normalizedName: normalizeText(folder.normalizedName || name),
+    normalizedName: normalizeText(name),
     createdAt: folder.createdAt || new Date().toISOString(),
     updatedAt: folder.updatedAt || folder.createdAt || new Date().toISOString(),
     deletedAt: folder.deletedAt || null,
@@ -4848,6 +4849,115 @@ function uniqueValues(values) {
   return Array.from(new Set(values.filter(Boolean).map(String)));
 }
 
+async function consolidateDuplicateFoldersByName() {
+  const activeFolders = state.folders.filter((folder) => !folder.deletedAt);
+  const folderGroups = new Map();
+  activeFolders.forEach((folder) => {
+    const key = getSharedFolderNormalizedName(folder);
+    if (!key) {
+      return;
+    }
+
+    if (!folderGroups.has(key)) {
+      folderGroups.set(key, []);
+    }
+    folderGroups.get(key).push(folder);
+  });
+
+  const groups = Array.from(folderGroups.values()).filter((folders) => folders.length > 1);
+  if (!groups.length) {
+    return;
+  }
+
+  const deletedAt = new Date().toISOString();
+  const movedScores = [];
+  const removedScores = [];
+  const removedFolders = [];
+
+  for (const folders of groups) {
+    const primaryFolder = pickFolderMergePrimary(folders);
+    const duplicateFolders = folders.filter((folder) => folder.id !== primaryFolder.id);
+    const primaryScoreNames = new Set(
+      state.scores
+        .filter((score) => !score.deletedAt && score.folderId === primaryFolder.id)
+        .map((score) => normalizeText(score.name)),
+    );
+
+    for (const duplicateFolder of duplicateFolders) {
+      const duplicateScores = state.scores.filter((score) => !score.deletedAt && score.folderId === duplicateFolder.id);
+      for (const score of duplicateScores) {
+        const scoreName = normalizeText(score.name);
+        if (primaryScoreNames.has(scoreName)) {
+          removedScores.push(score);
+          await markScoreDeletedRecord(score, deletedAt);
+          continue;
+        }
+
+        const movedScore = {
+          ...toScoreRecord(score),
+          folderId: primaryFolder.id,
+          updatedAt: deletedAt,
+          syncStatus: SYNC_STATUS_PENDING,
+        };
+        movedScores.push(movedScore);
+        primaryScoreNames.add(scoreName);
+        await putScore(movedScore);
+      }
+
+      const removedFolder = {
+        ...duplicateFolder,
+        deletedAt,
+        updatedAt: deletedAt,
+        syncStatus: SYNC_STATUS_PENDING,
+      };
+      removedFolders.push(removedFolder);
+      await putFolder(removedFolder);
+
+      if (state.currentFolderId === duplicateFolder.id) {
+        state.currentFolderId = primaryFolder.id;
+      }
+    }
+  }
+
+  if (!movedScores.length && !removedScores.length && !removedFolders.length) {
+    return;
+  }
+
+  const removedScoreIds = new Set(removedScores.map((score) => score.id));
+  const movedScoreById = new Map(movedScores.map((score) => [score.id, score]));
+  const removedFolderIds = new Set(removedFolders.map((folder) => folder.id));
+
+  state.scores = state.scores
+    .map((score) => movedScoreById.get(score.id) || score)
+    .filter((score) => !removedScoreIds.has(score.id));
+  state.folders = state.folders.filter((folder) => !removedFolderIds.has(folder.id));
+  state.scores.forEach((score) => {
+    score.pages = state.scorePages
+      .filter((page) => !page.deletedAt && page.scoreId === score.id)
+      .sort((a, b) => a.pageIndex - b.pageIndex);
+  });
+
+  queueSync();
+}
+
+function pickFolderMergePrimary(folders) {
+  return [...folders].sort((a, b) => {
+    const aShared = Boolean(a.sourceShareId || a.sourceFolderId);
+    const bShared = Boolean(b.sourceShareId || b.sourceFolderId);
+    if (aShared !== bShared) {
+      return aShared ? 1 : -1;
+    }
+
+    const aCreatedAt = Date.parse(a.createdAt || "") || 0;
+    const bCreatedAt = Date.parse(b.createdAt || "") || 0;
+    if (aCreatedAt !== bCreatedAt) {
+      return aCreatedAt - bCreatedAt;
+    }
+
+    return String(a.id).localeCompare(String(b.id));
+  })[0];
+}
+
 function createFolderTargetMap() {
   const targets = new Map();
   state.folders.forEach((folder) => {
@@ -4869,11 +4979,11 @@ function getSharedFolderName(name) {
 
 function getSharedFolderNormalizedName(folder) {
   return normalizeText(
-    folder?.folder_normalized_name ||
+    folder?.folder_name ||
+      folder?.name ||
+      folder?.folder_normalized_name ||
       folder?.normalized_name ||
       folder?.normalizedName ||
-      folder?.folder_name ||
-      folder?.name ||
       "分享文件夹",
   );
 }
@@ -5722,7 +5832,12 @@ function setStatus(message, isError = false) {
 }
 
 function normalizeText(value) {
-  return value.trim().toLocaleLowerCase("zh-CN");
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("zh-CN");
 }
 
 function createId() {
