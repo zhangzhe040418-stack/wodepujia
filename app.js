@@ -1614,7 +1614,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=60");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=61");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2528,6 +2528,12 @@ async function saveScore(event) {
     updateSaveState();
     return;
   }
+  if (hasDuplicateScoreName(name)) {
+    setStatus("已存在同名歌谱", true);
+    elements.scoreName.focus();
+    updateSaveState();
+    return;
+  }
 
   const now = new Date().toISOString();
   const userId = state.session?.user?.id || null;
@@ -2585,6 +2591,11 @@ async function createFolder(event) {
 
   const name = elements.folderName.value.trim();
   if (!name) {
+    elements.folderName.focus();
+    return;
+  }
+  if (hasDuplicateFolderName(name)) {
+    setStatus("已存在同名文件夹", true);
     elements.folderName.focus();
     return;
   }
@@ -5024,6 +5035,24 @@ function resetForm(showMessage = true) {
 
 function updateSaveState() {
   elements.saveButton.disabled = !elements.scoreName.value.trim() || !state.pendingPages.length;
+}
+
+function hasDuplicateScoreName(name) {
+  const normalizedName = normalizeText(name);
+  if (!normalizedName) {
+    return false;
+  }
+
+  return state.scores.some((score) => !score.deletedAt && normalizeText(score.name || score.normalizedName) === normalizedName);
+}
+
+function hasDuplicateFolderName(name) {
+  const normalizedName = normalizeText(name);
+  if (!normalizedName) {
+    return false;
+  }
+
+  return state.folders.some((folder) => !folder.deletedAt && getSharedFolderNormalizedName(folder) === normalizedName);
 }
 
 function renderScores() {
