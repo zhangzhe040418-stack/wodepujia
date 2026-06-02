@@ -1,12 +1,12 @@
-const CACHE_NAME = "my-score-folder-v53";
+const CACHE_NAME = "my-score-folder-v54";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=53",
-  "./app.js?v=53",
+  "./styles.css?v=54",
+  "./app.js?v=54",
   "./vendor/lucide.min.js?v=47",
   "./cloudbase-config.js?v=47",
-  "./manifest.webmanifest?v=53",
+  "./manifest.webmanifest?v=54",
   "./assets/add-score-button.png?v=47",
   "./icons/icon-192.png?v=47",
   "./icons/icon-512.png",

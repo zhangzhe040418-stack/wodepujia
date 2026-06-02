@@ -66,6 +66,8 @@ const state = {
   scoreUploadTasks: new Map(),
   folderUploads: new Set(),
   shareTasks: new Set(),
+  shareSelectedFolderIds: new Set(),
+  shareSelectedScoreIds: new Set(),
   copyFeedbackTimer: 0,
   activeTab: "library",
   currentFolderId: null,
@@ -176,6 +178,7 @@ function bindElements() {
   elements.shareDialog = document.querySelector("#shareDialog");
   elements.shareForm = document.querySelector("#shareForm");
   elements.shareList = document.querySelector("#shareList");
+  elements.shareSearchInput = document.querySelector("#shareSearchInput");
   elements.shareSelectAll = document.querySelector("#shareSelectAll");
   elements.shareCodePanel = document.querySelector("#shareCodePanel");
   elements.shareCodeText = document.querySelector("#shareCodeText");
@@ -277,6 +280,7 @@ function bindEvents() {
     closeShareDialog();
   });
   elements.shareForm.addEventListener("submit", createShareCode);
+  elements.shareSearchInput?.addEventListener("input", renderShareList);
   elements.shareSelectAll.addEventListener("change", handleShareSelectAllChange);
   elements.shareList.addEventListener("change", handleShareSelectionChange);
   elements.copyShareCodeButton?.addEventListener("click", copyShareCode);
@@ -1607,7 +1611,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=53");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=54");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3615,6 +3619,8 @@ function openShareDialog() {
 
   elements.shareCodePanel.hidden = true;
   elements.shareCodeText.textContent = "";
+  elements.shareSearchInput.value = "";
+  clearShareSelection();
   setShareDialogStatus("");
   resetCopyShareCodeButton();
   setCreateShareButtonLabel("生成同步码");
@@ -3635,6 +3641,11 @@ function closeShareDialog() {
   }
   setShareDialogStatus("");
   resetCopyShareCodeButton();
+}
+
+function clearShareSelection() {
+  state.shareSelectedFolderIds.clear();
+  state.shareSelectedScoreIds.clear();
 }
 
 function setShareDialogStatus(message, isError = false) {
@@ -3667,6 +3678,7 @@ function renderShareList() {
   elements.shareList.replaceChildren();
   elements.shareSelectAll.checked = false;
   elements.shareSelectAll.indeterminate = false;
+  const query = normalizeText(elements.shareSearchInput?.value || "");
 
   if (!state.scores.length && !state.folders.length) {
     elements.shareList.append(createEmptyState("还没有歌谱", "保存歌谱后就可以分享。"));
@@ -3678,15 +3690,35 @@ function renderShareList() {
   elements.createShareButton.disabled = false;
   elements.shareSelectAll.disabled = false;
 
+  let visibleCount = 0;
+
   state.folders.forEach((folder) => {
-    elements.shareList.append(createShareFolderGroup(folder));
+    const folderScores = state.scores.filter((score) => score.folderId === folder.id);
+    const folderMatches = query && folder.normalizedName.includes(query);
+    const visibleFolderScores = query && !folderMatches
+      ? folderScores.filter((score) => score.normalizedName.includes(query))
+      : folderScores;
+
+    if (query && !folderMatches && !visibleFolderScores.length) {
+      return;
+    }
+
+    elements.shareList.append(createShareFolderGroup(folder, visibleFolderScores, { expanded: Boolean(query) }));
+    visibleCount += 1;
   });
 
   state.scores
     .filter((score) => !score.folderId)
+    .filter((score) => !query || score.normalizedName.includes(query))
     .forEach((score) => {
       elements.shareList.append(createShareScoreOption(score));
+      visibleCount += 1;
     });
+
+  if (!visibleCount) {
+    elements.shareList.append(createEmptyState("没有找到歌谱", "换个名字试试。"));
+    elements.shareSelectAll.disabled = true;
+  }
 
   updateShareSelectAllState();
 }
@@ -3702,6 +3734,13 @@ function createShareScoreOption(score, options = {}) {
   checkbox.dataset.scoreId = score.id;
   if (options.folderId) {
     checkbox.dataset.folderId = options.folderId;
+    if (state.shareSelectedFolderIds.has(options.folderId)) {
+      checkbox.checked = true;
+      checkbox.disabled = true;
+    }
+  }
+  if (!checkbox.checked) {
+    checkbox.checked = state.shareSelectedScoreIds.has(score.id);
   }
   const text = document.createElement("span");
   text.textContent = score.name;
@@ -3709,11 +3748,13 @@ function createShareScoreOption(score, options = {}) {
   return label;
 }
 
-function createShareFolderGroup(folder) {
-  const folderScores = state.scores.filter((score) => score.folderId === folder.id);
+function createShareFolderGroup(folder, folderScores = state.scores.filter((score) => score.folderId === folder.id), options = {}) {
   const group = document.createElement("div");
   group.className = "share-folder-group";
   group.dataset.folderId = folder.id;
+  if (options.expanded) {
+    group.classList.add("is-expanded");
+  }
 
   const row = document.createElement("div");
   row.className = "share-option share-folder-option";
@@ -3724,11 +3765,12 @@ function createShareFolderGroup(folder) {
   checkbox.dataset.shareSelect = "true";
   checkbox.dataset.shareKind = "folder";
   checkbox.dataset.folderId = folder.id;
+  checkbox.checked = state.shareSelectedFolderIds.has(folder.id);
 
   const nameButton = document.createElement("button");
   nameButton.className = "share-folder-name";
   nameButton.type = "button";
-  nameButton.setAttribute("aria-expanded", "false");
+  nameButton.setAttribute("aria-expanded", String(Boolean(options.expanded)));
   const icon = createIcon("folder");
   const text = document.createElement("span");
   text.textContent = folder.name;
@@ -3746,7 +3788,7 @@ function createShareFolderGroup(folder) {
 
   const childList = document.createElement("div");
   childList.className = "share-folder-children";
-  childList.hidden = true;
+  childList.hidden = !options.expanded;
   if (folderScores.length) {
     folderScores.forEach((score) => childList.append(createShareScoreOption(score, { child: true, folderId: folder.id })));
   } else {
@@ -3765,6 +3807,7 @@ function handleShareSelectAllChange() {
   elements.shareList.querySelectorAll("input[data-share-select]").forEach((input) => {
     input.checked = checked;
     input.disabled = false;
+    storeShareSelection(input);
   });
   elements.shareList.querySelectorAll("input[data-share-kind='folder']").forEach((input) => {
     syncShareFolderChildren(input.dataset.folderId, checked);
@@ -3779,9 +3822,36 @@ function handleShareSelectionChange(event) {
   }
 
   if (input.dataset.shareKind === "folder") {
+    storeShareSelection(input);
     syncShareFolderChildren(input.dataset.folderId, input.checked);
+  } else {
+    storeShareSelection(input);
   }
   updateShareSelectAllState();
+}
+
+function storeShareSelection(input) {
+  if (input.dataset.shareKind === "folder") {
+    const folderId = input.dataset.folderId || input.value;
+    if (input.checked) {
+      state.shareSelectedFolderIds.add(folderId);
+      state.scores
+        .filter((score) => score.folderId === folderId)
+        .forEach((score) => state.shareSelectedScoreIds.delete(score.id));
+    } else {
+      state.shareSelectedFolderIds.delete(folderId);
+    }
+    return;
+  }
+
+  if (input.dataset.shareKind === "score") {
+    const scoreId = input.dataset.scoreId || input.value;
+    if (input.checked) {
+      state.shareSelectedScoreIds.add(scoreId);
+    } else {
+      state.shareSelectedScoreIds.delete(scoreId);
+    }
+  }
 }
 
 function syncShareFolderChildren(folderId, folderChecked) {
@@ -3795,6 +3865,11 @@ function syncShareFolderChildren(folderId, folderChecked) {
     }
     input.checked = folderChecked;
     input.disabled = folderChecked;
+    if (folderChecked) {
+      state.shareSelectedScoreIds.delete(input.dataset.scoreId || input.value);
+    } else {
+      state.shareSelectedScoreIds.delete(input.dataset.scoreId || input.value);
+    }
   });
 }
 
@@ -3812,18 +3887,8 @@ function updateShareSelectAllState() {
 }
 
 function getSelectedShareTargets() {
-  const folderIds = new Set();
-  const scoreIds = new Set();
-
-  elements.shareList.querySelectorAll("input[data-share-kind='folder']:checked").forEach((input) => {
-    folderIds.add(input.dataset.folderId || input.value);
-  });
-  elements.shareList.querySelectorAll("input[data-share-kind='score']:checked").forEach((input) => {
-    const folderId = input.dataset.folderId || "";
-    if (!folderId || !folderIds.has(folderId)) {
-      scoreIds.add(input.dataset.scoreId || input.value);
-    }
-  });
+  const folderIds = new Set(state.shareSelectedFolderIds);
+  const scoreIds = new Set(state.shareSelectedScoreIds);
 
   return {
     folderIds: Array.from(folderIds),
