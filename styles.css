@@ -1469,6 +1469,8 @@ body.add-screen-open .bottom-nav {
 
 .viewer-pages.has-multiple-pages .viewer-page {
   display: block;
+  width: calc(100vw * var(--viewer-zoom));
+  min-width: 100%;
   min-height: 0;
 }
 
@@ -1484,6 +1486,8 @@ body.add-screen-open .bottom-nav {
 
 .viewer-pages.has-multiple-pages .viewer-image-frame {
   display: block;
+  width: calc(100vw * var(--viewer-zoom));
+  min-width: 100%;
   height: auto;
   min-height: 0;
 }
@@ -1501,6 +1505,8 @@ body.add-screen-open .bottom-nav {
 }
 
 .viewer-pages.has-multiple-pages .viewer-image-frame img {
+  display: block;
+  width: 100%;
   height: auto;
   object-fit: contain;
 }

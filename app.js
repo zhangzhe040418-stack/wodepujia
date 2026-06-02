@@ -1611,7 +1611,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=54");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=55");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -5036,8 +5036,10 @@ function openViewer(id) {
 
     const image = document.createElement("img");
     image.draggable = false;
+    image.decoding = "async";
+    image.loading = "eager";
     image.dataset.pageId = page.id;
-    image.src = getScoreUrl(page);
+    image.src = getScoreUrl(page, { hydrate: false });
     image.alt = `《${score.name}》第 ${index + 1} 页`;
 
     const imageFrame = document.createElement("div");
@@ -5063,6 +5065,7 @@ function openViewer(id) {
 
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ left: 0, top: 0 });
+    hydrateScorePages(score.pages);
   });
 }
 
@@ -5301,9 +5304,11 @@ function closeDeleteDialog(confirmed) {
   }
 }
 
-function getScoreUrl(page) {
+function getScoreUrl(page, options = {}) {
   if (!page?.blob || page.blob.size === 0) {
-    hydrateScorePage(page);
+    if (options.hydrate !== false) {
+      hydrateScorePage(page);
+    }
     return SCORE_IMAGE_PLACEHOLDER;
   }
 
@@ -5311,6 +5316,19 @@ function getScoreUrl(page) {
     state.scoreUrls.set(page.id, URL.createObjectURL(page.blob));
   }
   return state.scoreUrls.get(page.id);
+}
+
+async function hydrateScorePages(pages) {
+  const pendingPages = (pages || []).filter((page) => page && (!page.blob || page.blob.size === 0) && page.storagePath);
+  if (!pendingPages.length || !state.cloudReady) {
+    return;
+  }
+
+  try {
+    await runWithConcurrency(pendingPages, 2, hydrateScorePage);
+  } catch (error) {
+    console.warn(error);
+  }
 }
 
 async function hydrateScorePage(page) {
