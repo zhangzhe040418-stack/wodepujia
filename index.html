@@ -12,13 +12,13 @@
     <meta name="apple-mobile-web-app-title" content="我的谱夹" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>我的谱夹</title>
-    <link rel="manifest" href="manifest.webmanifest?v=62" />
+    <link rel="manifest" href="manifest.webmanifest?v=63" />
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=47" />
     <link rel="apple-touch-icon" href="icons/icon-192.png?v=47" />
-    <link rel="stylesheet" href="styles.css?v=62" />
+    <link rel="stylesheet" href="styles.css?v=63" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=62"></script>
+    <script defer charset="UTF-8" src="app.js?v=63"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -90,11 +90,11 @@
           </div>
 
           <div class="mine-menu" aria-label="我的功能">
-            <button class="mine-strip-button" id="myAccountButton" type="button">
+            <button class="mine-strip-button" id="myProfileButton" type="button">
               <span class="mine-strip-icon" aria-hidden="true">
                 <i data-lucide="user-round"></i>
               </span>
-              <span>账号管理</span>
+              <span>个人资料</span>
               <i data-lucide="chevron-right" aria-hidden="true"></i>
             </button>
             <button class="mine-strip-button" id="preferencesButton" type="button">
@@ -255,6 +255,85 @@
           </label>
           <button class="confirm-delete-button folder-save-button auth-wide-button" id="completeRegisterButton" type="button">完成注册</button>
         </div>
+      </form>
+    </dialog>
+
+    <dialog class="auth-dialog profile-dialog" id="profileDialog" aria-labelledby="profileDialogTitle">
+      <form class="auth-surface profile-surface" id="profileForm">
+        <div class="auth-head">
+          <h2 id="profileDialogTitle">个人资料</h2>
+          <button class="icon-button" id="closeProfileButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p class="auth-state" id="profileState">登录后可以编辑个人资料。</p>
+
+        <label class="field">
+          <span>昵称</span>
+          <input id="profileNickname" name="nickname" type="text" maxlength="30" autocomplete="nickname" placeholder="请输入昵称" />
+        </label>
+
+        <label class="field">
+          <span>性别</span>
+          <select id="profileGender" name="gender">
+            <option value="">保密</option>
+            <option value="male">男</option>
+            <option value="female">女</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>生日</span>
+          <input id="profileBirthday" name="birthday" type="date" />
+        </label>
+
+        <div class="profile-contact-list" aria-label="账号联系方式">
+          <div class="profile-contact-row">
+            <span>手机号</span>
+            <button class="profile-link-button" id="profilePhoneButton" type="button">关联手机号</button>
+          </div>
+          <div class="profile-contact-row">
+            <span>邮箱</span>
+            <button class="profile-link-button" id="profileEmailButton" type="button">关联邮箱</button>
+          </div>
+        </div>
+
+        <button class="confirm-delete-button folder-save-button auth-wide-button" id="saveProfileButton" type="submit">
+          保存资料
+        </button>
+      </form>
+    </dialog>
+
+    <dialog class="auth-dialog profile-link-dialog" id="profileLinkDialog" aria-labelledby="profileLinkDialogTitle">
+      <form class="auth-surface profile-surface" id="profileLinkForm">
+        <div class="auth-head">
+          <h2 id="profileLinkDialogTitle">关联账号</h2>
+          <button class="icon-button" id="closeProfileLinkButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p class="auth-state" id="profileLinkState">请输入要关联的联系方式。</p>
+
+        <label class="field">
+          <span>当前账号密码</span>
+          <input id="profileLinkPassword" type="password" autocomplete="current-password" minlength="6" placeholder="请输入当前账号密码" />
+        </label>
+
+        <label class="field">
+          <span id="profileLinkContactLabel">手机号</span>
+          <input id="profileLinkContact" type="tel" autocomplete="tel" placeholder="请输入手机号" />
+        </label>
+
+        <button class="cancel-delete-button auth-wide-button" id="sendProfileLinkCodeButton" type="button">发送验证码</button>
+
+        <label class="field">
+          <span>验证码</span>
+          <input id="profileLinkCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="请输入验证码" />
+        </label>
+
+        <button class="confirm-delete-button folder-save-button auth-wide-button" id="confirmProfileLinkButton" type="submit">
+          完成关联
+        </button>
       </form>
     </dialog>
 

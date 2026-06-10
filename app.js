@@ -25,6 +25,8 @@ const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
+const PROFILE_STORAGE_PREFIX = "my-score-folder-profile:";
+const PROFILE_COLLECTION_NAME = "profiles";
 const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
@@ -79,6 +81,12 @@ const state = {
   authRegisterCode: "",
   authRegisterVerifyOtp: null,
   authRegisterPayload: null,
+  profile: null,
+  profileLoadedUserId: "",
+  profileLinkMode: "phone",
+  profileLinkSudoToken: "",
+  profileLinkVerificationId: "",
+  profileLinkContact: "",
   fabDrag: null,
   fabSuppressClick: false,
   appTouchY: 0,
@@ -125,7 +133,7 @@ function bindElements() {
   elements.navLibraryButton = document.querySelector("#navLibraryButton");
   elements.navMineButton = document.querySelector("#navMineButton");
   elements.bottomNav = document.querySelector(".bottom-nav");
-  elements.myAccountButton = document.querySelector("#myAccountButton");
+  elements.myProfileButton = document.querySelector("#myProfileButton");
   elements.preferencesButton = document.querySelector("#preferencesButton");
   elements.myAuthState = document.querySelector("#myAuthState");
   elements.myAuthButton = document.querySelector("#myAuthButton");
@@ -170,6 +178,27 @@ function bindElements() {
   elements.registerPassword = document.querySelector("#registerPassword");
   elements.registerPasswordConfirm = document.querySelector("#registerPasswordConfirm");
   elements.completeRegisterButton = document.querySelector("#completeRegisterButton");
+  elements.profileDialog = document.querySelector("#profileDialog");
+  elements.profileForm = document.querySelector("#profileForm");
+  elements.profileState = document.querySelector("#profileState");
+  elements.profileNickname = document.querySelector("#profileNickname");
+  elements.profileGender = document.querySelector("#profileGender");
+  elements.profileBirthday = document.querySelector("#profileBirthday");
+  elements.profilePhoneButton = document.querySelector("#profilePhoneButton");
+  elements.profileEmailButton = document.querySelector("#profileEmailButton");
+  elements.closeProfileButton = document.querySelector("#closeProfileButton");
+  elements.saveProfileButton = document.querySelector("#saveProfileButton");
+  elements.profileLinkDialog = document.querySelector("#profileLinkDialog");
+  elements.profileLinkForm = document.querySelector("#profileLinkForm");
+  elements.profileLinkDialogTitle = document.querySelector("#profileLinkDialogTitle");
+  elements.profileLinkState = document.querySelector("#profileLinkState");
+  elements.profileLinkPassword = document.querySelector("#profileLinkPassword");
+  elements.profileLinkContactLabel = document.querySelector("#profileLinkContactLabel");
+  elements.profileLinkContact = document.querySelector("#profileLinkContact");
+  elements.sendProfileLinkCodeButton = document.querySelector("#sendProfileLinkCodeButton");
+  elements.profileLinkCode = document.querySelector("#profileLinkCode");
+  elements.confirmProfileLinkButton = document.querySelector("#confirmProfileLinkButton");
+  elements.closeProfileLinkButton = document.querySelector("#closeProfileLinkButton");
   elements.verifyDialog = document.querySelector("#verifyDialog");
   elements.verifyForm = document.querySelector("#verifyForm");
   elements.verifyState = document.querySelector("#verifyState");
@@ -241,7 +270,7 @@ function bindEvents() {
   elements.searchInput.addEventListener("input", renderScores);
   elements.navLibraryButton.addEventListener("click", () => switchMainTab("library"));
   elements.navMineButton.addEventListener("click", () => switchMainTab("mine"));
-  elements.myAccountButton.addEventListener("click", openAuthDialog);
+  elements.myProfileButton.addEventListener("click", openProfileDialog);
   elements.myAuthButton.addEventListener("click", openAuthDialog);
   elements.preferencesButton.addEventListener("click", () => {
     refreshIcons();
@@ -264,6 +293,21 @@ function bindEvents() {
   elements.nextRegisterPasswordButton?.addEventListener("click", continueToRegisterPassword);
   elements.completeRegisterButton?.addEventListener("click", completeRegisterWithPassword);
   elements.signOutButton.addEventListener("click", signOut);
+  elements.profileForm?.addEventListener("submit", saveProfile);
+  elements.closeProfileButton?.addEventListener("click", closeProfileDialog);
+  elements.profileDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeProfileDialog();
+  });
+  elements.profilePhoneButton?.addEventListener("click", () => openProfileLinkDialog("phone"));
+  elements.profileEmailButton?.addEventListener("click", () => openProfileLinkDialog("email"));
+  elements.profileLinkForm?.addEventListener("submit", confirmProfileLink);
+  elements.sendProfileLinkCodeButton?.addEventListener("click", sendProfileLinkCode);
+  elements.closeProfileLinkButton?.addEventListener("click", closeProfileLinkDialog);
+  elements.profileLinkDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeProfileLinkDialog();
+  });
   elements.verifyForm?.addEventListener("submit", submitVerificationCode);
   elements.cancelVerifyButton?.addEventListener("click", () => closeVerifyDialog(""));
   elements.closeVerifyButton?.addEventListener("click", () => closeVerifyDialog(""));
@@ -893,12 +937,16 @@ function normalizeCloudSession(source, fallbackEmail = "") {
     return null;
   }
 
+  const phoneNumber = getUserPhoneNumber(user, fallbackEmail);
+  const emailAddress = getUserEmailAddress(user, fallbackEmail);
   const accountLabel = getPreferredAccountLabel(user, fallbackEmail, id);
   return {
     user: {
       id: String(id),
-      email: accountLabel || String(id),
+      email: emailAddress || accountLabel || String(id),
       accountLabel: accountLabel || String(id),
+      phoneNumber,
+      emailAddress,
     },
   };
 }
@@ -906,26 +954,14 @@ function normalizeCloudSession(source, fallbackEmail = "") {
 function getPreferredAccountLabel(user, fallbackAccount = "", userId = "") {
   const fallback = String(fallbackAccount || "").trim();
   const stored = readStoredAccountLabel(userId);
-  const phoneCandidates = [
-    fallback,
-    user.phoneNumber,
-    user.phone_number,
-    user.phone,
-    user.mobile,
-    user.mobilePhone,
-    user.phoneNum,
-    user.tel,
-    user.telephone,
-    stored,
-  ];
-  const phone = phoneCandidates.map((value) => normalizePhoneNumber(value)).find(isLikelyPhoneNumber);
+  const storedPhone = normalizePhoneNumber(stored);
+  const phone = getUserPhoneNumber(user, fallback) || (isLikelyPhoneNumber(storedPhone) ? storedPhone : "");
   if (phone) {
     writeStoredAccountLabel(userId, phone);
     return phone;
   }
 
-  const emailCandidates = [user.email, fallback, stored, user.loginName, user.username];
-  const email = emailCandidates.map((value) => String(value || "").trim()).find(isEmailAddress);
+  const email = getUserEmailAddress(user, fallback) || (isEmailAddress(stored) ? stored : "");
   if (email) {
     writeStoredAccountLabel(userId, email);
     return email;
@@ -941,6 +977,26 @@ function getPreferredAccountLabel(user, fallbackAccount = "", userId = "") {
   }
 
   return "";
+}
+
+function getUserPhoneNumber(user, fallbackAccount = "") {
+  const phoneCandidates = [
+    fallbackAccount,
+    user.phoneNumber,
+    user.phone_number,
+    user.phone,
+    user.mobile,
+    user.mobilePhone,
+    user.phoneNum,
+    user.tel,
+    user.telephone,
+  ];
+  return phoneCandidates.map((value) => normalizePhoneNumber(value)).find(isLikelyPhoneNumber) || "";
+}
+
+function getUserEmailAddress(user, fallbackAccount = "") {
+  const emailCandidates = [user.email, fallbackAccount, user.loginName, user.username];
+  return emailCandidates.map((value) => String(value || "").trim()).find(isEmailAddress) || "";
 }
 
 function readStoredAccountLabel(userId) {
@@ -1015,6 +1071,10 @@ function updateAccountUi() {
 
   if (elements.myAuthButton) {
     elements.myAuthButton.disabled = Boolean(state.cloudInitializing);
+  }
+
+  if (elements.profileDialog?.open) {
+    renderProfileDialog();
   }
 
   if (elements.authDialog?.open && accountLabel && state.authMode !== "loggedIn") {
@@ -1158,6 +1218,477 @@ function closeAuthDialog() {
   } else {
     elements.authDialog.removeAttribute("open");
   }
+}
+
+async function openProfileDialog() {
+  if (!state.session) {
+    setStatus("请先登录账号。", true);
+    await openAuthDialog();
+    return;
+  }
+
+  await loadProfileForCurrentUser();
+  renderProfileDialog();
+
+  if (typeof elements.profileDialog.showModal === "function") {
+    elements.profileDialog.showModal();
+  } else {
+    elements.profileDialog.setAttribute("open", "");
+  }
+
+  refreshIcons();
+  requestAnimationFrame(() => elements.profileNickname.focus());
+}
+
+function closeProfileDialog() {
+  if (elements.profileDialog.open) {
+    elements.profileDialog.close();
+  } else {
+    elements.profileDialog.removeAttribute("open");
+  }
+}
+
+function setProfileStatus(message, isError = false) {
+  if (!elements.profileState) {
+    return;
+  }
+
+  elements.profileState.textContent = message;
+  elements.profileState.style.color = isError ? "var(--danger)" : "var(--muted)";
+}
+
+async function loadProfileForCurrentUser() {
+  const userId = state.session?.user?.id || "";
+  if (!userId) {
+    state.profile = null;
+    state.profileLoadedUserId = "";
+    return null;
+  }
+
+  if (state.profileLoadedUserId === userId && state.profile) {
+    return state.profile;
+  }
+
+  let profile = readStoredProfile(userId) || createDefaultProfile(userId);
+
+  if (state.cloudReady && state.cloudDb) {
+    try {
+      const rows = await queryCloudRows(PROFILE_COLLECTION_NAME, { user_id: userId });
+      if (rows.length) {
+        profile = {
+          ...profile,
+          ...fromCloudProfile(rows[0]),
+        };
+        writeStoredProfile(userId, profile);
+      }
+    } catch (error) {
+      console.warn("Profile cloud load skipped.", error);
+    }
+  }
+
+  state.profile = profile;
+  state.profileLoadedUserId = userId;
+  return profile;
+}
+
+function renderProfileDialog() {
+  if (!state.session) {
+    return;
+  }
+
+  const userId = state.session.user.id;
+  const profile = state.profile || readStoredProfile(userId) || createDefaultProfile(userId);
+  const phoneNumber = getCurrentUserPhoneNumber(profile);
+  const emailAddress = getCurrentUserEmailAddress(profile);
+
+  elements.profileNickname.value = profile.nickname || "";
+  elements.profileGender.value = profile.gender || "";
+  elements.profileBirthday.value = profile.birthday || "";
+  renderProfileContactButton(elements.profilePhoneButton, phoneNumber, "关联手机号");
+  renderProfileContactButton(elements.profileEmailButton, emailAddress, "关联邮箱");
+  setProfileStatus("可编辑昵称、性别和生日。");
+}
+
+function renderProfileContactButton(button, value, emptyText) {
+  if (!button) {
+    return;
+  }
+
+  const text = String(value || "").trim();
+  button.textContent = text || emptyText;
+  button.disabled = Boolean(text);
+  button.classList.toggle("is-linked", Boolean(text));
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  if (!state.session) {
+    setProfileStatus("请先登录账号。", true);
+    return;
+  }
+
+  const userId = state.session.user.id;
+  const profile = {
+    ...(state.profile || createDefaultProfile(userId)),
+    userId,
+    nickname: elements.profileNickname.value.trim(),
+    gender: elements.profileGender.value,
+    birthday: elements.profileBirthday.value,
+    phoneNumber: getCurrentUserPhoneNumber(state.profile),
+    emailAddress: getCurrentUserEmailAddress(state.profile),
+    updatedAt: new Date().toISOString(),
+  };
+
+  state.profile = profile;
+  state.profileLoadedUserId = userId;
+  writeStoredProfile(userId, profile);
+  elements.saveProfileButton.disabled = true;
+  setProfileStatus("正在保存资料...");
+
+  try {
+    await saveProfileToCloud(profile);
+    setProfileStatus("资料已保存。");
+  } catch (error) {
+    console.warn(error);
+    setProfileStatus("资料已保存到本机。若需跨设备同步个人资料，请在 CloudBase 创建 profiles 集合。");
+  } finally {
+    elements.saveProfileButton.disabled = false;
+  }
+}
+
+async function saveProfileToCloud(profile) {
+  if (!state.cloudReady || !state.cloudDb || !state.session) {
+    return;
+  }
+
+  await upsertCloud(PROFILE_COLLECTION_NAME, [toCloudProfile(profile)]);
+}
+
+function createDefaultProfile(userId) {
+  return {
+    id: userId,
+    userId,
+    nickname: "",
+    gender: "",
+    birthday: "",
+    phoneNumber: state.session?.user?.phoneNumber || "",
+    emailAddress: state.session?.user?.emailAddress || "",
+    updatedAt: "",
+  };
+}
+
+function readStoredProfile(userId) {
+  if (!userId || !window.localStorage) {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(`${PROFILE_STORAGE_PREFIX}${userId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.warn(error);
+    return null;
+  }
+}
+
+function writeStoredProfile(userId, profile) {
+  if (!userId || !window.localStorage) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(`${PROFILE_STORAGE_PREFIX}${userId}`, JSON.stringify(profile));
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function toCloudProfile(profile) {
+  return {
+    id: profile.userId,
+    user_id: profile.userId,
+    nickname: profile.nickname || "",
+    gender: profile.gender || "",
+    birthday: profile.birthday || "",
+    phone_number: profile.phoneNumber || "",
+    email: profile.emailAddress || "",
+    updated_at: profile.updatedAt || new Date().toISOString(),
+  };
+}
+
+function fromCloudProfile(row) {
+  return {
+    id: row.id || row._id || row.user_id,
+    userId: row.user_id || row.userId || row.id || row._id,
+    nickname: row.nickname || "",
+    gender: row.gender || "",
+    birthday: row.birthday || "",
+    phoneNumber: row.phone_number || row.phoneNumber || "",
+    emailAddress: row.email || row.emailAddress || "",
+    updatedAt: row.updated_at || row.updatedAt || "",
+  };
+}
+
+function getCurrentUserPhoneNumber(profile = state.profile) {
+  const userPhone = state.session?.user?.phoneNumber || "";
+  const profilePhone = profile?.phoneNumber || "";
+  const accountLabel = getCurrentAccountLabel();
+  const labelPhone = isLikelyPhoneNumber(accountLabel) ? normalizePhoneNumber(accountLabel) : "";
+  return userPhone || profilePhone || labelPhone || "";
+}
+
+function getCurrentUserEmailAddress(profile = state.profile) {
+  const userEmail = state.session?.user?.emailAddress || "";
+  const profileEmail = profile?.emailAddress || "";
+  const accountLabel = getCurrentAccountLabel();
+  const labelEmail = isEmailAddress(accountLabel) ? accountLabel : "";
+  return userEmail || profileEmail || labelEmail || "";
+}
+
+function openProfileLinkDialog(mode) {
+  if (!state.session) {
+    openAuthDialog();
+    return;
+  }
+
+  state.profileLinkMode = mode;
+  state.profileLinkSudoToken = "";
+  state.profileLinkVerificationId = "";
+  state.profileLinkContact = "";
+  elements.profileLinkForm.reset();
+
+  const isPhone = mode === "phone";
+  elements.profileLinkDialogTitle.textContent = isPhone ? "关联手机号" : "关联邮箱";
+  elements.profileLinkContactLabel.textContent = isPhone ? "手机号" : "邮箱";
+  elements.profileLinkContact.type = isPhone ? "tel" : "email";
+  elements.profileLinkContact.inputMode = isPhone ? "tel" : "email";
+  elements.profileLinkContact.autocomplete = isPhone ? "tel" : "email";
+  elements.profileLinkContact.placeholder = isPhone ? "请输入手机号" : "请输入邮箱";
+  setProfileLinkStatus(isPhone ? "输入手机号并发送验证码。" : "输入邮箱并发送验证码。");
+  closeProfileDialog();
+
+  if (typeof elements.profileLinkDialog.showModal === "function") {
+    elements.profileLinkDialog.showModal();
+  } else {
+    elements.profileLinkDialog.setAttribute("open", "");
+  }
+
+  refreshIcons();
+  requestAnimationFrame(() => elements.profileLinkContact.focus());
+}
+
+function closeProfileLinkDialog() {
+  if (elements.profileLinkDialog.open) {
+    elements.profileLinkDialog.close();
+  } else {
+    elements.profileLinkDialog.removeAttribute("open");
+  }
+}
+
+function setProfileLinkStatus(message, isError = false) {
+  if (!elements.profileLinkState) {
+    return;
+  }
+
+  elements.profileLinkState.textContent = message;
+  elements.profileLinkState.style.color = isError ? "var(--danger)" : "var(--muted)";
+}
+
+async function sendProfileLinkCode() {
+  const password = elements.profileLinkPassword.value;
+  const contact = getNormalizedProfileLinkContact();
+
+  if (!password) {
+    setProfileLinkStatus("请输入当前账号密码。", true);
+    return;
+  }
+  if (!contact) {
+    setProfileLinkStatus(state.profileLinkMode === "phone" ? "请输入正确的手机号。" : "请输入正确的邮箱。", true);
+    return;
+  }
+
+  if (!(await ensureCloudReady())) {
+    setProfileLinkStatus(state.cloudError || "CloudBase 连接失败。", true);
+    return;
+  }
+
+  elements.sendProfileLinkCodeButton.disabled = true;
+  setProfileLinkStatus("正在发送验证码...");
+
+  try {
+    state.profileLinkSudoToken = await requestCloudSudoToken(password);
+    const result = await sendCloudContactVerification(state.profileLinkMode, contact);
+    state.profileLinkVerificationId = extractCloudValue(result, ["verification_id", "verificationId", "id"]);
+    state.profileLinkContact = contact;
+    setProfileLinkStatus(`验证码已发送至 ${contact}。`);
+    requestAnimationFrame(() => elements.profileLinkCode.focus());
+  } catch (error) {
+    console.error(error);
+    setProfileLinkStatus(getErrorMessage(error) || "验证码发送失败，请稍后再试。", true);
+  } finally {
+    elements.sendProfileLinkCodeButton.disabled = false;
+  }
+}
+
+async function confirmProfileLink(event) {
+  event.preventDefault();
+  const code = elements.profileLinkCode.value.trim();
+  const contact = getNormalizedProfileLinkContact();
+
+  if (!state.profileLinkSudoToken || !state.profileLinkContact || contact !== state.profileLinkContact) {
+    setProfileLinkStatus("请先发送验证码。", true);
+    return;
+  }
+  if (!code) {
+    setProfileLinkStatus("请输入验证码。", true);
+    return;
+  }
+
+  elements.confirmProfileLinkButton.disabled = true;
+  setProfileLinkStatus("正在完成关联...");
+
+  try {
+    await bindCloudContact(state.profileLinkMode, contact, code);
+    await updateLinkedContact(state.profileLinkMode, contact);
+    closeProfileLinkDialog();
+    setStatus(state.profileLinkMode === "phone" ? "手机号关联成功。" : "邮箱关联成功。");
+    await openProfileDialog();
+  } catch (error) {
+    console.error(error);
+    setProfileLinkStatus(getErrorMessage(error) || "关联失败，请稍后再试。", true);
+  } finally {
+    elements.confirmProfileLinkButton.disabled = false;
+  }
+}
+
+function getNormalizedProfileLinkContact() {
+  const value = elements.profileLinkContact.value.trim();
+  if (state.profileLinkMode === "phone") {
+    return isValidPhoneNumber(value) ? toCloudPhoneNumber(value) : "";
+  }
+
+  return isEmailAddress(value) ? value : "";
+}
+
+async function requestCloudSudoToken(password) {
+  if (typeof state.cloudAuth.getSudoToken !== "function") {
+    throw new Error("当前 CloudBase SDK 不支持账号关联所需的安全验证。");
+  }
+
+  const result = await state.cloudAuth.getSudoToken({ password });
+  throwCloudResultError(result);
+  const token = extractCloudValue(result, ["sudo_token", "sudoToken", "token"]);
+  if (!token) {
+    throw new Error("安全验证失败，请确认当前账号密码。");
+  }
+  return token;
+}
+
+async function sendCloudContactVerification(mode, contact) {
+  if (typeof state.cloudAuth.getVerification === "function") {
+    const payload = mode === "phone" ? { phone_number: contact } : { email: contact };
+    const result = await state.cloudAuth.getVerification(payload);
+    throwCloudResultError(result);
+    return result;
+  }
+
+  if (mode === "phone" && typeof state.cloudAuth.sendPhoneCode === "function") {
+    const result = await state.cloudAuth.sendPhoneCode(contact);
+    throwCloudResultError(result);
+    return result;
+  }
+
+  throw new Error("当前 CloudBase SDK 不支持发送关联验证码。");
+}
+
+async function bindCloudContact(mode, contact, code) {
+  const verificationToken = await getProfileLinkVerificationToken(code);
+  const payload =
+    mode === "phone"
+      ? { sudo_token: state.profileLinkSudoToken, phone_number: contact }
+      : { sudo_token: state.profileLinkSudoToken, email: contact };
+
+  if (verificationToken) {
+    payload.verification_token = verificationToken;
+  } else {
+    payload.verification_code = code;
+  }
+
+  const methodName = mode === "phone" ? "bindPhoneNumber" : "bindEmail";
+  if (typeof state.cloudAuth[methodName] !== "function") {
+    throw new Error(mode === "phone" ? "当前 CloudBase SDK 不支持关联手机号。" : "当前 CloudBase SDK 不支持关联邮箱。");
+  }
+
+  const result = await state.cloudAuth[methodName](payload);
+  throwCloudResultError(result);
+  return result;
+}
+
+async function getProfileLinkVerificationToken(code) {
+  if (!state.profileLinkVerificationId || typeof state.cloudAuth.verify !== "function") {
+    return "";
+  }
+
+  const result = await state.cloudAuth.verify({
+    verification_id: state.profileLinkVerificationId,
+    verification_code: code,
+  });
+  throwCloudResultError(result);
+  return extractCloudValue(result, ["verification_token", "verificationToken", "token"]);
+}
+
+async function updateLinkedContact(mode, contact) {
+  if (!state.session) {
+    return;
+  }
+
+  const userId = state.session.user.id;
+  const profile = state.profile || readStoredProfile(userId) || createDefaultProfile(userId);
+  const nextProfile = {
+    ...profile,
+    phoneNumber: mode === "phone" ? contact : getCurrentUserPhoneNumber(profile),
+    emailAddress: mode === "email" ? contact : getCurrentUserEmailAddress(profile),
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (mode === "phone") {
+    state.session.user.phoneNumber = contact;
+    state.session.user.accountLabel = contact;
+    writeStoredAccountLabel(userId, contact);
+  } else {
+    state.session.user.emailAddress = contact;
+    if (!state.session.user.phoneNumber) {
+      state.session.user.accountLabel = contact;
+      writeStoredAccountLabel(userId, contact);
+    }
+  }
+
+  state.profile = nextProfile;
+  state.profileLoadedUserId = userId;
+  writeStoredProfile(userId, nextProfile);
+
+  try {
+    await saveProfileToCloud(nextProfile);
+  } catch (error) {
+    console.warn(error);
+  }
+
+  updateAccountUi();
+}
+
+function extractCloudValue(result, keys) {
+  const containers = [result, result?.data, result?.result, result?.result?.data];
+  for (const container of containers) {
+    if (!container || typeof container !== "object") {
+      continue;
+    }
+    for (const key of keys) {
+      if (container[key]) {
+        return String(container[key]);
+      }
+    }
+  }
+  return "";
 }
 
 function goBackInAuthDialog() {
@@ -1479,6 +2010,17 @@ function normalizePhoneNumber(value) {
   return String(value || "").replace(/[\s-]/g, "");
 }
 
+function toCloudPhoneNumber(value) {
+  const normalized = normalizePhoneNumber(value);
+  if (/^1[3-9]\d{9}$/.test(normalized)) {
+    return `+86${normalized}`;
+  }
+  if (/^861[3-9]\d{9}$/.test(normalized)) {
+    return `+${normalized}`;
+  }
+  return normalized;
+}
+
 function isLikelyPhoneNumber(value) {
   const normalized = normalizePhoneNumber(value);
   return /^(\+?86)?1[3-9]\d{9}$/.test(normalized);
@@ -1551,6 +2093,10 @@ async function signOut() {
   window.clearTimeout(state.accountSyncTimer);
   state.accountSyncTimer = 0;
   state.session = null;
+  state.profile = null;
+  state.profileLoadedUserId = "";
+  closeProfileDialog();
+  closeProfileLinkDialog();
   if (keepAuthDialogOpen) {
     setAuthMode("guest");
   } else {
@@ -1609,7 +2155,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=62");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=63");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
