@@ -571,6 +571,11 @@ body.add-screen-open .bottom-nav {
   display: none;
 }
 
+body.profile-screen-open .bottom-nav,
+body.profile-screen-open .fab-button {
+  display: none;
+}
+
 .card-actions {
   display: grid;
   grid-template-columns: 1fr;
@@ -626,6 +631,120 @@ body.add-screen-open .bottom-nav {
   border-radius: 8px;
   background: var(--surface-strong);
   box-shadow: var(--shadow);
+}
+
+.profile-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: block;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc(14px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  background: var(--app-bg);
+  -webkit-overflow-scrolling: touch;
+}
+
+.profile-screen[hidden] {
+  display: none;
+}
+
+.profile-page {
+  display: grid;
+  align-content: start;
+  width: min(720px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  gap: 14px;
+}
+
+.profile-page-head {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  align-items: center;
+  min-height: 54px;
+  gap: 8px;
+}
+
+.profile-page-head h2 {
+  margin: 0;
+  text-align: center;
+  font-size: 1.18rem;
+  letter-spacing: 0;
+}
+
+.profile-state {
+  min-height: 22px;
+}
+
+.profile-field {
+  margin: 0;
+}
+
+.profile-segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  min-height: 46px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.profile-segment-button {
+  min-width: 0;
+  min-height: 36px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.profile-segment-button:hover,
+.profile-segment-button:focus-visible {
+  color: var(--accent-strong);
+  outline: none;
+}
+
+.profile-segment-button.is-active {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.2);
+}
+
+.profile-birthday-field {
+  position: relative;
+}
+
+.profile-birthday-button {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  height: 46px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--muted);
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+}
+
+.profile-birthday-button.has-value {
+  color: var(--ink);
+}
+
+.profile-birthday-button span {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  text-align: center;
 }
 
 .tool-title {
@@ -758,13 +877,15 @@ body.add-screen-open .bottom-nav {
 }
 
 #profileBirthday {
-  display: block;
-  text-align: center;
-  text-align-last: center;
-}
-
-#profileBirthday::-webkit-date-and-time-value {
-  text-align: center;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 100%;
+  height: 46px;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .field input:focus,

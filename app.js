@@ -179,12 +179,15 @@ function bindElements() {
   elements.registerPassword = document.querySelector("#registerPassword");
   elements.registerPasswordConfirm = document.querySelector("#registerPasswordConfirm");
   elements.completeRegisterButton = document.querySelector("#completeRegisterButton");
-  elements.profileDialog = document.querySelector("#profileDialog");
+  elements.profileScreen = document.querySelector("#profileScreen");
   elements.profileForm = document.querySelector("#profileForm");
   elements.profileState = document.querySelector("#profileState");
   elements.profileNickname = document.querySelector("#profileNickname");
   elements.profileGender = document.querySelector("#profileGender");
+  elements.profileGenderButtons = Array.from(document.querySelectorAll("[data-gender-value]"));
   elements.profileBirthday = document.querySelector("#profileBirthday");
+  elements.profileBirthdayButton = document.querySelector("#profileBirthdayButton");
+  elements.profileBirthdayDisplay = document.querySelector("#profileBirthdayDisplay");
   elements.profilePhoneButton = document.querySelector("#profilePhoneButton");
   elements.profileEmailButton = document.querySelector("#profileEmailButton");
   elements.closeProfileButton = document.querySelector("#closeProfileButton");
@@ -296,10 +299,11 @@ function bindEvents() {
   elements.signOutButton.addEventListener("click", signOut);
   elements.profileForm?.addEventListener("submit", saveProfile);
   elements.closeProfileButton?.addEventListener("click", closeProfileDialog);
-  elements.profileDialog?.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    closeProfileDialog();
+  elements.profileGenderButtons?.forEach((button) => {
+    button.addEventListener("click", () => setProfileGender(button.dataset.genderValue || ""));
   });
+  elements.profileBirthdayButton?.addEventListener("click", openProfileBirthdayPicker);
+  elements.profileBirthday?.addEventListener("change", () => updateProfileBirthdayDisplay(elements.profileBirthday.value));
   elements.profilePhoneButton?.addEventListener("click", () => openProfileLinkDialog("phone"));
   elements.profileEmailButton?.addEventListener("click", () => openProfileLinkDialog("email"));
   elements.profileLinkForm?.addEventListener("submit", confirmProfileLink);
@@ -1083,7 +1087,7 @@ function updateAccountUi() {
     elements.myAuthButton.disabled = Boolean(state.cloudInitializing);
   }
 
-  if (elements.profileDialog?.open) {
+  if (elements.profileScreen && !elements.profileScreen.hidden) {
     renderProfileDialog();
   }
   updateAppTitle();
@@ -1240,23 +1244,19 @@ async function openProfileDialog() {
 
   await loadProfileForCurrentUser({ includeCloud: true });
   renderProfileDialog();
-
-  if (typeof elements.profileDialog.showModal === "function") {
-    elements.profileDialog.showModal();
-  } else {
-    elements.profileDialog.setAttribute("open", "");
-  }
-
+  elements.profileScreen.hidden = false;
+  document.body.classList.add("profile-screen-open");
   refreshIcons();
   requestAnimationFrame(() => elements.profileNickname.focus());
 }
 
 function closeProfileDialog() {
-  if (elements.profileDialog.open) {
-    elements.profileDialog.close();
-  } else {
-    elements.profileDialog.removeAttribute("open");
+  if (!elements.profileScreen) {
+    return;
   }
+
+  elements.profileScreen.hidden = true;
+  document.body.classList.remove("profile-screen-open");
 }
 
 function setProfileStatus(message, isError = false) {
@@ -1314,11 +1314,58 @@ function renderProfileDialog() {
   const emailAddress = getCurrentUserEmailAddress(profile);
 
   elements.profileNickname.value = profile.nickname || "";
-  elements.profileGender.value = profile.gender || "";
+  setProfileGender(profile.gender || "");
   elements.profileBirthday.value = profile.birthday || "";
+  updateProfileBirthdayDisplay(profile.birthday || "");
   renderProfileContactButton(elements.profilePhoneButton, phoneNumber, "关联手机号");
   renderProfileContactButton(elements.profileEmailButton, emailAddress, "关联邮箱");
   setProfileStatus("可编辑昵称、性别和生日。");
+}
+
+function setProfileGender(value) {
+  const nextValue = ["male", "female"].includes(value) ? value : "";
+  elements.profileGender.value = nextValue;
+  elements.profileGenderButtons?.forEach((button) => {
+    const selected = (button.dataset.genderValue || "") === nextValue;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
+}
+
+function openProfileBirthdayPicker() {
+  if (!elements.profileBirthday) {
+    return;
+  }
+
+  if (typeof elements.profileBirthday.showPicker === "function") {
+    elements.profileBirthday.showPicker();
+    return;
+  }
+
+  elements.profileBirthday.focus();
+  elements.profileBirthday.click();
+}
+
+function updateProfileBirthdayDisplay(value) {
+  if (!elements.profileBirthdayDisplay) {
+    return;
+  }
+
+  elements.profileBirthdayDisplay.textContent = formatBirthdayDisplay(value);
+  elements.profileBirthdayButton?.classList.toggle("has-value", Boolean(value));
+}
+
+function formatBirthdayDisplay(value) {
+  if (!value) {
+    return "请选择生日";
+  }
+
+  const [year, month, day] = String(value).split("-");
+  if (!year || !month || !day) {
+    return value;
+  }
+
+  return `${year}年${Number(month)}月${Number(day)}日`;
 }
 
 function renderProfileContactButton(button, value, emptyText) {
@@ -2181,7 +2228,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=64");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=65");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);

@@ -12,13 +12,13 @@
     <meta name="apple-mobile-web-app-title" content="我的谱夹" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>我的谱夹</title>
-    <link rel="manifest" href="manifest.webmanifest?v=64" />
+    <link rel="manifest" href="manifest.webmanifest?v=65" />
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=47" />
     <link rel="apple-touch-icon" href="icons/icon-192.png?v=47" />
-    <link rel="stylesheet" href="styles.css?v=64" />
+    <link rel="stylesheet" href="styles.css?v=65" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=64"></script>
+    <script defer charset="UTF-8" src="app.js?v=65"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -115,6 +115,58 @@
           </div>
         </section>
       </main>
+
+      <section class="profile-screen" id="profileScreen" aria-labelledby="profileScreenTitle" hidden>
+        <form class="profile-page" id="profileForm">
+          <div class="profile-page-head">
+            <button class="icon-button" id="closeProfileButton" type="button" title="返回" aria-label="返回">
+              <i data-lucide="arrow-left" aria-hidden="true"></i>
+            </button>
+            <h2 id="profileScreenTitle">个人资料</h2>
+            <span aria-hidden="true"></span>
+          </div>
+
+          <p class="auth-state profile-state" id="profileState">登录后可以编辑个人资料。</p>
+
+          <label class="field profile-field">
+            <span>昵称</span>
+            <input id="profileNickname" name="nickname" type="text" maxlength="30" autocomplete="nickname" placeholder="请输入昵称" />
+          </label>
+
+          <div class="field profile-field">
+            <span>性别</span>
+            <input id="profileGender" name="gender" type="hidden" />
+            <div class="profile-segmented" role="group" aria-label="选择性别">
+              <button class="profile-segment-button" type="button" data-gender-value="">保密</button>
+              <button class="profile-segment-button" type="button" data-gender-value="male">男</button>
+              <button class="profile-segment-button" type="button" data-gender-value="female">女</button>
+            </div>
+          </div>
+
+          <div class="field profile-field profile-birthday-field">
+            <span>生日</span>
+            <button class="profile-birthday-button" id="profileBirthdayButton" type="button">
+              <span id="profileBirthdayDisplay">请选择生日</span>
+            </button>
+            <input id="profileBirthday" name="birthday" type="date" aria-label="生日" />
+          </div>
+
+          <div class="profile-contact-list" aria-label="账号联系方式">
+            <div class="profile-contact-row">
+              <span>手机号</span>
+              <button class="profile-link-button" id="profilePhoneButton" type="button">关联手机号</button>
+            </div>
+            <div class="profile-contact-row">
+              <span>邮箱</span>
+              <button class="profile-link-button" id="profileEmailButton" type="button">关联邮箱</button>
+            </div>
+          </div>
+
+          <button class="confirm-delete-button folder-save-button auth-wide-button profile-save-button" id="saveProfileButton" type="submit">
+            保存资料
+          </button>
+        </form>
+      </section>
 
       <section class="upload-screen" id="uploadScreen" aria-labelledby="uploadTitle" hidden>
         <form class="upload-tool" id="scoreForm">
@@ -255,52 +307,6 @@
           </label>
           <button class="confirm-delete-button folder-save-button auth-wide-button" id="completeRegisterButton" type="button">完成注册</button>
         </div>
-      </form>
-    </dialog>
-
-    <dialog class="auth-dialog profile-dialog" id="profileDialog" aria-labelledby="profileDialogTitle">
-      <form class="auth-surface profile-surface" id="profileForm">
-        <div class="auth-head">
-          <h2 id="profileDialogTitle">个人资料</h2>
-          <button class="icon-button" id="closeProfileButton" type="button" title="关闭" aria-label="关闭">
-            <i data-lucide="x" aria-hidden="true"></i>
-          </button>
-        </div>
-        <p class="auth-state" id="profileState">登录后可以编辑个人资料。</p>
-
-        <label class="field">
-          <span>昵称</span>
-          <input id="profileNickname" name="nickname" type="text" maxlength="30" autocomplete="nickname" placeholder="请输入昵称" />
-        </label>
-
-        <label class="field">
-          <span>性别</span>
-          <select id="profileGender" name="gender">
-            <option value="">保密</option>
-            <option value="male">男</option>
-            <option value="female">女</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span>生日</span>
-          <input id="profileBirthday" name="birthday" type="date" />
-        </label>
-
-        <div class="profile-contact-list" aria-label="账号联系方式">
-          <div class="profile-contact-row">
-            <span>手机号</span>
-            <button class="profile-link-button" id="profilePhoneButton" type="button">关联手机号</button>
-          </div>
-          <div class="profile-contact-row">
-            <span>邮箱</span>
-            <button class="profile-link-button" id="profileEmailButton" type="button">关联邮箱</button>
-          </div>
-        </div>
-
-        <button class="confirm-delete-button folder-save-button auth-wide-button" id="saveProfileButton" type="submit">
-          保存资料
-        </button>
       </form>
     </dialog>
 
