@@ -2090,14 +2090,14 @@ function normalizePhoneNumber(value) {
 }
 
 function toCloudPhoneNumber(value) {
-  const normalized = normalizePhoneNumber(value);
+  const normalized = normalizePhoneNumber(value).replace(/^\+/, "");
   if (/^1[3-9]\d{9}$/.test(normalized)) {
-    return `+86${normalized}`;
+    return `+86 ${normalized}`;
   }
   if (/^861[3-9]\d{9}$/.test(normalized)) {
-    return `+${normalized}`;
+    return `+86 ${normalized.slice(2)}`;
   }
-  return normalized;
+  return String(value || "").trim().replace(/\s+/, " ");
 }
 
 function isLikelyPhoneNumber(value) {
@@ -2235,7 +2235,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=67");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=68");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
