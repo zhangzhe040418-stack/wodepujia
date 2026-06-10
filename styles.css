@@ -197,6 +197,10 @@ noscript {
   min-width: 0;
 }
 
+.brand-lockup > div {
+  min-width: 0;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -226,6 +230,7 @@ noscript {
 .brand-lockup h1 {
   font-size: 1.45rem;
   line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .brand-lockup p,
@@ -741,6 +746,7 @@ body.add-screen-open .bottom-nav {
 .field select {
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   height: 46px;
   padding: 0 12px;
   border: 1px solid var(--line);
@@ -749,6 +755,16 @@ body.add-screen-open .bottom-nav {
   background: #ffffff;
   color: var(--ink);
   font-weight: 500;
+}
+
+#profileBirthday {
+  display: block;
+  text-align: center;
+  text-align-last: center;
+}
+
+#profileBirthday::-webkit-date-and-time-value {
+  text-align: center;
 }
 
 .field input:focus,

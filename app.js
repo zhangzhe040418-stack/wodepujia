@@ -127,6 +127,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 function bindElements() {
   elements.appShell = document.querySelector(".app-shell");
   elements.topbar = document.querySelector(".topbar");
+  elements.appTitle = document.querySelector("#appTitle");
   elements.librarySummary = document.querySelector("#librarySummary");
   elements.libraryScreen = document.querySelector("#libraryScreen");
   elements.myScreen = document.querySelector("#myScreen");
@@ -787,6 +788,12 @@ async function connectCloud() {
       state.cloudAuthListenerBound = true;
       state.cloudAuth.onLoginStateChanged(async (loginState) => {
         state.session = await createCloudSession(loginState);
+        if (state.session) {
+          await loadProfileForCurrentUser();
+        } else {
+          state.profile = null;
+          state.profileLoadedUserId = "";
+        }
         updateAccountUi();
         await loadScores();
         if (state.session) {
@@ -856,6 +863,9 @@ async function restoreCloudSession() {
         ? await state.cloudAuth.getLoginState()
         : state.cloudAuth.hasLoginState?.();
     state.session = await createCloudSession(loginState);
+    if (state.session) {
+      await loadProfileForCurrentUser();
+    }
   } catch (error) {
     console.error(error);
     updateAccountUi();
@@ -1076,6 +1086,7 @@ function updateAccountUi() {
   if (elements.profileDialog?.open) {
     renderProfileDialog();
   }
+  updateAppTitle();
 
   if (elements.authDialog?.open && accountLabel && state.authMode !== "loggedIn") {
     setAuthMode("loggedIn");
@@ -1227,7 +1238,7 @@ async function openProfileDialog() {
     return;
   }
 
-  await loadProfileForCurrentUser();
+  await loadProfileForCurrentUser({ includeCloud: true });
   renderProfileDialog();
 
   if (typeof elements.profileDialog.showModal === "function") {
@@ -1257,7 +1268,7 @@ function setProfileStatus(message, isError = false) {
   elements.profileState.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
 
-async function loadProfileForCurrentUser() {
+async function loadProfileForCurrentUser(options = {}) {
   const userId = state.session?.user?.id || "";
   if (!userId) {
     state.profile = null;
@@ -1271,7 +1282,7 @@ async function loadProfileForCurrentUser() {
 
   let profile = readStoredProfile(userId) || createDefaultProfile(userId);
 
-  if (state.cloudReady && state.cloudDb) {
+  if (options.includeCloud && state.cloudReady && state.cloudDb) {
     try {
       const rows = await queryCloudRows(PROFILE_COLLECTION_NAME, { user_id: userId });
       if (rows.length) {
@@ -1288,6 +1299,7 @@ async function loadProfileForCurrentUser() {
 
   state.profile = profile;
   state.profileLoadedUserId = userId;
+  updateAppTitle();
   return profile;
 }
 
@@ -1342,6 +1354,7 @@ async function saveProfile(event) {
   state.profile = profile;
   state.profileLoadedUserId = userId;
   writeStoredProfile(userId, profile);
+  updateAppTitle();
   elements.saveProfileButton.disabled = true;
   setProfileStatus("正在保存资料...");
 
@@ -1666,6 +1679,7 @@ async function updateLinkedContact(mode, contact) {
   state.profile = nextProfile;
   state.profileLoadedUserId = userId;
   writeStoredProfile(userId, nextProfile);
+  updateAppTitle();
 
   try {
     await saveProfileToCloud(nextProfile);
@@ -1674,6 +1688,15 @@ async function updateLinkedContact(mode, contact) {
   }
 
   updateAccountUi();
+}
+
+function updateAppTitle() {
+  if (!elements.appTitle) {
+    return;
+  }
+
+  const nickname = String(state.profile?.nickname || "").trim();
+  elements.appTitle.textContent = nickname ? `${nickname}的谱夹` : "我的谱夹";
 }
 
 function extractCloudValue(result, keys) {
@@ -1745,6 +1768,7 @@ async function signInWithPassword(event) {
     if (!state.session) {
       throw new Error("登录状态读取失败，请重新登录。");
     }
+    await loadProfileForCurrentUser();
     closeAuthDialog();
     queueAccountBackgroundSync(state.session.user.id, "已登录，正在后台同步...");
   } catch (error) {
@@ -1863,6 +1887,7 @@ async function completeRegisterWithPassword() {
     if (!state.session) {
       throw new Error("注册成功，但登录状态读取失败，请重新登录。");
     }
+    await loadProfileForCurrentUser();
     state.authRegisterVerifyOtp = null;
     state.authRegisterPayload = null;
     closeAuthDialog();
@@ -2095,6 +2120,7 @@ async function signOut() {
   state.session = null;
   state.profile = null;
   state.profileLoadedUserId = "";
+  updateAppTitle();
   closeProfileDialog();
   closeProfileLinkDialog();
   if (keepAuthDialogOpen) {
@@ -2155,7 +2181,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=63");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=64");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
