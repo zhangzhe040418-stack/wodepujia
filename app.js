@@ -25,7 +25,7 @@ const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
-const FAB_LONG_PRESS_DELAY = 520;
+const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
 const CLOUD_QUERY_TIMEOUT = 30000;
@@ -79,7 +79,6 @@ const state = {
   authRegisterCode: "",
   authRegisterVerifyOtp: null,
   authRegisterPayload: null,
-  fabLongPressTimer: null,
   fabDrag: null,
   fabSuppressClick: false,
   appTouchY: 0,
@@ -460,7 +459,6 @@ function handleFabPointerDown(event) {
     return;
   }
 
-  window.clearTimeout(state.fabLongPressTimer);
   const rect = elements.addScoreButton.getBoundingClientRect();
   state.fabDrag = {
     pointerId: event.pointerId,
@@ -478,10 +476,6 @@ function handleFabPointerDown(event) {
   } catch (error) {
     console.warn(error);
   }
-
-  state.fabLongPressTimer = window.setTimeout(() => {
-    startFabDrag(event.pointerId);
-  }, FAB_LONG_PRESS_DELAY);
 }
 
 function handleFabPointerMove(event) {
@@ -494,7 +488,11 @@ function handleFabPointerMove(event) {
   drag.currentY = event.clientY;
 
   if (!drag.active) {
-    return;
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (distance < FAB_DRAG_START_DISTANCE) {
+      return;
+    }
+    startFabDrag(event.pointerId);
   }
 
   event.preventDefault();
@@ -506,9 +504,6 @@ function handleFabPointerEnd(event) {
   if (!drag || drag.pointerId !== event.pointerId) {
     return;
   }
-
-  window.clearTimeout(state.fabLongPressTimer);
-  state.fabLongPressTimer = null;
 
   if (drag.active) {
     event.preventDefault();
@@ -1614,7 +1609,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=61");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=62");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
