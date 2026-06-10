@@ -1631,11 +1631,18 @@ function getNormalizedProfileLinkContact() {
 }
 
 async function requestCloudSudoToken(password) {
-  if (typeof state.cloudAuth.getSudoToken !== "function") {
+  const sudoMethod =
+    typeof state.cloudAuth.sudo === "function"
+      ? state.cloudAuth.sudo.bind(state.cloudAuth)
+      : typeof state.cloudAuth.getSudoToken === "function"
+        ? state.cloudAuth.getSudoToken.bind(state.cloudAuth)
+        : null;
+
+  if (!sudoMethod) {
     throw new Error("当前 CloudBase SDK 不支持账号关联所需的安全验证。");
   }
 
-  const result = await state.cloudAuth.getSudoToken({ password });
+  const result = await sudoMethod({ password });
   throwCloudResultError(result);
   const token = extractCloudValue(result, ["sudo_token", "sudoToken", "token"]);
   if (!token) {
@@ -2228,7 +2235,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=66");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=67");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
