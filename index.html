@@ -15,10 +15,10 @@
     <link rel="manifest" href="manifest.webmanifest?v=66" />
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=47" />
     <link rel="apple-touch-icon" href="icons/icon-192.png?v=47" />
-    <link rel="stylesheet" href="styles.css?v=69" />
+    <link rel="stylesheet" href="styles.css?v=70" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=69"></script>
+    <script defer charset="UTF-8" src="app.js?v=70"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -484,6 +484,14 @@
 
     <dialog class="viewer-dialog" id="viewerDialog" aria-label="歌谱图片查看">
       <div class="viewer-surface">
+        <div class="viewer-topbar">
+          <button class="viewer-back-button" id="viewerBackButton" type="button" aria-label="返回">
+            <i data-lucide="chevron-left" aria-hidden="true"></i>
+            <span>返回</span>
+          </button>
+          <strong>查看歌谱</strong>
+          <span aria-hidden="true"></span>
+        </div>
         <div class="viewer-pages" id="viewerPages"></div>
       </div>
     </dialog>

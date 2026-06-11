@@ -1600,6 +1600,58 @@ body.profile-screen-open .fab-button {
   overflow: hidden;
   background: #ffffff;
   scrollbar-width: none;
+  --viewer-topbar-height: calc(48px + env(safe-area-inset-top));
+}
+
+.viewer-topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: minmax(74px, 1fr) auto minmax(74px, 1fr);
+  align-items: center;
+  min-height: var(--viewer-topbar-height);
+  padding: env(safe-area-inset-top) 12px 0;
+  border-bottom: 1px solid rgba(224, 232, 229, 0.82);
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--ink);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.viewer-topbar strong {
+  font-size: 0.98rem;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.viewer-back-button {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  min-width: 0;
+  min-height: 38px;
+  gap: 2px;
+  padding: 0 10px 0 6px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 0.92rem;
+  font-weight: 900;
+}
+
+.viewer-back-button:hover,
+.viewer-back-button:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.viewer-back-button .lucide,
+.viewer-back-button [data-lucide] {
+  width: 22px;
+  height: 22px;
 }
 
 .viewer-pages {
@@ -1608,7 +1660,8 @@ body.profile-screen-open .fab-button {
   height: 100%;
   overflow: auto;
   overscroll-behavior: none;
-  padding: 0;
+  padding: var(--viewer-topbar-height) 0 0;
+  scroll-padding-top: var(--viewer-topbar-height);
   background: #ffffff;
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -1639,8 +1692,8 @@ body.profile-screen-open .fab-button {
   display: grid;
   place-items: center;
   width: 100%;
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: calc(100vh - var(--viewer-topbar-height));
+  min-height: calc(100dvh - var(--viewer-topbar-height));
   margin: 0;
   padding: 0;
   min-width: 100%;
@@ -1658,8 +1711,8 @@ body.profile-screen-open .fab-button {
   place-items: center;
   width: calc(100vw * var(--viewer-zoom));
   min-width: 100%;
-  height: calc(100vh * var(--viewer-zoom));
-  height: calc(100dvh * var(--viewer-zoom));
+  height: calc((100vh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+  height: calc((100dvh - var(--viewer-topbar-height)) * var(--viewer-zoom));
   background: #ffffff;
 }
 
@@ -1674,8 +1727,8 @@ body.profile-screen-open .fab-button {
 .viewer-image-frame img {
   width: calc(100vw * var(--viewer-zoom));
   max-width: none;
-  height: calc(100vh * var(--viewer-zoom));
-  height: calc(100dvh * var(--viewer-zoom));
+  height: calc((100vh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+  height: calc((100dvh - var(--viewer-topbar-height)) * var(--viewer-zoom));
   object-fit: contain;
   border: 0;
   background: #ffffff;

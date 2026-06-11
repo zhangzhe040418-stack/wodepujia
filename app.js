@@ -105,6 +105,7 @@ const state = {
   viewerTapStart: null,
   viewerLastTap: null,
   viewerHistoryActive: false,
+  folderHistoryActive: false,
   currentViewerScoreId: null,
 };
 
@@ -261,6 +262,7 @@ function bindElements() {
   elements.cancelDeleteButton = document.querySelector("#cancelDeleteButton");
   elements.confirmDeleteButton = document.querySelector("#confirmDeleteButton");
   elements.viewerDialog = document.querySelector("#viewerDialog");
+  elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
 }
 
@@ -408,6 +410,7 @@ function bindEvents() {
     event.preventDefault();
     closeViewer();
   });
+  elements.viewerBackButton.addEventListener("click", closeViewer);
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
   elements.confirmDeleteButton.addEventListener("click", () => closeDeleteDialog(true));
   elements.deleteDialog.addEventListener("cancel", (event) => {
@@ -430,6 +433,11 @@ function bindEvents() {
   window.addEventListener("popstate", () => {
     if (state.viewerHistoryActive) {
       closeViewer({ fromHistory: true });
+      return;
+    }
+
+    if (state.currentFolderId) {
+      openRootFolder({ fromHistory: true });
     }
   });
   ["gesturestart", "gesturechange", "gestureend"].forEach((eventName) => {
@@ -2240,7 +2248,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=69");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=70");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2566,6 +2574,7 @@ async function loadScores() {
 
   if (state.currentFolderId && !state.folders.some((folder) => folder.id === state.currentFolderId)) {
     state.currentFolderId = null;
+    state.folderHistoryActive = false;
   }
 
   await consolidateDuplicateFoldersByName();
@@ -3244,14 +3253,13 @@ async function createFolder(event) {
 
   try {
     await putFolder(folder);
-    state.currentFolderId = folder.id;
     elements.searchInput.value = "";
     closeFolderDialog();
     await loadScores();
+    openFolder(folder.id);
     if (userId && state.cloudReady) {
       queueFolderCloudUpload(folder.id);
     }
-    elements.appShell.scrollTo({ top: 0 });
   } catch (error) {
     console.error(error);
     elements.saveFolderButton.disabled = false;
@@ -5749,14 +5757,38 @@ function getCurrentFolder() {
 }
 
 function openFolder(id) {
+  if (!id) {
+    return;
+  }
+
+  if (state.currentFolderId !== id) {
+    pushFolderHistory(id);
+  }
+
   state.currentFolderId = id;
   elements.searchInput.value = "";
   renderScores();
   elements.appShell.scrollTo({ top: 0 });
 }
 
-function openRootFolder() {
+function pushFolderHistory(id) {
+  try {
+    window.history.pushState({ folder: id }, "");
+    state.folderHistoryActive = true;
+  } catch (error) {
+    console.warn(error);
+    state.folderHistoryActive = false;
+  }
+}
+
+function openRootFolder(options = {}) {
+  if (!options.fromHistory && state.currentFolderId && state.folderHistoryActive) {
+    window.history.back();
+    return;
+  }
+
   state.currentFolderId = null;
+  state.folderHistoryActive = false;
   elements.searchInput.value = "";
   renderScores();
   elements.appShell.scrollTo({ top: 0 });
