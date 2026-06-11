@@ -1,8 +1,10 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
+const SETLIST_STORE_NAME = "setlists";
+const SETLIST_ITEM_STORE_NAME = "setlist_items";
 const SYNC_STATUS_LOCAL = "local";
 const SYNC_STATUS_PENDING = "pending";
 const SYNC_STATUS_SYNCED = "synced";
@@ -12,6 +14,8 @@ const CLOUD_TABLES = {
   pages: "score_pages",
   shareBatches: "share_batches",
   shareItems: "share_items",
+  setlists: "setlists",
+  setlistItems: "setlist_items",
 };
 const VIEWER_MIN_ZOOM = 1;
 const VIEWER_MAX_ZOOM = 4;
@@ -65,6 +69,8 @@ const state = {
   scores: [],
   scorePages: [],
   folders: [],
+  setlists: [],
+  setlistItems: [],
   pendingPages: [],
   scoreUrls: new Map(),
   pendingUrls: new Map(),
@@ -83,6 +89,7 @@ const state = {
   shareTasks: new Set(),
   shareSelectedFolderIds: new Set(),
   shareSelectedScoreIds: new Set(),
+  setlistDraftScoreIds: [],
   copyFeedbackTimer: 0,
   activeTab: "library",
   currentFolderId: null,
@@ -107,6 +114,7 @@ const state = {
   verifyDialogResolve: null,
   scoreActionId: "",
   scoreEditId: "",
+  editingSetlistId: "",
   viewerZoom: VIEWER_MIN_ZOOM,
   viewerPointers: new Map(),
   viewerPinchStartDistance: 0,
@@ -117,6 +125,7 @@ const state = {
   viewerHistoryActive: false,
   folderHistoryActive: false,
   currentViewerScoreId: null,
+  currentViewerSetlistId: null,
 };
 
 const elements = {};
@@ -147,8 +156,10 @@ function bindElements() {
   elements.appTitle = document.querySelector("#appTitle");
   elements.librarySummary = document.querySelector("#librarySummary");
   elements.libraryScreen = document.querySelector("#libraryScreen");
+  elements.setlistScreen = document.querySelector("#setlistScreen");
   elements.myScreen = document.querySelector("#myScreen");
   elements.navLibraryButton = document.querySelector("#navLibraryButton");
+  elements.navSetlistsButton = document.querySelector("#navSetlistsButton");
   elements.navMineButton = document.querySelector("#navMineButton");
   elements.bottomNav = document.querySelector(".bottom-nav");
   elements.myProfileButton = document.querySelector("#myProfileButton");
@@ -167,6 +178,22 @@ function bindElements() {
   elements.scoreGrid = document.querySelector("#scoreGrid");
   elements.searchInput = document.querySelector("#searchInput");
   elements.clearSearchButton = document.querySelector("#clearSearchButton");
+  elements.setlistSummary = document.querySelector("#setlistSummary");
+  elements.setlistList = document.querySelector("#setlistList");
+  elements.createSetlistButton = document.querySelector("#createSetlistButton");
+  elements.setlistDialog = document.querySelector("#setlistDialog");
+  elements.setlistForm = document.querySelector("#setlistForm");
+  elements.setlistDialogTitle = document.querySelector("#setlistDialogTitle");
+  elements.setlistName = document.querySelector("#setlistName");
+  elements.setlistDate = document.querySelector("#setlistDate");
+  elements.setlistScene = document.querySelector("#setlistScene");
+  elements.setlistScoreSearch = document.querySelector("#setlistScoreSearch");
+  elements.setlistScorePicker = document.querySelector("#setlistScorePicker");
+  elements.setlistOrderList = document.querySelector("#setlistOrderList");
+  elements.setlistDialogState = document.querySelector("#setlistDialogState");
+  elements.closeSetlistButton = document.querySelector("#closeSetlistButton");
+  elements.cancelSetlistButton = document.querySelector("#cancelSetlistButton");
+  elements.saveSetlistButton = document.querySelector("#saveSetlistButton");
   elements.syncNowButton = document.querySelector("#syncNowButton");
   elements.shareScoresButton = document.querySelector("#shareScoresButton");
   elements.importShareButton = document.querySelector("#importShareButton");
@@ -295,6 +322,7 @@ function bindElements() {
   elements.cancelDeleteButton = document.querySelector("#cancelDeleteButton");
   elements.confirmDeleteButton = document.querySelector("#confirmDeleteButton");
   elements.viewerDialog = document.querySelector("#viewerDialog");
+  elements.viewerTitle = document.querySelector("#viewerTitle");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
 }
@@ -313,7 +341,24 @@ function bindEvents() {
   elements.scoreName.addEventListener("input", updateSaveState);
   elements.searchInput.addEventListener("input", renderScores);
   elements.navLibraryButton.addEventListener("click", () => switchMainTab("library"));
+  elements.navSetlistsButton?.addEventListener("click", () => switchMainTab("setlists"));
   elements.navMineButton.addEventListener("click", () => switchMainTab("mine"));
+  elements.createSetlistButton?.addEventListener("click", () => openSetlistDialog());
+  elements.setlistForm?.addEventListener("submit", saveSetlist);
+  elements.closeSetlistButton?.addEventListener("click", closeSetlistDialog);
+  elements.cancelSetlistButton?.addEventListener("click", closeSetlistDialog);
+  elements.setlistScoreSearch?.addEventListener("input", renderSetlistScorePicker);
+  elements.setlistScorePicker?.addEventListener("change", handleSetlistPickerChange);
+  elements.setlistOrderList?.addEventListener("click", handleSetlistOrderAction);
+  elements.setlistDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeSetlistDialog();
+  });
+  elements.setlistDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.setlistDialog) {
+      closeSetlistDialog();
+    }
+  });
   elements.myProfileButton.addEventListener("click", openProfileDialog);
   elements.myAuthButton.addEventListener("click", openAuthDialog);
   elements.preferencesButton.addEventListener("click", openPreferencesScreen);
@@ -761,16 +806,22 @@ function switchMainTab(tab) {
 
   state.activeTab = tab;
   const isMine = tab === "mine";
+  const isSetlists = tab === "setlists";
+  const isLibrary = tab === "library";
 
-  elements.libraryScreen.hidden = isMine;
+  elements.libraryScreen.hidden = !isLibrary;
+  elements.setlistScreen.hidden = !isSetlists;
   elements.myScreen.hidden = !isMine;
   elements.uploadScreen.hidden = true;
-  elements.addScoreButton.hidden = isMine;
+  elements.addScoreButton.hidden = !isLibrary;
   document.body.classList.toggle("mine-tab-open", isMine);
+  document.body.classList.toggle("setlists-tab-open", isSetlists);
   updateMainNav();
 
-  if (!isMine) {
+  if (isLibrary) {
     renderScores();
+  } else if (isSetlists) {
+    renderSetlists();
   }
 
   elements.appShell.scrollTo({ top: 0 });
@@ -778,14 +829,23 @@ function switchMainTab(tab) {
 
 function updateMainNav() {
   const isLibrary = state.activeTab === "library";
+  const isSetlists = state.activeTab === "setlists";
+  const isMine = state.activeTab === "mine";
   elements.navLibraryButton.classList.toggle("is-active", isLibrary);
-  elements.navMineButton.classList.toggle("is-active", !isLibrary);
+  elements.navSetlistsButton?.classList.toggle("is-active", isSetlists);
+  elements.navMineButton.classList.toggle("is-active", isMine);
   if (isLibrary) {
     elements.navLibraryButton.setAttribute("aria-current", "page");
+    elements.navSetlistsButton?.removeAttribute("aria-current");
+    elements.navMineButton.removeAttribute("aria-current");
+  } else if (isSetlists) {
+    elements.navSetlistsButton?.setAttribute("aria-current", "page");
+    elements.navLibraryButton.removeAttribute("aria-current");
     elements.navMineButton.removeAttribute("aria-current");
   } else {
     elements.navMineButton.setAttribute("aria-current", "page");
     elements.navLibraryButton.removeAttribute("aria-current");
+    elements.navSetlistsButton?.removeAttribute("aria-current");
   }
 }
 
@@ -1648,6 +1708,14 @@ function setViewerModePreference(mode) {
       resetViewerGestureState();
       setViewerZoom(VIEWER_MIN_ZOOM);
       renderViewerPages(score);
+      elements.viewerPages.scrollTo({ left: 0, top: 0 });
+    }
+  } else if (elements.viewerDialog?.open && state.currentViewerSetlistId) {
+    const setlist = state.setlists.find((item) => item.id === state.currentViewerSetlistId);
+    if (setlist) {
+      resetViewerGestureState();
+      setViewerZoom(VIEWER_MIN_ZOOM);
+      renderViewerPages(createSetlistViewerScore(setlist));
       elements.viewerPages.scrollTo({ left: 0, top: 0 });
     }
   }
@@ -2522,7 +2590,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=75");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=76");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2822,7 +2890,13 @@ function openFilePicker(input) {
 }
 
 async function loadScores() {
-  const [scoreRecords, pageRecords, folders] = await Promise.all([getAllScores(), getAllScorePages(), getAllFolders()]);
+  const [scoreRecords, pageRecords, folders, setlistRecords, setlistItemRecords] = await Promise.all([
+    getAllScores(),
+    getAllScorePages(),
+    getAllFolders(),
+    getAllSetlists(),
+    getAllSetlistItems(),
+  ]);
   const migrated = await migrateNestedScorePages(scoreRecords);
   const normalizedScores = migrated.map(normalizeLocalScoreRecord);
   const activeUserId = state.session?.user?.id || null;
@@ -2843,8 +2917,16 @@ async function loadScores() {
         .sort((a, b) => a.pageIndex - b.pageIndex),
     }));
   state.folders = folders.map(normalizeLocalFolderRecord).filter((folder) => !folder.deletedAt && ownerMatches(folder));
+  state.setlists = setlistRecords.map(normalizeLocalSetlistRecord).filter((setlist) => !setlist.deletedAt && ownerMatches(setlist));
+  const activeSetlistIds = new Set(state.setlists.map((setlist) => setlist.id));
+  const activeScoreIds = new Set(state.scores.map((score) => score.id));
+  state.setlistItems = setlistItemRecords
+    .map(normalizeLocalSetlistItemRecord)
+    .filter((item) => !item.deletedAt && ownerMatches(item) && activeSetlistIds.has(item.setlistId) && activeScoreIds.has(item.scoreId))
+    .sort((a, b) => a.position - b.position || new Date(a.createdAt) - new Date(b.createdAt));
   state.scores.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   state.folders.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  state.setlists.sort((a, b) => getSetlistSortTime(b) - getSetlistSortTime(a) || new Date(b.updatedAt) - new Date(a.updatedAt));
 
   if (state.currentFolderId && !state.folders.some((folder) => folder.id === state.currentFolderId)) {
     state.currentFolderId = null;
@@ -2853,6 +2935,7 @@ async function loadScores() {
 
   await consolidateDuplicateFoldersByName();
   renderScores();
+  renderSetlists();
   queueBackgroundPageHydration();
 }
 
@@ -2915,6 +2998,47 @@ function openDatabase() {
         pageStore.createIndex("scoreId", "scoreId", { unique: false });
         pageStore.createIndex("userId", "userId", { unique: false });
         pageStore.createIndex("syncStatus", "syncStatus", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(SETLIST_STORE_NAME)) {
+        const setlistStore = db.createObjectStore(SETLIST_STORE_NAME, { keyPath: "id" });
+        setlistStore.createIndex("userId", "userId", { unique: false });
+        setlistStore.createIndex("date", "date", { unique: false });
+        setlistStore.createIndex("updatedAt", "updatedAt", { unique: false });
+        setlistStore.createIndex("syncStatus", "syncStatus", { unique: false });
+      } else {
+        const setlistStore = request.transaction.objectStore(SETLIST_STORE_NAME);
+        if (!setlistStore.indexNames.contains("userId")) {
+          setlistStore.createIndex("userId", "userId", { unique: false });
+        }
+        if (!setlistStore.indexNames.contains("date")) {
+          setlistStore.createIndex("date", "date", { unique: false });
+        }
+        if (!setlistStore.indexNames.contains("syncStatus")) {
+          setlistStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        }
+      }
+
+      if (!db.objectStoreNames.contains(SETLIST_ITEM_STORE_NAME)) {
+        const setlistItemStore = db.createObjectStore(SETLIST_ITEM_STORE_NAME, { keyPath: "id" });
+        setlistItemStore.createIndex("setlistId", "setlistId", { unique: false });
+        setlistItemStore.createIndex("scoreId", "scoreId", { unique: false });
+        setlistItemStore.createIndex("userId", "userId", { unique: false });
+        setlistItemStore.createIndex("syncStatus", "syncStatus", { unique: false });
+      } else {
+        const setlistItemStore = request.transaction.objectStore(SETLIST_ITEM_STORE_NAME);
+        if (!setlistItemStore.indexNames.contains("setlistId")) {
+          setlistItemStore.createIndex("setlistId", "setlistId", { unique: false });
+        }
+        if (!setlistItemStore.indexNames.contains("scoreId")) {
+          setlistItemStore.createIndex("scoreId", "scoreId", { unique: false });
+        }
+        if (!setlistItemStore.indexNames.contains("userId")) {
+          setlistItemStore.createIndex("userId", "userId", { unique: false });
+        }
+        if (!setlistItemStore.indexNames.contains("syncStatus")) {
+          setlistItemStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        }
       }
     };
 
@@ -3059,6 +3183,40 @@ function normalizeLocalPageRecord(page) {
   };
 }
 
+function normalizeLocalSetlistRecord(setlist) {
+  const name = String(setlist.name || "未命名歌单").trim() || "未命名歌单";
+  const date = String(setlist.date || "").trim();
+
+  return {
+    ...setlist,
+    id: String(setlist.id || createId()),
+    userId: setlist.userId || null,
+    name,
+    normalizedName: normalizeText(setlist.normalizedName || name),
+    date,
+    scene: String(setlist.scene || setlist.scenario || "").trim(),
+    createdAt: setlist.createdAt || new Date().toISOString(),
+    updatedAt: setlist.updatedAt || setlist.createdAt || new Date().toISOString(),
+    deletedAt: setlist.deletedAt || null,
+    syncStatus: setlist.syncStatus || SYNC_STATUS_LOCAL,
+  };
+}
+
+function normalizeLocalSetlistItemRecord(item) {
+  return {
+    ...item,
+    id: String(item.id || createId()),
+    setlistId: String(item.setlistId || ""),
+    scoreId: String(item.scoreId || ""),
+    userId: item.userId || null,
+    position: Number.isInteger(item.position) ? item.position : 0,
+    createdAt: item.createdAt || new Date().toISOString(),
+    updatedAt: item.updatedAt || item.createdAt || new Date().toISOString(),
+    deletedAt: item.deletedAt || null,
+    syncStatus: item.syncStatus || SYNC_STATUS_LOCAL,
+  };
+}
+
 function toScoreRecord(score) {
   const { pages, __migratedPages, ...record } = score;
   return record;
@@ -3086,6 +3244,24 @@ function getAllFolders() {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction(FOLDER_STORE_NAME, "readonly");
     const request = transaction.objectStore(FOLDER_STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getAllSetlists() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(SETLIST_STORE_NAME, "readonly");
+    const request = transaction.objectStore(SETLIST_STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getAllSetlistItems() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(SETLIST_ITEM_STORE_NAME, "readonly");
+    const request = transaction.objectStore(SETLIST_ITEM_STORE_NAME).getAll();
     request.onsuccess = () => resolve(request.result || []);
     request.onerror = () => reject(request.error);
   });
@@ -3136,6 +3312,21 @@ function putFolder(folder) {
     const request = transaction.objectStore(FOLDER_STORE_NAME).put(folder);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+  });
+}
+
+function putSetlistWithItems(setlist, items, deletedItems = []) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME], "readwrite");
+    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
+    const itemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
+
+    setlistStore.put(setlist);
+    [...items, ...deletedItems].forEach((item) => itemStore.put(item));
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
   });
 }
 
@@ -3636,7 +3827,13 @@ async function createFolder(event) {
 }
 
 async function claimLocalRecordsForUser(userId) {
-  const [scores, pages, folders] = await Promise.all([getAllScores(), getAllScorePages(), getAllFolders()]);
+  const [scores, pages, folders, setlists, setlistItems] = await Promise.all([
+    getAllScores(),
+    getAllScorePages(),
+    getAllFolders(),
+    getAllSetlists(),
+    getAllSetlistItems(),
+  ]);
   const now = new Date().toISOString();
   const claimedFolders = folders
     .filter((folder) => !folder.userId)
@@ -3662,12 +3859,28 @@ async function claimLocalRecordsForUser(userId) {
       updatedAt: page.updatedAt || now,
       syncStatus: SYNC_STATUS_PENDING,
     }));
+  const claimedSetlists = setlists
+    .filter((setlist) => !setlist.userId)
+    .map((setlist) => ({
+      ...normalizeLocalSetlistRecord(setlist),
+      userId,
+      updatedAt: setlist.updatedAt || now,
+      syncStatus: SYNC_STATUS_PENDING,
+    }));
+  const claimedSetlistItems = setlistItems
+    .filter((item) => !item.userId)
+    .map((item) => ({
+      ...normalizeLocalSetlistItemRecord(item),
+      userId,
+      updatedAt: item.updatedAt || now,
+      syncStatus: SYNC_STATUS_PENDING,
+    }));
 
-  if (!claimedFolders.length && !claimedScores.length && !claimedPages.length) {
+  if (!claimedFolders.length && !claimedScores.length && !claimedPages.length && !claimedSetlists.length && !claimedSetlistItems.length) {
     return;
   }
 
-  await putCloudReadyRecords(claimedFolders, claimedScores, claimedPages);
+  await putCloudReadyRecords(claimedFolders, claimedScores, claimedPages, claimedSetlists, claimedSetlistItems);
   await loadScores();
 }
 
@@ -3697,16 +3910,23 @@ function queueAccountBackgroundSync(userId, message = "") {
   }, 100);
 }
 
-function putCloudReadyRecords(folders, scores, pages) {
+function putCloudReadyRecords(folders, scores, pages, setlists = [], setlistItems = []) {
   return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const transaction = state.db.transaction(
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      "readwrite",
+    );
     const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
     const scoreStore = transaction.objectStore(STORE_NAME);
     const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
+    const setlistItemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
 
     folders.forEach((folder) => folderStore.put(folder));
     scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
     pages.forEach((page) => pageStore.put(page));
+    setlists.forEach((setlist) => setlistStore.put(setlist));
+    setlistItems.forEach((item) => setlistItemStore.put(item));
 
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
@@ -3984,19 +4204,25 @@ async function performSync(options = {}) {
 
 async function pullCloudDeletions() {
   const userId = state.session.user.id;
-  const [folders, scores] = await Promise.all([
+  const [folders, scores, setlists, setlistItems] = await Promise.all([
     queryCloudRows(CLOUD_TABLES.folders, { user_id: userId }),
     queryCloudRows(CLOUD_TABLES.scores, { user_id: userId }),
+    queryOptionalCloudRows(CLOUD_TABLES.setlists, { user_id: userId }),
+    queryOptionalCloudRows(CLOUD_TABLES.setlistItems, { user_id: userId }),
   ]);
   const deletedFolderIds = folders.filter((folder) => folder.deleted_at).map((folder) => folder.id);
   const deletedScoreIds = scores.filter((score) => score.deleted_at).map((score) => score.id);
+  const deletedSetlistIds = setlists.filter((setlist) => setlist.deleted_at).map((setlist) => setlist.id);
+  const deletedSetlistItemIds = setlistItems.filter((item) => item.deleted_at).map((item) => item.id);
 
-  await purgeCloudDeletedLocalRecords(deletedFolderIds, deletedScoreIds);
+  await purgeCloudDeletedLocalRecords(deletedFolderIds, deletedScoreIds, deletedSetlistIds, deletedSetlistItemIds);
 }
 
-async function purgeCloudDeletedLocalRecords(folderIds, scoreIds) {
+async function purgeCloudDeletedLocalRecords(folderIds, scoreIds, setlistIds = [], setlistItemIds = []) {
   const folderIdSet = new Set(folderIds.filter(Boolean).map(String));
   const scoreIdSet = new Set(scoreIds.filter(Boolean).map(String));
+  const setlistIdSet = new Set(setlistIds.filter(Boolean).map(String));
+  const setlistItemIdSet = new Set(setlistItemIds.filter(Boolean).map(String));
 
   if (folderIdSet.size) {
     const localScores = await getAllScores();
@@ -4007,18 +4233,34 @@ async function purgeCloudDeletedLocalRecords(folderIds, scoreIds) {
     });
   }
 
-  if (!folderIdSet.size && !scoreIdSet.size) {
+  if (setlistIdSet.size || scoreIdSet.size) {
+    const localSetlistItems = await getAllSetlistItems();
+    localSetlistItems.forEach((item) => {
+      if (setlistIdSet.has(String(item.setlistId)) || scoreIdSet.has(String(item.scoreId))) {
+        setlistItemIdSet.add(String(item.id));
+      }
+    });
+  }
+
+  if (!folderIdSet.size && !scoreIdSet.size && !setlistIdSet.size && !setlistItemIdSet.size) {
     return;
   }
 
   await new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const transaction = state.db.transaction(
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      "readwrite",
+    );
     const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
     const scoreStore = transaction.objectStore(STORE_NAME);
     const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
+    const setlistItemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
     const pageIndex = pageStore.index("scoreId");
 
     folderIdSet.forEach((folderId) => folderStore.delete(folderId));
+    setlistIdSet.forEach((setlistId) => setlistStore.delete(setlistId));
+    setlistItemIdSet.forEach((itemId) => setlistItemStore.delete(itemId));
     scoreIdSet.forEach((scoreId) => {
       scoreStore.delete(scoreId);
       const pageRequest = pageIndex.getAllKeys(scoreId);
@@ -4035,7 +4277,13 @@ async function purgeCloudDeletedLocalRecords(folderIds, scoreIds) {
 }
 
 async function getSyncableLocalRecords(userId) {
-  const [folderRecords, scoreRecords, pageRecords] = await Promise.all([getAllFolders(), getAllScores(), getAllScorePages()]);
+  const [folderRecords, scoreRecords, pageRecords, setlistRecords, setlistItemRecords] = await Promise.all([
+    getAllFolders(),
+    getAllScores(),
+    getAllScorePages(),
+    getAllSetlists(),
+    getAllSetlistItems(),
+  ]);
   const ownerMatches = (record) => !record.userId || record.userId === userId;
   const folders = folderRecords.map(normalizeLocalFolderRecord).filter(ownerMatches);
   const scores = scoreRecords.map(normalizeLocalScoreRecord).filter(ownerMatches);
@@ -4043,8 +4291,13 @@ async function getSyncableLocalRecords(userId) {
   const pages = pageRecords
     .map(normalizeLocalPageRecord)
     .filter((page) => scoreIds.has(page.scoreId) && ownerMatches(page));
+  const setlists = setlistRecords.map(normalizeLocalSetlistRecord).filter(ownerMatches);
+  const setlistIds = new Set(setlists.map((setlist) => setlist.id));
+  const setlistItems = setlistItemRecords
+    .map(normalizeLocalSetlistItemRecord)
+    .filter((item) => setlistIds.has(item.setlistId) && scoreIds.has(item.scoreId) && ownerMatches(item));
 
-  return { folders, scores, pages };
+  return { folders, scores, pages, setlists, setlistItems };
 }
 
 async function uploadLocalChanges() {
@@ -4052,8 +4305,12 @@ async function uploadLocalChanges() {
   const localRecords = await getSyncableLocalRecords(userId);
   const allFolders = localRecords.folders.map((folder) => ({ ...folder, userId }));
   const allScores = localRecords.scores.map((score) => ({ ...toScoreRecord(score), userId }));
+  const allSetlists = localRecords.setlists.map((setlist) => ({ ...setlist, userId }));
+  const allSetlistItems = localRecords.setlistItems.map((item) => ({ ...item, userId: item.userId || userId }));
   const folders = allFolders.filter(needsCloudMetadataSync);
   const scores = allScores.filter(needsCloudMetadataSync);
+  const setlists = allSetlists.filter(needsCloudMetadataSync);
+  const setlistItems = allSetlistItems.filter(needsCloudMetadataSync);
   const scoreById = new Map(allScores.map((score) => [score.id, score]));
   const pages = localRecords.pages
     .filter((page) => scoreById.has(page.scoreId))
@@ -4107,6 +4364,13 @@ async function uploadLocalChanges() {
   if (uploadedPages.length) {
     await upsertCloud(CLOUD_TABLES.pages, uploadedPages.map(toCloudPage));
   }
+  const syncedSetlists = setlists.length && (await upsertOptionalCloud(CLOUD_TABLES.setlists, setlists.map(toCloudSetlist)))
+    ? setlists
+    : [];
+  const syncedSetlistItems =
+    setlistItems.length && (await upsertOptionalCloud(CLOUD_TABLES.setlistItems, setlistItems.map(toCloudSetlistItem)))
+      ? setlistItems
+      : [];
 
   const deletedScoreIds = scores.filter((score) => score.deletedAt).map((score) => score.id);
   if (deletedScoreIds.length) {
@@ -4121,6 +4385,8 @@ async function uploadLocalChanges() {
     folders.map((folder) => ({ ...folder, syncStatus: SYNC_STATUS_SYNCED })),
     scores.map((score) => ({ ...score, syncStatus: SYNC_STATUS_SYNCED })),
     uploadedPages,
+    syncedSetlists.map((setlist) => ({ ...setlist, syncStatus: SYNC_STATUS_SYNCED })),
+    syncedSetlistItems.map((item) => ({ ...item, syncStatus: SYNC_STATUS_SYNCED })),
   );
 }
 
@@ -4131,16 +4397,22 @@ function needsCloudMetadataSync(record) {
 async function pullCloudChanges(options = {}) {
   const downloadImages = Boolean(options.downloadImages);
   const userId = state.session.user.id;
-  const [folderRows, scoreRows, pageRows] = await Promise.all([
+  const [folderRows, scoreRows, pageRows, setlistRows, setlistItemRows] = await Promise.all([
     queryCloudRows(CLOUD_TABLES.folders, { user_id: userId }),
     queryCloudRows(CLOUD_TABLES.scores, { user_id: userId }),
     queryCloudRows(CLOUD_TABLES.pages, { user_id: userId }, {
       orderBy: [["page_index", "asc"]],
     }),
+    queryOptionalCloudRows(CLOUD_TABLES.setlists, { user_id: userId }),
+    queryOptionalCloudRows(CLOUD_TABLES.setlistItems, { user_id: userId }, {
+      orderBy: [["position", "asc"]],
+    }),
   ]);
   const folders = folderRows.filter(isCloudRowActive);
   const scores = scoreRows.filter(isCloudRowActive);
   const pages = pageRows.filter(isCloudRowActive);
+  const setlists = setlistRows.filter(isCloudRowActive);
+  const setlistItems = setlistItemRows.filter(isCloudRowActive);
 
   const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
   const cloudPages = [];
@@ -4187,11 +4459,13 @@ async function pullCloudChanges(options = {}) {
     folders.map(fromCloudFolder),
     scores.map(fromCloudScore),
     cloudPages,
+    setlists.map(fromCloudSetlist),
+    setlistItems.map(fromCloudSetlistItem),
   );
 }
 
-function markLocalSynced(folders, scores, pages) {
-  return putCloudReadyRecords(folders, scores, pages);
+function markLocalSynced(folders, scores, pages, setlists = [], setlistItems = []) {
+  return putCloudReadyRecords(folders, scores, pages, setlists, setlistItems);
 }
 
 function isCloudRowActive(row) {
@@ -4209,6 +4483,24 @@ async function upsertCloud(table, rows) {
     );
     assertCloudResult(result);
   });
+}
+
+async function upsertOptionalCloud(table, rows) {
+  if (!rows.length) {
+    return true;
+  }
+
+  try {
+    await upsertCloud(table, rows);
+    return true;
+  } catch (error) {
+    if (isMissingCloudCollectionError(error)) {
+      console.warn(error);
+      setStatus("歌单云同步需要先在 CloudBase 创建 setlists 和 setlist_items 集合。", true);
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function queryCloudRows(collectionName, where, options = {}) {
@@ -4235,6 +4527,18 @@ async function queryCloudRows(collectionName, where, options = {}) {
   } while (batch.length === pageSize);
 
   return rows;
+}
+
+async function queryOptionalCloudRows(collectionName, where, options = {}) {
+  try {
+    return await queryCloudRows(collectionName, where, options);
+  } catch (error) {
+    if (isMissingCloudCollectionError(error)) {
+      console.warn(error);
+      return [];
+    }
+    throw error;
+  }
 }
 
 async function queryCloudRowsByIds(collectionName, field, values, where = {}, options = {}) {
@@ -4449,6 +4753,13 @@ async function getCloudFileTempUrl(fileID) {
   return url;
 }
 
+function isMissingCloudCollectionError(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes("collection") && (message.includes("not") || message.includes("exist") || message.includes("found"))
+  ) || message.includes("collection not exists") || message.includes("collection not exist") || message.includes("集合不存在");
+}
+
 async function downloadCloudFile(fileID, expectedSize = 0, fallbackType = "") {
   const url = await getCloudFileTempUrl(fileID);
   return downloadCloudFileFromUrl(url, expectedSize, fallbackType);
@@ -4628,6 +4939,33 @@ function toCloudPage(page) {
   };
 }
 
+function toCloudSetlist(setlist) {
+  return {
+    id: setlist.id,
+    user_id: setlist.userId,
+    name: setlist.name,
+    normalized_name: setlist.normalizedName,
+    date: setlist.date || "",
+    scene: setlist.scene || "",
+    created_at: setlist.createdAt,
+    updated_at: setlist.updatedAt,
+    deleted_at: setlist.deletedAt || null,
+  };
+}
+
+function toCloudSetlistItem(item) {
+  return {
+    id: item.id,
+    user_id: item.userId,
+    setlist_id: item.setlistId,
+    score_id: item.scoreId,
+    position: item.position,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+    deleted_at: item.deletedAt || null,
+  };
+}
+
 function fromCloudFolder(row) {
   return normalizeLocalFolderRecord({
     id: row.id,
@@ -4669,6 +5007,35 @@ function fromCloudPage(row) {
     type: row.type,
     size: row.size,
     storagePath: row.storage_path,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
+}
+
+function fromCloudSetlist(row) {
+  return normalizeLocalSetlistRecord({
+    id: row.id,
+    userId: row.user_id,
+    name: row.name,
+    normalizedName: row.normalized_name,
+    date: row.date,
+    scene: row.scene,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
+}
+
+function fromCloudSetlistItem(row) {
+  return normalizeLocalSetlistItemRecord({
+    id: row.id,
+    userId: row.user_id,
+    setlistId: row.setlist_id,
+    scoreId: row.score_id,
+    position: row.position,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -6300,6 +6667,345 @@ function createScoreTagList(tags = []) {
   return list;
 }
 
+function renderSetlists() {
+  if (!elements.setlistList) {
+    return;
+  }
+
+  elements.setlistList.replaceChildren();
+  elements.setlistSummary.textContent = `${state.setlists.length} 个歌单`;
+
+  if (!state.setlists.length) {
+    elements.setlistList.append(createEmptyState("还没有歌单", "创建合唱排练或弥撒演出的歌单。"));
+    refreshIcons();
+    return;
+  }
+
+  state.setlists.forEach((setlist) => {
+    elements.setlistList.append(createSetlistCard(setlist));
+  });
+  refreshIcons();
+}
+
+function createSetlistCard(setlist) {
+  const card = document.createElement("article");
+  card.className = "setlist-card";
+  card.addEventListener("click", () => openSetlistViewer(setlist.id));
+
+  const icon = document.createElement("span");
+  icon.className = "setlist-card-icon";
+  icon.append(createIcon("list-music"));
+
+  const body = document.createElement("div");
+  body.className = "setlist-card-body";
+  const title = document.createElement("h3");
+  title.textContent = setlist.name;
+  const meta = document.createElement("p");
+  const itemCount = getSetlistItems(setlist.id).length;
+  meta.textContent = [formatSetlistDate(setlist.date), setlist.scene, `${itemCount} 首歌谱`].filter(Boolean).join(" · ");
+  body.append(title, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "setlist-card-actions";
+  const manageButton = document.createElement("button");
+  manageButton.className = "more-button";
+  manageButton.type = "button";
+  manageButton.append(createIcon("square-pen"), document.createTextNode("管理"));
+  manageButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openSetlistDialog(setlist.id);
+  });
+  actions.append(manageButton);
+
+  card.append(icon, body, actions);
+  return card;
+}
+
+function getSetlistItems(setlistId) {
+  const activeScoreIds = new Set(state.scores.map((score) => score.id));
+  return state.setlistItems
+    .filter((item) => item.setlistId === setlistId && activeScoreIds.has(item.scoreId))
+    .sort((a, b) => a.position - b.position || new Date(a.createdAt) - new Date(b.createdAt));
+}
+
+function getSetlistScores(setlistId) {
+  const scoreById = new Map(state.scores.map((score) => [score.id, score]));
+  return getSetlistItems(setlistId)
+    .map((item) => scoreById.get(item.scoreId))
+    .filter(Boolean);
+}
+
+function openSetlistDialog(setlistId = "") {
+  const setlist = setlistId ? state.setlists.find((item) => item.id === setlistId) : null;
+  state.editingSetlistId = setlist?.id || "";
+  state.setlistDraftScoreIds = setlist ? getSetlistItems(setlist.id).map((item) => item.scoreId) : [];
+
+  elements.setlistForm.reset();
+  elements.setlistDialogTitle.textContent = setlist ? "管理歌单" : "创建歌单";
+  elements.setlistName.value = setlist?.name || "";
+  elements.setlistDate.value = setlist?.date || new Date().toISOString().slice(0, 10);
+  elements.setlistScene.value = setlist?.scene || "";
+  elements.setlistScoreSearch.value = "";
+  setSetlistDialogStatus("");
+  renderSetlistScorePicker();
+  renderSetlistOrderList();
+
+  if (typeof elements.setlistDialog.showModal === "function") {
+    elements.setlistDialog.showModal();
+  } else {
+    elements.setlistDialog.setAttribute("open", "");
+  }
+  refreshIcons();
+  requestAnimationFrame(() => elements.setlistName.focus());
+}
+
+function closeSetlistDialog() {
+  state.editingSetlistId = "";
+  state.setlistDraftScoreIds = [];
+  elements.setlistForm.reset();
+  elements.saveSetlistButton.disabled = false;
+  setSetlistDialogStatus("");
+  if (elements.setlistDialog.open) {
+    elements.setlistDialog.close();
+  } else {
+    elements.setlistDialog.removeAttribute("open");
+  }
+}
+
+function renderSetlistScorePicker() {
+  elements.setlistScorePicker.replaceChildren();
+  const query = normalizeText(elements.setlistScoreSearch.value || "");
+  const scores = state.scores.filter((score) => scoreMatchesQuery(score, query));
+
+  if (!scores.length) {
+    elements.setlistScorePicker.append(createEmptyState(query ? "没有找到歌谱" : "还没有歌谱", query ? "换个关键词试试。" : "先在谱夹中添加歌谱。"));
+    refreshIcons();
+    return;
+  }
+
+  const selectedIds = new Set(state.setlistDraftScoreIds);
+  scores.forEach((score) => {
+    const label = document.createElement("label");
+    label.className = "setlist-score-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.dataset.scoreId = score.id;
+    checkbox.checked = selectedIds.has(score.id);
+    const text = document.createElement("span");
+    text.textContent = score.name;
+    label.append(checkbox, text);
+    elements.setlistScorePicker.append(label);
+  });
+}
+
+function renderSetlistOrderList() {
+  elements.setlistOrderList.replaceChildren();
+  if (!state.setlistDraftScoreIds.length) {
+    elements.setlistOrderList.append(createEmptyState("还没有选择歌谱", "勾选左侧歌谱后可调整顺序。"));
+    refreshIcons();
+    return;
+  }
+
+  const scoreById = new Map(state.scores.map((score) => [score.id, score]));
+  state.setlistDraftScoreIds.forEach((scoreId, index) => {
+    const score = scoreById.get(scoreId);
+    if (!score) {
+      return;
+    }
+
+    const row = document.createElement("div");
+    row.className = "setlist-order-row";
+    const order = document.createElement("strong");
+    order.textContent = String(index + 1);
+    const name = document.createElement("span");
+    name.textContent = score.name;
+
+    const controls = document.createElement("div");
+    controls.className = "setlist-order-controls";
+    const upButton = createSetlistOrderButton("arrow-up", "上移", scoreId, "up", index === 0);
+    const downButton = createSetlistOrderButton("arrow-down", "下移", scoreId, "down", index === state.setlistDraftScoreIds.length - 1);
+    const removeButton = createSetlistOrderButton("x", "移除", scoreId, "remove", false);
+    controls.append(upButton, downButton, removeButton);
+
+    row.append(order, name, controls);
+    elements.setlistOrderList.append(row);
+  });
+  refreshIcons();
+}
+
+function createSetlistOrderButton(iconName, label, scoreId, action, disabled) {
+  const button = document.createElement("button");
+  button.className = "icon-button";
+  button.type = "button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.dataset.scoreId = scoreId;
+  button.dataset.setlistAction = action;
+  button.disabled = disabled;
+  button.append(createIcon(iconName));
+  return button;
+}
+
+function handleSetlistPickerChange(event) {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || !input.dataset.scoreId) {
+    return;
+  }
+
+  const scoreId = input.dataset.scoreId;
+  if (input.checked) {
+    if (!state.setlistDraftScoreIds.includes(scoreId)) {
+      state.setlistDraftScoreIds.push(scoreId);
+    }
+  } else {
+    state.setlistDraftScoreIds = state.setlistDraftScoreIds.filter((id) => id !== scoreId);
+  }
+  renderSetlistOrderList();
+}
+
+function handleSetlistOrderAction(event) {
+  const button = event.target.closest("button[data-setlist-action]");
+  if (!button) {
+    return;
+  }
+
+  const scoreId = button.dataset.scoreId;
+  const index = state.setlistDraftScoreIds.indexOf(scoreId);
+  if (index < 0) {
+    return;
+  }
+
+  if (button.dataset.setlistAction === "remove") {
+    state.setlistDraftScoreIds.splice(index, 1);
+  } else if (button.dataset.setlistAction === "up" && index > 0) {
+    [state.setlistDraftScoreIds[index - 1], state.setlistDraftScoreIds[index]] = [
+      state.setlistDraftScoreIds[index],
+      state.setlistDraftScoreIds[index - 1],
+    ];
+  } else if (button.dataset.setlistAction === "down" && index < state.setlistDraftScoreIds.length - 1) {
+    [state.setlistDraftScoreIds[index + 1], state.setlistDraftScoreIds[index]] = [
+      state.setlistDraftScoreIds[index],
+      state.setlistDraftScoreIds[index + 1],
+    ];
+  }
+
+  renderSetlistScorePicker();
+  renderSetlistOrderList();
+}
+
+async function saveSetlist(event) {
+  event.preventDefault();
+  const name = elements.setlistName.value.trim();
+  const date = elements.setlistDate.value;
+  const scene = elements.setlistScene.value.trim();
+  const scoreIds = state.setlistDraftScoreIds.filter((scoreId, index, list) => list.indexOf(scoreId) === index);
+
+  if (!name) {
+    setSetlistDialogStatus("请输入歌单名称。", true);
+    elements.setlistName.focus();
+    return;
+  }
+  if (!date) {
+    setSetlistDialogStatus("请选择歌单日期。", true);
+    elements.setlistDate.focus();
+    return;
+  }
+  if (!scoreIds.length) {
+    setSetlistDialogStatus("请至少选择一首歌谱。", true);
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const userId = state.session?.user?.id || null;
+  const existingSetlist = state.editingSetlistId
+    ? state.setlists.find((setlist) => setlist.id === state.editingSetlistId)
+    : null;
+  const setlistId = existingSetlist?.id || createId();
+  const existingItems = state.setlistItems.filter((item) => item.setlistId === setlistId);
+  const existingItemByScoreId = new Map(existingItems.map((item) => [item.scoreId, item]));
+  const nextScoreIdSet = new Set(scoreIds);
+  const setlist = {
+    ...(existingSetlist || {}),
+    id: setlistId,
+    userId,
+    name,
+    normalizedName: normalizeText(name),
+    date,
+    scene,
+    createdAt: existingSetlist?.createdAt || now,
+    updatedAt: now,
+    deletedAt: null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+  const items = scoreIds.map((scoreId, index) => {
+    const existingItem = existingItemByScoreId.get(scoreId);
+    return {
+      ...(existingItem || {}),
+      id: existingItem?.id || createId(),
+      setlistId,
+      scoreId,
+      userId,
+      position: index,
+      createdAt: existingItem?.createdAt || now,
+      updatedAt: now,
+      deletedAt: null,
+      syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+    };
+  });
+  const deletedItems = existingItems
+    .filter((item) => !nextScoreIdSet.has(item.scoreId))
+    .map((item) => ({
+      ...item,
+      userId,
+      deletedAt: now,
+      updatedAt: now,
+      syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+    }));
+
+  elements.saveSetlistButton.disabled = true;
+  setSetlistDialogStatus("正在保存...");
+
+  try {
+    await putSetlistWithItems(setlist, items, deletedItems);
+    closeSetlistDialog();
+    await loadScores();
+    setStatus(`《${setlist.name}》歌单已保存。`);
+    queueSync();
+  } catch (error) {
+    console.error(error);
+    setSetlistDialogStatus(error.message || "保存歌单失败，请稍后再试。", true);
+  } finally {
+    elements.saveSetlistButton.disabled = false;
+  }
+}
+
+function setSetlistDialogStatus(message, isError = false) {
+  elements.setlistDialogState.textContent = message || "";
+  elements.setlistDialogState.hidden = !message;
+  elements.setlistDialogState.classList.toggle("is-error", Boolean(isError));
+}
+
+function formatSetlistDate(date) {
+  if (!date) {
+    return "未设置日期";
+  }
+
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return date;
+  }
+  return parsed.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+}
+
+function getSetlistSortTime(setlist) {
+  const dateTime = setlist?.date ? new Date(`${setlist.date}T00:00:00`).getTime() : Number.NaN;
+  if (!Number.isNaN(dateTime)) {
+    return dateTime;
+  }
+  const updatedTime = new Date(setlist?.updatedAt || 0).getTime();
+  return Number.isNaN(updatedTime) ? 0 : updatedTime;
+}
+
 function createEmptyState(title, detail) {
   const empty = document.createElement("div");
   empty.className = "empty-state";
@@ -6324,6 +7030,8 @@ function openViewer(id) {
   resetViewerGestureState();
   setViewerZoom(VIEWER_MIN_ZOOM);
   state.currentViewerScoreId = score.id;
+  state.currentViewerSetlistId = null;
+  elements.viewerTitle.textContent = "查看歌谱";
   renderViewerPages(score);
 
   if (typeof elements.viewerDialog.showModal === "function") {
@@ -6345,10 +7053,50 @@ function openViewer(id) {
   });
 }
 
+function openSetlistViewer(id) {
+  const setlist = state.setlists.find((item) => item.id === id);
+  if (!setlist) {
+    return;
+  }
+
+  const virtualScore = createSetlistViewerScore(setlist);
+  if (!virtualScore.pages.length) {
+    setStatus("这个歌单里还没有可浏览的歌谱。", true);
+    return;
+  }
+
+  resetViewerGestureState();
+  setViewerZoom(VIEWER_MIN_ZOOM);
+  state.currentViewerScoreId = null;
+  state.currentViewerSetlistId = setlist.id;
+  elements.viewerTitle.textContent = setlist.name;
+  renderViewerPages(virtualScore);
+
+  if (typeof elements.viewerDialog.showModal === "function") {
+    elements.viewerDialog.showModal();
+  } else {
+    elements.viewerDialog.setAttribute("open", "");
+  }
+
+  document.body.classList.add("viewer-open");
+
+  if (!state.viewerHistoryActive) {
+    window.history.pushState({ setlistViewer: id }, "");
+    state.viewerHistoryActive = true;
+  }
+
+  requestAnimationFrame(() => {
+    elements.viewerPages.scrollTo({ left: 0, top: 0 });
+    prepareSetlistViewerPages(setlist.id);
+  });
+}
+
 function closeViewer(options = {}) {
   const shouldReturnHistory = state.viewerHistoryActive && !options.fromHistory;
   state.viewerHistoryActive = false;
   state.currentViewerScoreId = null;
+  state.currentViewerSetlistId = null;
+  elements.viewerTitle.textContent = "查看歌谱";
 
   if (elements.viewerDialog.open) {
     elements.viewerDialog.close();
@@ -6370,6 +7118,53 @@ function resetViewerGestureState() {
   state.viewerTapStart = null;
   state.viewerLastTap = null;
   elements.viewerPages.classList.remove("is-dragging", "is-pinching", "has-multiple-pages", "is-horizontal-mode");
+}
+
+function createSetlistViewerScore(setlist) {
+  let pageIndex = 0;
+  const pages = getSetlistScores(setlist.id).flatMap((score) =>
+    [...(score.pages || [])]
+      .sort((a, b) => a.pageIndex - b.pageIndex)
+      .map((page) => ({
+        ...page,
+        pageIndex: pageIndex++,
+      })),
+  );
+
+  return {
+    id: `setlist:${setlist.id}`,
+    name: setlist.name,
+    pages,
+  };
+}
+
+async function prepareSetlistViewerPages(setlistId) {
+  try {
+    const scores = getSetlistScores(setlistId);
+    if (!scores.length) {
+      return;
+    }
+
+    if (await ensureCloudMediaReady()) {
+      await runWithConcurrency(scores, 2, (score) => refreshScorePagesFromCloud(score.id));
+      const setlist = state.setlists.find((item) => item.id === setlistId);
+      if (setlist && elements.viewerDialog.open && state.currentViewerSetlistId === setlistId) {
+        const previousScrollTop = elements.viewerPages.scrollTop;
+        const previousScrollLeft = elements.viewerPages.scrollLeft;
+        const virtualScore = createSetlistViewerScore(setlist);
+        renderViewerPages(virtualScore);
+        requestAnimationFrame(() => {
+          elements.viewerPages.scrollTo({ top: previousScrollTop, left: previousScrollLeft });
+        });
+      }
+    }
+
+    const setlist = state.setlists.find((item) => item.id === setlistId);
+    const virtualScore = setlist ? createSetlistViewerScore(setlist) : null;
+    await hydrateScorePages(virtualScore?.pages || []);
+  } catch (error) {
+    console.warn(error);
+  }
 }
 
 async function deleteScore(id) {

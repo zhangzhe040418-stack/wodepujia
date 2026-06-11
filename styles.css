@@ -580,7 +580,7 @@ noscript {
   bottom: 0;
   z-index: 14;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   min-height: calc(58px + env(safe-area-inset-bottom));
   padding: 4px 12px calc(4px + env(safe-area-inset-bottom));
@@ -590,6 +590,221 @@ noscript {
   box-shadow: 0 -10px 28px rgba(23, 33, 31, 0.1);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
+}
+
+.setlist-screen {
+  min-height: calc(100vh - 80px);
+  min-height: calc(100dvh - 80px);
+}
+
+.setlist-panel {
+  display: grid;
+  gap: 14px;
+  width: min(760px, 100%);
+  margin: 0 auto;
+}
+
+.setlist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.setlist-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.22rem;
+  letter-spacing: 0;
+}
+
+.setlist-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.setlist-create-button {
+  min-height: 42px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.setlist-list {
+  display: grid;
+  gap: 10px;
+}
+
+.setlist-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(23, 33, 31, 0.07);
+  cursor: pointer;
+}
+
+.setlist-card:focus-within,
+.setlist-card:hover {
+  border-color: rgba(15, 118, 110, 0.28);
+}
+
+.setlist-card-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.setlist-card-body {
+  min-width: 0;
+}
+
+.setlist-card-body h3 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-card-body p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-card-actions {
+  display: grid;
+  place-items: center;
+}
+
+.setlist-dialog {
+  width: min(720px, calc(100vw - 24px));
+}
+
+.setlist-surface {
+  width: 100%;
+  max-height: min(88vh, 760px);
+  max-height: min(88dvh, 760px);
+  overflow-y: auto;
+}
+
+.setlist-field {
+  margin: 0;
+}
+
+.setlist-search {
+  margin: 2px 0 0;
+}
+
+.setlist-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.setlist-editor-section {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.setlist-editor-section h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 900;
+}
+
+.setlist-score-picker,
+.setlist-order-list {
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: none;
+}
+
+.setlist-score-picker::-webkit-scrollbar,
+.setlist-order-list::-webkit-scrollbar {
+  display: none;
+}
+
+.setlist-score-option,
+.setlist-order-row {
+  display: grid;
+  align-items: center;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.setlist-score-option {
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.setlist-score-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-order-row {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.setlist-order-row strong {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+}
+
+.setlist-order-row > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-order-controls {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.setlist-order-controls .icon-button {
+  width: 30px;
+  height: 30px;
 }
 
 .bottom-nav-button {
@@ -1997,6 +2212,9 @@ body.preferences-screen-open .fab-button {
 :root[data-theme="dark"] .account-button,
 :root[data-theme="dark"] .searchbar,
 :root[data-theme="dark"] .score-card,
+:root[data-theme="dark"] .setlist-card,
+:root[data-theme="dark"] .setlist-score-option,
+:root[data-theme="dark"] .setlist-order-row,
 :root[data-theme="dark"] .mine-strip-button,
 :root[data-theme="dark"] .mine-auth-panel,
 :root[data-theme="dark"] .field input,
@@ -2024,6 +2242,12 @@ body.preferences-screen-open .fab-button {
 :root[data-theme="dark"] .profile-screen {
   background-color: var(--app-bg);
   background-image: linear-gradient(180deg, #111c1a 0%, #0b1211 58%, #0d1816 100%);
+}
+
+:root[data-theme="dark"] .setlist-card-icon,
+:root[data-theme="dark"] .setlist-order-row strong {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 :root[data-theme="dark"] .score-preview {
@@ -2100,6 +2324,10 @@ body.preferences-screen-open .fab-button {
     padding: 14px 10px 108px;
   }
 
+  .setlist-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
   .upload-tool {
     position: static;
   }
@@ -2145,6 +2373,24 @@ body.preferences-screen-open .fab-button {
 
   .workspace {
     padding: 14px 14px 112px;
+  }
+
+  .setlist-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .setlist-create-button {
+    width: 100%;
+  }
+
+  .setlist-card {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .setlist-card-actions {
+    grid-column: 1 / -1;
+    justify-items: end;
   }
 
   .source-group {

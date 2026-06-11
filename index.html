@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=75" />
+    <link rel="stylesheet" href="styles.css?v=76" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=75"></script>
+    <script defer charset="UTF-8" src="app.js?v=76"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -88,6 +88,22 @@
           </div>
 
           <div class="score-grid" id="scoreGrid" aria-live="polite"></div>
+        </section>
+      </main>
+
+      <main class="workspace setlist-screen" id="setlistScreen" hidden>
+        <section class="setlist-panel" aria-labelledby="setlistTitle">
+          <div class="setlist-head">
+            <div>
+              <h2 id="setlistTitle">歌单</h2>
+              <p id="setlistSummary">0 个歌单</p>
+            </div>
+            <button class="primary-button setlist-create-button" id="createSetlistButton" type="button">
+              <i data-lucide="list-plus" aria-hidden="true"></i>
+              <span>创建歌单</span>
+            </button>
+          </div>
+          <div class="setlist-list" id="setlistList" aria-live="polite"></div>
         </section>
       </main>
 
@@ -286,6 +302,10 @@
         <button class="bottom-nav-button is-active" id="navLibraryButton" type="button" aria-current="page">
           <i data-lucide="folder-open" aria-hidden="true"></i>
           <span>谱夹</span>
+        </button>
+        <button class="bottom-nav-button" id="navSetlistsButton" type="button">
+          <i data-lucide="list-music" aria-hidden="true"></i>
+          <span>歌单</span>
         </button>
         <button class="bottom-nav-button" id="navMineButton" type="button">
           <i data-lucide="user-round" aria-hidden="true"></i>
@@ -610,6 +630,55 @@
       </div>
     </dialog>
 
+    <dialog class="share-dialog setlist-dialog" id="setlistDialog" aria-labelledby="setlistDialogTitle">
+      <form class="share-surface setlist-surface" id="setlistForm">
+        <div class="auth-head">
+          <h2 id="setlistDialogTitle">创建歌单</h2>
+          <button class="icon-button" id="closeSetlistButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+
+        <label class="field setlist-field">
+          <span>歌单名称</span>
+          <input id="setlistName" name="setlistName" type="text" maxlength="60" autocomplete="off" required />
+        </label>
+        <label class="field setlist-field">
+          <span>日期</span>
+          <input id="setlistDate" name="setlistDate" type="date" required />
+        </label>
+        <label class="field setlist-field">
+          <span>场景</span>
+          <input id="setlistScene" name="setlistScene" type="text" maxlength="40" autocomplete="off" placeholder="例如 合唱团排练、主日弥撒" />
+        </label>
+
+        <label class="share-search setlist-search">
+          <i data-lucide="search" aria-hidden="true"></i>
+          <input id="setlistScoreSearch" type="search" placeholder="搜索要加入歌单的歌谱" autocomplete="off" />
+        </label>
+
+        <div class="setlist-editor-grid">
+          <section class="setlist-editor-section" aria-labelledby="setlistPickerTitle">
+            <h3 id="setlistPickerTitle">选择歌谱</h3>
+            <div class="setlist-score-picker" id="setlistScorePicker"></div>
+          </section>
+          <section class="setlist-editor-section" aria-labelledby="setlistOrderTitle">
+            <h3 id="setlistOrderTitle">歌单顺序</h3>
+            <div class="setlist-order-list" id="setlistOrderList"></div>
+          </section>
+        </div>
+
+        <p class="share-dialog-status" id="setlistDialogState" role="status" aria-live="polite" hidden></p>
+        <div class="auth-actions score-edit-actions">
+          <button class="cancel-delete-button" id="cancelSetlistButton" type="button">取消</button>
+          <button class="confirm-delete-button folder-save-button" id="saveSetlistButton" type="submit">
+            <i data-lucide="save" aria-hidden="true"></i>
+            <span>保存歌单</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog class="viewer-dialog" id="viewerDialog" aria-label="歌谱图片查看">
       <div class="viewer-surface">
         <div class="viewer-topbar">
@@ -617,7 +686,7 @@
             <i data-lucide="chevron-left" aria-hidden="true"></i>
             <span>返回</span>
           </button>
-          <strong>查看歌谱</strong>
+          <strong id="viewerTitle">查看歌谱</strong>
           <span aria-hidden="true"></span>
         </div>
         <div class="viewer-pages" id="viewerPages"></div>
