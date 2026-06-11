@@ -1,5 +1,5 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
@@ -105,6 +105,8 @@ const state = {
   appTouchY: 0,
   deleteDialogResolve: null,
   verifyDialogResolve: null,
+  scoreActionId: "",
+  scoreEditId: "",
   viewerZoom: VIEWER_MIN_ZOOM,
   viewerPointers: new Map(),
   viewerPinchStartDistance: 0,
@@ -256,6 +258,24 @@ function bindElements() {
   elements.folderName = document.querySelector("#folderName");
   elements.cancelFolderButton = document.querySelector("#cancelFolderButton");
   elements.saveFolderButton = document.querySelector("#saveFolderButton");
+  elements.scoreActionDialog = document.querySelector("#scoreActionDialog");
+  elements.scoreActionTitle = document.querySelector("#scoreActionTitle");
+  elements.scoreActionEditButton = document.querySelector("#scoreActionEditButton");
+  elements.scoreActionMoveButton = document.querySelector("#scoreActionMoveButton");
+  elements.scoreActionDeleteButton = document.querySelector("#scoreActionDeleteButton");
+  elements.closeScoreActionButton = document.querySelector("#closeScoreActionButton");
+  elements.scoreEditDialog = document.querySelector("#scoreEditDialog");
+  elements.scoreEditForm = document.querySelector("#scoreEditForm");
+  elements.scoreEditState = document.querySelector("#scoreEditState");
+  elements.scoreEditName = document.querySelector("#scoreEditName");
+  elements.scoreEditFolder = document.querySelector("#scoreEditFolder");
+  elements.scoreEditTags = document.querySelector("#scoreEditTags");
+  elements.scoreEditKey = document.querySelector("#scoreEditKey");
+  elements.scoreEditUsage = document.querySelector("#scoreEditUsage");
+  elements.scoreEditNotes = document.querySelector("#scoreEditNotes");
+  elements.closeScoreEditButton = document.querySelector("#closeScoreEditButton");
+  elements.cancelScoreEditButton = document.querySelector("#cancelScoreEditButton");
+  elements.saveScoreEditButton = document.querySelector("#saveScoreEditButton");
   elements.closeAddButton = document.querySelector("#closeAddButton");
   elements.scoreForm = document.querySelector("#scoreForm");
   elements.scoreName = document.querySelector("#scoreName");
@@ -413,6 +433,43 @@ function bindEvents() {
   elements.folderDialog.addEventListener("click", (event) => {
     if (event.target === elements.folderDialog) {
       closeFolderDialog();
+    }
+  });
+  elements.closeScoreActionButton?.addEventListener("click", closeScoreActionDialog);
+  elements.scoreActionEditButton?.addEventListener("click", () => {
+    const scoreId = state.scoreActionId;
+    closeScoreActionDialog();
+    openScoreEditDialog(scoreId);
+  });
+  elements.scoreActionMoveButton?.addEventListener("click", () => {
+    const scoreId = state.scoreActionId;
+    closeScoreActionDialog();
+    openScoreEditDialog(scoreId, { focus: "folder" });
+  });
+  elements.scoreActionDeleteButton?.addEventListener("click", () => {
+    const scoreId = state.scoreActionId;
+    closeScoreActionDialog();
+    deleteScore(scoreId);
+  });
+  elements.scoreActionDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeScoreActionDialog();
+  });
+  elements.scoreActionDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.scoreActionDialog) {
+      closeScoreActionDialog();
+    }
+  });
+  elements.scoreEditForm?.addEventListener("submit", saveScoreEdit);
+  elements.closeScoreEditButton?.addEventListener("click", closeScoreEditDialog);
+  elements.cancelScoreEditButton?.addEventListener("click", closeScoreEditDialog);
+  elements.scoreEditDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeScoreEditDialog();
+  });
+  elements.scoreEditDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.scoreEditDialog) {
+      closeScoreEditDialog();
     }
   });
   elements.closeAddButton.addEventListener("click", closeAddScreen);
@@ -773,6 +830,93 @@ function closeFolderDialog() {
 
   elements.folderForm.reset();
   elements.saveFolderButton.disabled = false;
+}
+
+function openScoreActionDialog(scoreId) {
+  const score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    return;
+  }
+
+  state.scoreActionId = scoreId;
+  elements.scoreActionTitle.textContent = `《${score.name}》`;
+  if (typeof elements.scoreActionDialog.showModal === "function") {
+    elements.scoreActionDialog.showModal();
+  } else {
+    elements.scoreActionDialog.setAttribute("open", "");
+  }
+  refreshIcons();
+}
+
+function closeScoreActionDialog() {
+  state.scoreActionId = "";
+  if (elements.scoreActionDialog.open) {
+    elements.scoreActionDialog.close();
+  } else {
+    elements.scoreActionDialog.removeAttribute("open");
+  }
+}
+
+function openScoreEditDialog(scoreId, options = {}) {
+  const score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    return;
+  }
+
+  state.scoreEditId = scoreId;
+  populateScoreEditFolders(score.folderId);
+  elements.scoreEditName.value = score.name || "";
+  elements.scoreEditTags.value = formatTagsInput(score.tags);
+  elements.scoreEditKey.value = score.keySignature || "";
+  elements.scoreEditUsage.value = score.usage || "";
+  elements.scoreEditNotes.value = score.notes || "";
+  setScoreEditStatus(options.focus === "folder" ? "请选择要移动到的文件夹后保存。" : "可修改名称、文件夹和标签。");
+
+  if (typeof elements.scoreEditDialog.showModal === "function") {
+    elements.scoreEditDialog.showModal();
+  } else {
+    elements.scoreEditDialog.setAttribute("open", "");
+  }
+
+  refreshIcons();
+  requestAnimationFrame(() => {
+    (options.focus === "folder" ? elements.scoreEditFolder : elements.scoreEditName).focus();
+  });
+}
+
+function closeScoreEditDialog() {
+  state.scoreEditId = "";
+  elements.scoreEditForm.reset();
+  elements.saveScoreEditButton.disabled = false;
+  if (elements.scoreEditDialog.open) {
+    elements.scoreEditDialog.close();
+  } else {
+    elements.scoreEditDialog.removeAttribute("open");
+  }
+}
+
+function populateScoreEditFolders(selectedFolderId = "") {
+  elements.scoreEditFolder.replaceChildren();
+  const rootOption = document.createElement("option");
+  rootOption.value = "";
+  rootOption.textContent = "谱夹";
+  elements.scoreEditFolder.append(rootOption);
+
+  state.folders
+    .filter((folder) => !folder.deletedAt)
+    .forEach((folder) => {
+      const option = document.createElement("option");
+      option.value = folder.id;
+      option.textContent = folder.name;
+      elements.scoreEditFolder.append(option);
+    });
+
+  elements.scoreEditFolder.value = selectedFolderId || "";
+}
+
+function setScoreEditStatus(message, isError = false) {
+  elements.scoreEditState.textContent = message;
+  elements.scoreEditState.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
 
 function queueCloudConnect() {
@@ -2378,7 +2522,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=74");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=75");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2746,6 +2890,9 @@ function openDatabase() {
       if (!scoreStore.indexNames.contains("syncStatus")) {
         scoreStore.createIndex("syncStatus", "syncStatus", { unique: false });
       }
+      if (request.oldVersion < 4) {
+        migrateScoreMetadataFields(scoreStore);
+      }
 
       if (!db.objectStoreNames.contains(FOLDER_STORE_NAME)) {
         const folderStore = db.createObjectStore(FOLDER_STORE_NAME, { keyPath: "id" });
@@ -2774,6 +2921,27 @@ function openDatabase() {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+function migrateScoreMetadataFields(scoreStore) {
+  const request = scoreStore.openCursor();
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) {
+      return;
+    }
+
+    const record = { ...cursor.value };
+    const nextRecord = {
+      ...record,
+      tags: normalizeTags(record.tags),
+      keySignature: String(record.keySignature || record.key_signature || "").trim(),
+      usage: String(record.usage || "").trim(),
+      notes: String(record.notes || "").trim(),
+    };
+    cursor.update(nextRecord);
+    cursor.continue();
+  };
 }
 
 async function migrateNestedScorePages(scores) {
@@ -2842,6 +3010,10 @@ function normalizeLocalScoreRecord(score) {
     folderId: score.folderId || null,
     name,
     normalizedName: normalizeText(score.normalizedName || name),
+    tags: normalizeTags(score.tags),
+    keySignature: String(score.keySignature || score.key_signature || "").trim(),
+    usage: String(score.usage || "").trim(),
+    notes: String(score.notes || "").trim(),
     createdAt: score.createdAt || new Date().toISOString(),
     updatedAt: score.updatedAt || score.createdAt || new Date().toISOString(),
     deletedAt: score.deletedAt || null,
@@ -3309,6 +3481,10 @@ async function saveScore(event) {
     name,
     normalizedName: normalizeText(name),
     folderId: state.currentFolderId || null,
+    tags: [],
+    keySignature: "",
+    usage: "",
+    notes: "",
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
@@ -3349,6 +3525,69 @@ async function saveScore(event) {
     setStatus(getStorageSaveErrorMessage(error), true);
   } finally {
     updateSaveState();
+  }
+}
+
+async function saveScoreEdit(event) {
+  event.preventDefault();
+  const score = state.scores.find((item) => item.id === state.scoreEditId);
+  if (!score) {
+    closeScoreEditDialog();
+    return;
+  }
+
+  const name = elements.scoreEditName.value.trim();
+  const tags = parseTagsInput(elements.scoreEditTags.value);
+  const longTags = getTooLongTags(tags);
+  if (!name) {
+    setScoreEditStatus("请输入歌谱名。", true);
+    elements.scoreEditName.focus();
+    return;
+  }
+  if (hasDuplicateScoreName(name, score.id)) {
+    setScoreEditStatus("已存在同名歌谱。", true);
+    elements.scoreEditName.focus();
+    return;
+  }
+  if (longTags.length) {
+    setScoreEditStatus(`标签“${longTags[0]}”超过6个字。`, true);
+    elements.scoreEditTags.focus();
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const userId = score.userId || state.session?.user?.id || null;
+  const updatedScore = {
+    ...toScoreRecord(score),
+    userId,
+    name,
+    normalizedName: normalizeText(name),
+    folderId: elements.scoreEditFolder.value || null,
+    tags,
+    keySignature: elements.scoreEditKey.value.trim(),
+    usage: elements.scoreEditUsage.value.trim(),
+    notes: elements.scoreEditNotes.value.trim(),
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+
+  elements.saveScoreEditButton.disabled = true;
+  setScoreEditStatus("正在保存...");
+
+  try {
+    await putScore(updatedScore);
+    closeScoreEditDialog();
+    await loadScores();
+    if (userId && state.cloudReady) {
+      queueScoreCloudUpload(updatedScore.id, `《${updatedScore.name}》信息已保存，正在同步云端。`);
+    } else {
+      setStatus(`《${updatedScore.name}》信息已保存。`);
+    }
+  } catch (error) {
+    console.error(error);
+    setScoreEditStatus(getErrorMessage(error) || "保存失败，请稍后再试。", true);
+  } finally {
+    elements.saveScoreEditButton.disabled = false;
   }
 }
 
@@ -4363,6 +4602,10 @@ function toCloudScore(score) {
     folder_id: score.folderId || null,
     name: score.name,
     normalized_name: score.normalizedName,
+    tags: normalizeTags(score.tags),
+    key_signature: score.keySignature || "",
+    usage: score.usage || "",
+    notes: score.notes || "",
     created_at: score.createdAt,
     updated_at: score.updatedAt,
     deleted_at: score.deletedAt || null,
@@ -4405,6 +4648,10 @@ function fromCloudScore(row) {
     folderId: row.folder_id,
     name: row.name,
     normalizedName: row.normalized_name,
+    tags: row.tags,
+    keySignature: row.key_signature,
+    usage: row.usage,
+    notes: row.notes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -4513,7 +4760,7 @@ function renderShareList() {
     const folderScores = state.scores.filter((score) => score.folderId === folder.id);
     const folderMatches = query && folder.normalizedName.includes(query);
     const visibleFolderScores = query && !folderMatches
-      ? folderScores.filter((score) => score.normalizedName.includes(query))
+      ? folderScores.filter((score) => scoreMatchesQuery(score, query))
       : folderScores;
 
     if (query && !folderMatches && !visibleFolderScores.length) {
@@ -4526,7 +4773,7 @@ function renderShareList() {
 
   state.scores
     .filter((score) => !score.folderId)
-    .filter((score) => !query || score.normalizedName.includes(query))
+    .filter((score) => scoreMatchesQuery(score, query))
     .forEach((score) => {
       elements.shareList.append(createShareScoreOption(score));
       visibleCount += 1;
@@ -5264,6 +5511,10 @@ function createScoreShareItem(score, sharedFolderId) {
     score_id: score.id,
     score_name: score.name,
     score_normalized_name: score.normalizedName,
+    tags: normalizeTags(score.tags),
+    key_signature: score.keySignature || "",
+    usage: score.usage || "",
+    notes: score.notes || "",
     pages,
   };
 }
@@ -5519,6 +5770,10 @@ async function importSharedScoreSnapshot(scoreItem, userId, folderId, existingNa
       id: scoreItem.score_id,
       name: scoreItem.score_name || "未命名歌谱",
       source_share_id: scoreItem.share_id,
+      tags: scoreItem.tags,
+      key_signature: scoreItem.key_signature,
+      usage: scoreItem.usage,
+      notes: scoreItem.notes,
     },
     (scoreItem.pages || []).map((page) => ({
       score_id: scoreItem.score_id,
@@ -5560,6 +5815,10 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
       name: sharedScore.name || "未命名歌谱",
       normalizedName,
       folderId,
+      tags: normalizeTags(sharedScore.tags),
+      keySignature: sharedScore.key_signature || sharedScore.keySignature || "",
+      usage: sharedScore.usage || "",
+      notes: sharedScore.notes || "",
       sourceShareId,
       sourceScoreId,
       createdAt: now,
@@ -5802,13 +6061,15 @@ function updateSaveState() {
   elements.saveButton.disabled = !elements.scoreName.value.trim() || !state.pendingPages.length;
 }
 
-function hasDuplicateScoreName(name) {
+function hasDuplicateScoreName(name, excludeScoreId = "") {
   const normalizedName = normalizeText(name);
   if (!normalizedName) {
     return false;
   }
 
-  return state.scores.some((score) => !score.deletedAt && normalizeText(score.name || score.normalizedName) === normalizedName);
+  return state.scores.some(
+    (score) => !score.deletedAt && score.id !== excludeScoreId && normalizeText(score.name || score.normalizedName) === normalizedName,
+  );
 }
 
 function hasDuplicateFolderName(name) {
@@ -5830,7 +6091,7 @@ function renderScores() {
   const visibleFolders = inFolder ? [] : state.folders;
   const searchableScores = normalizedQuery && !inFolder ? state.scores : visibleScores;
   const filteredScores = normalizedQuery
-    ? searchableScores.filter((score) => score.normalizedName.includes(normalizedQuery))
+    ? searchableScores.filter((score) => scoreMatchesQuery(score, normalizedQuery))
     : visibleScores;
   const filteredFolders = normalizedQuery
     ? visibleFolders.filter((folder) => folder.normalizedName.includes(normalizedQuery))
@@ -6000,21 +6261,43 @@ function createScoreCard(score) {
   detail.className = "score-detail";
   detail.textContent = `${score.pages.length} 页`;
 
+  const tags = createScoreTagList(score.tags);
+
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
-  const deleteButton = document.createElement("button");
-  deleteButton.className = "danger-button";
-  deleteButton.type = "button";
-  deleteButton.append(createIcon("trash-2"), document.createTextNode("删除"));
-  deleteButton.addEventListener("click", (event) => {
+  const moreButton = document.createElement("button");
+  moreButton.className = "more-button";
+  moreButton.type = "button";
+  moreButton.append(createIcon("ellipsis"), document.createTextNode("更多"));
+  moreButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    deleteScore(score.id);
+    openScoreActionDialog(score.id);
   });
 
-  actions.append(deleteButton);
-  card.append(previewButton, name, detail, actions);
+  actions.append(moreButton);
+  card.append(previewButton, name, detail);
+  if (tags) {
+    card.append(tags);
+  }
+  card.append(actions);
   return card;
+}
+
+function createScoreTagList(tags = []) {
+  const normalizedTags = normalizeTags(tags).slice(0, 2);
+  if (!normalizedTags.length) {
+    return null;
+  }
+
+  const list = document.createElement("div");
+  list.className = "score-tags";
+  normalizedTags.forEach((tag) => {
+    const badge = document.createElement("span");
+    badge.textContent = tag;
+    list.append(badge);
+  });
+  return list;
 }
 
 function createEmptyState(title, detail) {
@@ -6723,6 +7006,50 @@ function normalizeText(value) {
     .replace(/\s+/g, " ")
     .trim()
     .toLocaleLowerCase("zh-CN");
+}
+
+function normalizeTags(value) {
+  const source = Array.isArray(value) ? value : String(value || "").split(/[,\uFF0C\u3001;\uFF1B\s]+/);
+  const seen = new Set();
+  const tags = [];
+
+  source.forEach((item) => {
+    const tag = String(item || "").trim();
+    const key = normalizeText(tag);
+    if (!key || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    tags.push(tag);
+  });
+
+  return tags;
+}
+
+function parseTagsInput(value) {
+  return normalizeTags(value);
+}
+
+function getTooLongTags(tags) {
+  return tags.filter((tag) => Array.from(tag).length > 6);
+}
+
+function formatTagsInput(tags) {
+  return normalizeTags(tags).join("，");
+}
+
+function getScoreSearchText(score) {
+  return normalizeText([
+    score?.name,
+    ...(score?.tags || []),
+    score?.keySignature,
+    score?.usage,
+    score?.notes,
+  ].join(" "));
+}
+
+function scoreMatchesQuery(score, normalizedQuery) {
+  return !normalizedQuery || getScoreSearchText(score).includes(normalizedQuery);
 }
 
 function createId() {
