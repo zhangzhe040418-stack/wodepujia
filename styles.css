@@ -24,6 +24,24 @@
     sans-serif;
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1211;
+  --app-bg: #0b1211;
+  --surface: #121d1b;
+  --surface-strong: #172421;
+  --ink: #edf6f3;
+  --muted: #9bb0aa;
+  --line: #2b3d39;
+  --accent: #1ba89b;
+  --accent-strong: #6ee7d8;
+  --accent-soft: #12342f;
+  --blue: #8bb4ff;
+  --warn: #f8c27a;
+  --danger: #ff8a7e;
+  --shadow: 0 16px 45px rgba(0, 0, 0, 0.34);
+}
+
 html {
   width: 100%;
   height: 100%;
@@ -76,6 +94,18 @@ body {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+}
+
+:root[data-theme="dark"] body {
+  background:
+    linear-gradient(180deg, rgba(11, 18, 17, 0.96), rgba(13, 24, 22, 0.96)),
+    repeating-linear-gradient(
+      180deg,
+      transparent 0,
+      transparent 27px,
+      rgba(110, 231, 216, 0.07) 28px,
+      transparent 29px
+    );
 }
 
 body.viewer-open {
@@ -1861,6 +1891,99 @@ body.preferences-screen-open .fab-button {
   width: calc(100vw * var(--viewer-zoom));
   height: calc((100vh - var(--viewer-topbar-height)) * var(--viewer-zoom));
   height: calc((100dvh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+}
+
+:root[data-theme="dark"] .topbar,
+:root[data-theme="dark"] .bottom-nav,
+:root[data-theme="dark"] .viewer-topbar {
+  border-color: rgba(43, 61, 57, 0.92);
+  background: rgba(18, 29, 27, 0.94);
+}
+
+:root[data-theme="dark"] .account-button,
+:root[data-theme="dark"] .searchbar,
+:root[data-theme="dark"] .score-card,
+:root[data-theme="dark"] .mine-strip-button,
+:root[data-theme="dark"] .mine-auth-panel,
+:root[data-theme="dark"] .field input,
+:root[data-theme="dark"] .field select,
+:root[data-theme="dark"] .profile-contact-row,
+:root[data-theme="dark"] .profile-birthday-button,
+:root[data-theme="dark"] .auth-surface,
+:root[data-theme="dark"] .share-surface,
+:root[data-theme="dark"] .choice-surface,
+:root[data-theme="dark"] .folder-surface,
+:root[data-theme="dark"] .share-option,
+:root[data-theme="dark"] .share-search,
+:root[data-theme="dark"] .choice-button,
+:root[data-theme="dark"] .source-button,
+:root[data-theme="dark"] .pending-area,
+:root[data-theme="dark"] .pending-thumb,
+:root[data-theme="dark"] .confirm-surface,
+:root[data-theme="dark"] .empty-state,
+:root[data-theme="dark"] .preference-choice-button {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .profile-screen {
+  background-color: var(--app-bg);
+  background-image: linear-gradient(180deg, #111c1a 0%, #0b1211 58%, #0d1816 100%);
+}
+
+:root[data-theme="dark"] .score-preview {
+  border-color: #314541;
+  background: #f8fbfa;
+}
+
+:root[data-theme="dark"] .folder-preview {
+  border-color: rgba(244, 199, 118, 0.44);
+  background: linear-gradient(180deg, #f8df9f, #c88b2e);
+}
+
+:root[data-theme="dark"] .mine-strip-button:hover,
+:root[data-theme="dark"] .mine-strip-button:focus-visible,
+:root[data-theme="dark"] .choice-button:hover,
+:root[data-theme="dark"] .choice-button:focus-visible,
+:root[data-theme="dark"] .source-button:hover,
+:root[data-theme="dark"] .source-button:focus-visible,
+:root[data-theme="dark"] .preference-choice-button:hover,
+:root[data-theme="dark"] .preference-choice-button:focus-visible,
+:root[data-theme="dark"] .preference-choice-button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .preference-choice-icon,
+:root[data-theme="dark"] .mine-strip-icon {
+  background: #163d37;
+}
+
+:root[data-theme="dark"] .danger-button,
+:root[data-theme="dark"] .confirm-mark {
+  background: rgba(255, 138, 126, 0.16);
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .cancel-delete-button,
+:root[data-theme="dark"] .share-select-all,
+:root[data-theme="dark"] .share-code-panel,
+:root[data-theme="dark"] .profile-link-button {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .copy-code-button {
+  border-color: rgba(110, 231, 216, 0.28);
+  background: rgba(18, 29, 27, 0.88);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .viewer-dialog,
+:root[data-theme="dark"] .viewer-dialog::backdrop,
+:root[data-theme="dark"] .viewer-surface,
+:root[data-theme="dark"] .viewer-pages {
+  background: #0b1211;
 }
 
 [data-lucide],

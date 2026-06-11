@@ -30,6 +30,9 @@ const PROFILE_COLLECTION_NAME = "profiles";
 const VIEWER_MODE_STORAGE_KEY = "my-score-folder-viewer-mode";
 const VIEWER_MODE_PORTRAIT = "portrait";
 const VIEWER_MODE_LANDSCAPE = "landscape";
+const THEME_STORAGE_KEY = "my-score-folder-theme";
+const THEME_LIGHT = "light";
+const THEME_DARK = "dark";
 const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
@@ -84,6 +87,7 @@ const state = {
   activeTab: "library",
   currentFolderId: null,
   viewerMode: readViewerModePreference(),
+  themeMode: readThemePreference(),
   authMode: "guest",
   authRegisterMethod: "phone",
   authRegisterAccount: "",
@@ -116,6 +120,7 @@ const state = {
 const elements = {};
 
 document.addEventListener("DOMContentLoaded", async () => {
+  applyThemePreference(state.themeMode);
   bindElements();
   bindEvents();
   registerServiceWorker();
@@ -152,6 +157,7 @@ function bindElements() {
   elements.preferencesScreen = document.querySelector("#preferencesScreen");
   elements.closePreferencesButton = document.querySelector("#closePreferencesButton");
   elements.viewerModeButtons = Array.from(document.querySelectorAll("[data-viewer-mode]"));
+  elements.themeModeButtons = Array.from(document.querySelectorAll("[data-theme-mode]"));
   elements.libraryTitle = document.querySelector("#libraryTitle");
   elements.folderBackButton = document.querySelector("#folderBackButton");
   elements.uploadScreen = document.querySelector("#uploadScreen");
@@ -294,6 +300,9 @@ function bindEvents() {
   elements.closePreferencesButton?.addEventListener("click", closePreferencesScreen);
   elements.viewerModeButtons?.forEach((button) => {
     button.addEventListener("click", () => setViewerModePreference(button.dataset.viewerMode));
+  });
+  elements.themeModeButtons?.forEach((button) => {
+    button.addEventListener("click", () => setThemePreference(button.dataset.themeMode));
   });
   elements.clearSearchButton.addEventListener("click", () => {
     elements.searchInput.value = "";
@@ -1430,6 +1439,28 @@ function writeViewerModePreference(mode) {
   }
 }
 
+function readThemePreference() {
+  try {
+    return window.localStorage?.getItem(THEME_STORAGE_KEY) === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+  } catch (error) {
+    return THEME_LIGHT;
+  }
+}
+
+function writeThemePreference(mode) {
+  try {
+    window.localStorage?.setItem(THEME_STORAGE_KEY, mode);
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function applyThemePreference(mode) {
+  const nextMode = mode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+  document.documentElement.dataset.theme = nextMode;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextMode === THEME_DARK ? "#0b1211" : "#0f766e");
+}
+
 function openPreferencesScreen() {
   renderPreferencesScreen();
   elements.preferencesScreen.hidden = false;
@@ -1445,6 +1476,12 @@ function closePreferencesScreen() {
 function renderPreferencesScreen() {
   elements.viewerModeButtons?.forEach((button) => {
     const selected = button.dataset.viewerMode === state.viewerMode;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-checked", selected ? "true" : "false");
+  });
+
+  elements.themeModeButtons?.forEach((button) => {
+    const selected = button.dataset.themeMode === state.themeMode;
     button.classList.toggle("is-active", selected);
     button.setAttribute("aria-checked", selected ? "true" : "false");
   });
@@ -1470,6 +1507,19 @@ function setViewerModePreference(mode) {
       elements.viewerPages.scrollTo({ left: 0, top: 0 });
     }
   }
+}
+
+function setThemePreference(mode) {
+  const nextMode = mode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+  if (state.themeMode === nextMode) {
+    renderPreferencesScreen();
+    return;
+  }
+
+  state.themeMode = nextMode;
+  writeThemePreference(nextMode);
+  applyThemePreference(nextMode);
+  renderPreferencesScreen();
 }
 
 async function saveProfile(event) {
@@ -2328,7 +2378,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=73");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=74");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
