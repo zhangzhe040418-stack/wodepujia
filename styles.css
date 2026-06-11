@@ -573,7 +573,9 @@ body.add-screen-open .bottom-nav {
 }
 
 body.profile-screen-open .bottom-nav,
-body.profile-screen-open .fab-button {
+body.profile-screen-open .fab-button,
+body.preferences-screen-open .bottom-nav,
+body.preferences-screen-open .fab-button {
   display: none;
 }
 
@@ -747,6 +749,83 @@ body.profile-screen-open .fab-button {
   width: 100%;
   height: 100%;
   text-align: center;
+}
+
+.preferences-page {
+  gap: 16px;
+}
+
+.preference-section {
+  display: grid;
+  gap: 10px;
+}
+
+.preference-section h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.98rem;
+  letter-spacing: 0;
+}
+
+.preference-choice-list {
+  display: grid;
+  gap: 10px;
+}
+
+.preference-choice-button {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 24px;
+  align-items: center;
+  min-height: 58px;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  font-weight: 900;
+  text-align: left;
+}
+
+.preference-choice-button:hover,
+.preference-choice-button:focus-visible {
+  border-color: rgba(15, 118, 110, 0.42);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.preference-choice-button.is-active {
+  border-color: rgba(15, 118, 110, 0.54);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  box-shadow: 0 12px 26px rgba(15, 118, 110, 0.12);
+}
+
+.preference-choice-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: #eef5f3;
+  color: var(--accent-strong);
+}
+
+.preference-choice-button .lucide,
+.preference-choice-button [data-lucide] {
+  width: 20px;
+  height: 20px;
+}
+
+.preference-choice-button > .lucide:last-child,
+.preference-choice-button > [data-lucide]:last-child {
+  justify-self: end;
+  opacity: 0;
+}
+
+.preference-choice-button.is-active > .lucide:last-child,
+.preference-choice-button.is-active > [data-lucide]:last-child {
+  opacity: 1;
 }
 
 .tool-title {
@@ -1656,6 +1735,7 @@ body.profile-screen-open .fab-button {
 
 .viewer-pages {
   display: block;
+  box-sizing: border-box;
   width: 100%;
   height: 100%;
   overflow: auto;
@@ -1688,6 +1768,20 @@ body.profile-screen-open .fab-button {
   cursor: grabbing;
 }
 
+.viewer-pages.is-horizontal-mode {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  touch-action: pan-x;
+}
+
+.viewer-pages.is-horizontal-mode.is-zoomed {
+  overflow: auto;
+  scroll-snap-type: none;
+  touch-action: none;
+}
+
 .viewer-page {
   display: grid;
   place-items: center;
@@ -1704,6 +1798,18 @@ body.profile-screen-open .fab-button {
   width: calc(100vw * var(--viewer-zoom));
   min-width: 100%;
   min-height: 0;
+}
+
+.viewer-pages.is-horizontal-mode .viewer-page {
+  display: grid;
+  place-items: center;
+  flex: 0 0 calc(100vw * var(--viewer-zoom));
+  width: calc(100vw * var(--viewer-zoom));
+  min-width: calc(100vw * var(--viewer-zoom));
+  min-height: calc((100vh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+  min-height: calc((100dvh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
 }
 
 .viewer-image-frame {
@@ -1724,6 +1830,15 @@ body.profile-screen-open .fab-button {
   min-height: 0;
 }
 
+.viewer-pages.is-horizontal-mode .viewer-image-frame {
+  display: grid;
+  place-items: center;
+  width: calc(100vw * var(--viewer-zoom));
+  min-width: calc(100vw * var(--viewer-zoom));
+  height: calc((100vh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+  height: calc((100dvh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+}
+
 .viewer-image-frame img {
   width: calc(100vw * var(--viewer-zoom));
   max-width: none;
@@ -1741,6 +1856,12 @@ body.profile-screen-open .fab-button {
   width: 100%;
   height: auto;
   object-fit: contain;
+}
+
+.viewer-pages.is-horizontal-mode .viewer-image-frame img {
+  width: calc(100vw * var(--viewer-zoom));
+  height: calc((100vh - var(--viewer-topbar-height)) * var(--viewer-zoom));
+  height: calc((100dvh - var(--viewer-topbar-height)) * var(--viewer-zoom));
 }
 
 [data-lucide],

@@ -15,10 +15,10 @@
     <link rel="manifest" href="manifest.webmanifest?v=66" />
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=47" />
     <link rel="apple-touch-icon" href="icons/icon-192.png?v=47" />
-    <link rel="stylesheet" href="styles.css?v=70" />
+    <link rel="stylesheet" href="styles.css?v=71" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=70"></script>
+    <script defer charset="UTF-8" src="app.js?v=71"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -166,6 +166,38 @@
             保存资料
           </button>
         </form>
+      </section>
+
+      <section class="profile-screen preferences-screen" id="preferencesScreen" aria-labelledby="preferencesScreenTitle" hidden>
+        <div class="profile-page preferences-page">
+          <div class="profile-page-head">
+            <button class="icon-button" id="closePreferencesButton" type="button" title="返回" aria-label="返回">
+              <i data-lucide="arrow-left" aria-hidden="true"></i>
+            </button>
+            <h2 id="preferencesScreenTitle">偏好设置</h2>
+            <span aria-hidden="true"></span>
+          </div>
+
+          <section class="preference-section" aria-labelledby="viewerPreferenceTitle">
+            <h3 id="viewerPreferenceTitle">歌谱浏览方式</h3>
+            <div class="preference-choice-list" role="radiogroup" aria-labelledby="viewerPreferenceTitle">
+              <button class="preference-choice-button" type="button" role="radio" data-viewer-mode="portrait">
+                <span class="preference-choice-icon" aria-hidden="true">
+                  <i data-lucide="smartphone"></i>
+                </span>
+                <span>竖屏浏览歌谱</span>
+                <i data-lucide="check" aria-hidden="true"></i>
+              </button>
+              <button class="preference-choice-button" type="button" role="radio" data-viewer-mode="landscape">
+                <span class="preference-choice-icon" aria-hidden="true">
+                  <i data-lucide="panel-right"></i>
+                </span>
+                <span>横屏浏览歌谱</span>
+                <i data-lucide="check" aria-hidden="true"></i>
+              </button>
+            </div>
+          </section>
+        </div>
       </section>
 
       <section class="upload-screen" id="uploadScreen" aria-labelledby="uploadTitle" hidden>

@@ -27,6 +27,9 @@ const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
 const PROFILE_STORAGE_PREFIX = "my-score-folder-profile:";
 const PROFILE_COLLECTION_NAME = "profiles";
+const VIEWER_MODE_STORAGE_KEY = "my-score-folder-viewer-mode";
+const VIEWER_MODE_PORTRAIT = "portrait";
+const VIEWER_MODE_LANDSCAPE = "landscape";
 const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
@@ -80,6 +83,7 @@ const state = {
   copyFeedbackTimer: 0,
   activeTab: "library",
   currentFolderId: null,
+  viewerMode: readViewerModePreference(),
   authMode: "guest",
   authRegisterMethod: "phone",
   authRegisterAccount: "",
@@ -145,6 +149,9 @@ function bindElements() {
   elements.myAuthState = document.querySelector("#myAuthState");
   elements.myAuthButton = document.querySelector("#myAuthButton");
   elements.myAuthButtonText = document.querySelector("#myAuthButtonText");
+  elements.preferencesScreen = document.querySelector("#preferencesScreen");
+  elements.closePreferencesButton = document.querySelector("#closePreferencesButton");
+  elements.viewerModeButtons = Array.from(document.querySelectorAll("[data-viewer-mode]"));
   elements.libraryTitle = document.querySelector("#libraryTitle");
   elements.folderBackButton = document.querySelector("#folderBackButton");
   elements.uploadScreen = document.querySelector("#uploadScreen");
@@ -283,8 +290,10 @@ function bindEvents() {
   elements.navMineButton.addEventListener("click", () => switchMainTab("mine"));
   elements.myProfileButton.addEventListener("click", openProfileDialog);
   elements.myAuthButton.addEventListener("click", openAuthDialog);
-  elements.preferencesButton.addEventListener("click", () => {
-    refreshIcons();
+  elements.preferencesButton.addEventListener("click", openPreferencesScreen);
+  elements.closePreferencesButton?.addEventListener("click", closePreferencesScreen);
+  elements.viewerModeButtons?.forEach((button) => {
+    button.addEventListener("click", () => setViewerModePreference(button.dataset.viewerMode));
   });
   elements.clearSearchButton.addEventListener("click", () => {
     elements.searchInput.value = "";
@@ -430,9 +439,21 @@ function bindEvents() {
   window.addEventListener("orientationchange", () => {
     window.setTimeout(clampFabIntoBounds, 250);
   });
-  window.addEventListener("popstate", () => {
+  window.addEventListener("popstate", (event) => {
     if (state.viewerHistoryActive) {
       closeViewer({ fromHistory: true });
+      return;
+    }
+
+    const folderId = event.state?.folder;
+    if (folderId && state.folders.some((folder) => folder.id === folderId)) {
+      if (state.currentFolderId !== folderId) {
+        state.currentFolderId = folderId;
+        elements.searchInput.value = "";
+        renderScores();
+        elements.appShell.scrollTo({ top: 0 });
+      }
+      state.folderHistoryActive = true;
       return;
     }
 
@@ -1392,6 +1413,65 @@ function renderProfileContactButton(button, value, emptyText) {
   button.classList.toggle("is-linked", Boolean(text));
 }
 
+function readViewerModePreference() {
+  try {
+    const value = window.localStorage?.getItem(VIEWER_MODE_STORAGE_KEY);
+    return value === VIEWER_MODE_LANDSCAPE ? VIEWER_MODE_LANDSCAPE : VIEWER_MODE_PORTRAIT;
+  } catch (error) {
+    return VIEWER_MODE_PORTRAIT;
+  }
+}
+
+function writeViewerModePreference(mode) {
+  try {
+    window.localStorage?.setItem(VIEWER_MODE_STORAGE_KEY, mode);
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function openPreferencesScreen() {
+  renderPreferencesScreen();
+  elements.preferencesScreen.hidden = false;
+  document.body.classList.add("preferences-screen-open");
+  refreshIcons();
+}
+
+function closePreferencesScreen() {
+  elements.preferencesScreen.hidden = true;
+  document.body.classList.remove("preferences-screen-open");
+}
+
+function renderPreferencesScreen() {
+  elements.viewerModeButtons?.forEach((button) => {
+    const selected = button.dataset.viewerMode === state.viewerMode;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-checked", selected ? "true" : "false");
+  });
+}
+
+function setViewerModePreference(mode) {
+  const nextMode = mode === VIEWER_MODE_LANDSCAPE ? VIEWER_MODE_LANDSCAPE : VIEWER_MODE_PORTRAIT;
+  if (state.viewerMode === nextMode) {
+    renderPreferencesScreen();
+    return;
+  }
+
+  state.viewerMode = nextMode;
+  writeViewerModePreference(nextMode);
+  renderPreferencesScreen();
+
+  if (elements.viewerDialog?.open && state.currentViewerScoreId) {
+    const score = state.scores.find((item) => item.id === state.currentViewerScoreId);
+    if (score) {
+      resetViewerGestureState();
+      setViewerZoom(VIEWER_MIN_ZOOM);
+      renderViewerPages(score);
+      elements.viewerPages.scrollTo({ left: 0, top: 0 });
+    }
+  }
+}
+
 async function saveProfile(event) {
   event.preventDefault();
   if (!state.session) {
@@ -2248,7 +2328,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=70");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=71");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -5956,7 +6036,7 @@ function resetViewerGestureState() {
   state.viewerDrag = null;
   state.viewerTapStart = null;
   state.viewerLastTap = null;
-  elements.viewerPages.classList.remove("is-dragging", "is-pinching", "has-multiple-pages");
+  elements.viewerPages.classList.remove("is-dragging", "is-pinching", "has-multiple-pages", "is-horizontal-mode");
 }
 
 async function deleteScore(id) {
@@ -6170,8 +6250,10 @@ function closeDeleteDialog(confirmed) {
 
 function renderViewerPages(score) {
   const pages = [...(score.pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
+  const horizontalMode = state.viewerMode === VIEWER_MODE_LANDSCAPE && pages.length > 1;
   elements.viewerPages.replaceChildren();
   elements.viewerPages.classList.toggle("has-multiple-pages", pages.length > 1);
+  elements.viewerPages.classList.toggle("is-horizontal-mode", horizontalMode);
 
   pages.forEach((page, index) => {
     const figure = document.createElement("figure");
