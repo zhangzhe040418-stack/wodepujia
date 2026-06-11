@@ -39,6 +39,8 @@ const SHARE_UPLOAD_CONCURRENCY = 3;
 const SCORE_UPLOAD_CONCURRENCY = 3;
 const SHARE_BACKGROUND_UPLOAD_CONCURRENCY = 1;
 const SHARE_BATCH_EMBED_LIMIT = 700 * 1024;
+const PAGE_BACKGROUND_HYDRATE_DELAY = 0;
+const PAGE_BACKGROUND_HYDRATE_CONCURRENCY = 2;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
 )}`;
@@ -63,6 +65,9 @@ const state = {
   pageTempUrls: new Map(),
   pageDownloads: new Set(),
   pageRecoveryAttempts: new Map(),
+  pageHydrationTimer: 0,
+  pageHydrationRunning: false,
+  pageHydrationQueued: false,
   installPrompt: null,
   addScreenOpen: false,
   accountSyncTimer: 0,
@@ -2235,7 +2240,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=68");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=69");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -2565,6 +2570,7 @@ async function loadScores() {
 
   await consolidateDuplicateFoldersByName();
   renderScores();
+  queueBackgroundPageHydration();
 }
 
 function openDatabase() {
@@ -6353,6 +6359,71 @@ async function hydrateScorePages(pages) {
   } catch (error) {
     console.warn(error);
   }
+}
+
+function queueBackgroundPageHydration(delay = PAGE_BACKGROUND_HYDRATE_DELAY) {
+  if (!state.cloudReady || !state.session || !state.scorePages.some(pageNeedsHydration)) {
+    return;
+  }
+
+  if (state.pageHydrationRunning) {
+    state.pageHydrationQueued = true;
+    return;
+  }
+
+  window.clearTimeout(state.pageHydrationTimer);
+  state.pageHydrationTimer = window.setTimeout(() => {
+    state.pageHydrationTimer = 0;
+    hydrateMissingScorePagesInBackground().catch((error) => console.warn(error));
+  }, delay);
+}
+
+async function hydrateMissingScorePagesInBackground() {
+  if (state.pageHydrationRunning) {
+    state.pageHydrationQueued = true;
+    return;
+  }
+
+  if (!state.cloudReady || !state.session) {
+    return;
+  }
+
+  const pages = getMissingLocalImagePages();
+  if (!pages.length) {
+    return;
+  }
+
+  state.pageHydrationRunning = true;
+  try {
+    if (!(await ensureCloudMediaReady())) {
+      return;
+    }
+
+    await runWithConcurrency(pages, PAGE_BACKGROUND_HYDRATE_CONCURRENCY, hydrateScorePage);
+  } finally {
+    state.pageHydrationRunning = false;
+
+    if (state.pageHydrationQueued) {
+      state.pageHydrationQueued = false;
+      queueBackgroundPageHydration();
+    }
+  }
+}
+
+function getMissingLocalImagePages() {
+  const userId = state.session?.user?.id || null;
+  const scoreOrder = new Map(state.scores.map((score, index) => [score.id, index]));
+
+  return state.scorePages
+    .filter((page) => pageNeedsHydration(page) && (!userId || !page.userId || page.userId === userId))
+    .sort((a, b) => {
+      const scoreDelta = (scoreOrder.get(a.scoreId) ?? Number.MAX_SAFE_INTEGER) - (scoreOrder.get(b.scoreId) ?? Number.MAX_SAFE_INTEGER);
+      return scoreDelta || a.pageIndex - b.pageIndex;
+    });
+}
+
+function pageNeedsHydration(page) {
+  return Boolean(page?.storagePath && (!page.blob || page.blob.size === 0));
 }
 
 async function hydrateScorePage(page) {
