@@ -4222,7 +4222,6 @@ function renderPageManager() {
     actions.append(
       createPageManagerButton("arrow-up", "上移", page.id, "up", index === 0),
       createPageManagerButton("arrow-down", "下移", page.id, "down", index === pages.length - 1),
-      createPageManagerButton("rotate-cw", "旋转", page.id, "rotate", false),
       createPageManagerButton("image-up", "替换", page.id, "replace", false),
       createPageManagerButton("star", "设封面", page.id, "cover", index === 0),
       createPageManagerButton("trash-2", "删除", page.id, "delete", pages.length <= 1, true),
@@ -4319,8 +4318,6 @@ async function handlePageManagerAction(event) {
       const [coverPage] = pages.splice(index, 1);
       pages.unshift(coverPage);
       await persistManagedPages(pages, [], "已设为封面。");
-    } else if (action === "rotate") {
-      await rotateManagedPage(pages[index]);
     } else if (action === "delete") {
       await deleteManagedPage(pages[index]);
     }
@@ -4473,23 +4470,6 @@ async function deleteManagedPage(page) {
   );
 }
 
-async function rotateManagedPage(page) {
-  setPageManagerStatus("正在旋转页面...");
-  const editablePage = await ensurePageBlobForEdit(page);
-  const rotatedBlob = await rotateImageBlob(editablePage.blob, editablePage.type);
-  const updatedPage = {
-    ...editablePage,
-    type: rotatedBlob.type || editablePage.type || "image/jpeg",
-    size: rotatedBlob.size,
-    blob: rotatedBlob,
-    storageSyncedAt: null,
-    storageUploadVersion: 0,
-  };
-  revokeScoreUrlForPage(updatedPage.id);
-  const pages = getPageManagerPages().map((item) => (item.id === updatedPage.id ? updatedPage : item));
-  await persistManagedPages(pages, [], "页面已旋转 90 度。");
-}
-
 async function appendManagedPages(fileList) {
   const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
   elements.appendPageInput.value = "";
@@ -4600,48 +4580,6 @@ async function replaceManagedPage(file) {
     setPageManagerStatus(error.message || "替换页面失败，请稍后再试。", true);
   } finally {
     state.pageManagerBusy = false;
-  }
-}
-
-async function ensurePageBlobForEdit(page) {
-  let editablePage = state.scorePages.find((item) => item.id === page.id) || page;
-  if (editablePage.blob?.size > 0) {
-    return editablePage;
-  }
-
-  if (editablePage.storagePath) {
-    await hydrateScorePage(editablePage);
-    editablePage = state.scorePages.find((item) => item.id === page.id) || editablePage;
-  }
-
-  if (!editablePage.blob?.size) {
-    throw new Error("这一页图片尚未下载完成，请刷新同步后再试。");
-  }
-
-  return editablePage;
-}
-
-async function rotateImageBlob(blob, type = "image/jpeg") {
-  const source = await loadImageSource(blob);
-  try {
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d", { alpha: false });
-    canvas.width = source.height;
-    canvas.height = source.width;
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.translate(canvas.width, 0);
-    context.rotate(Math.PI / 2);
-    context.drawImage(source.image, 0, 0);
-    const outputType = getSafeImageMimeType(type) || "image/jpeg";
-    const quality = outputType === "image/webp" ? IMAGE_WEBP_QUALITY : IMAGE_JPEG_QUALITY;
-    const rotatedBlob = (await canvasToBlob(canvas, outputType, quality)) || (await canvasToBlob(canvas, "image/jpeg", IMAGE_JPEG_QUALITY));
-    if (!rotatedBlob) {
-      throw new Error("页面旋转失败，请稍后再试。");
-    }
-    return rotatedBlob;
-  } finally {
-    source.close?.();
   }
 }
 
