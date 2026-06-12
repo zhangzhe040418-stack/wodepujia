@@ -130,6 +130,7 @@ const state = {
   pageManagerBusy: false,
   pageManagerSaveChain: Promise.resolve(),
   scoreMetadataSaveChains: new Map(),
+  libraryRenderQueued: false,
   scoreEditId: "",
   folderActionId: "",
   editingFolderId: "",
@@ -7380,6 +7381,11 @@ function getScoreTime(value) {
 }
 
 function renderScores() {
+  if (isViewerActive()) {
+    state.libraryRenderQueued = true;
+    return;
+  }
+
   const query = elements.searchInput.value.trim();
   const normalizedQuery = normalizeText(query);
   const currentFolder = getCurrentFolder();
@@ -8110,9 +8116,11 @@ function openSetlistViewer(id) {
 
 function closeViewer(options = {}) {
   const shouldReturnHistory = state.viewerHistoryActive && !options.fromHistory;
+  const shouldRenderLibrary = state.libraryRenderQueued;
   state.viewerHistoryActive = false;
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = null;
+  state.libraryRenderQueued = false;
   if (elements.viewerTitle) {
     elements.viewerTitle.textContent = "查看歌谱";
   }
@@ -8129,6 +8137,10 @@ function closeViewer(options = {}) {
 
   if (shouldReturnHistory) {
     window.history.back();
+  }
+
+  if (shouldRenderLibrary && state.activeTab === "library") {
+    renderScores();
   }
 }
 
@@ -8246,7 +8258,20 @@ function replaceScoreMetadataInMemory(scoreId, updatedScore) {
   if (state.currentViewerScoreId === scoreId) {
     setViewerFavoriteButton(state.scores.find((item) => item.id === scoreId));
   }
+  requestLibraryRender();
+}
+
+function requestLibraryRender() {
+  if (isViewerActive()) {
+    state.libraryRenderQueued = true;
+    return;
+  }
+
   renderScores();
+}
+
+function isViewerActive() {
+  return Boolean(elements.viewerDialog?.open || state.currentViewerScoreId || state.currentViewerSetlistId);
 }
 
 function queueScoreMetadataSave(scoreId, createRecord) {
