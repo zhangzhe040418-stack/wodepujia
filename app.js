@@ -129,6 +129,7 @@ const state = {
   pageManagerPagesDraft: [],
   pageManagerBusy: false,
   pageManagerSaveChain: Promise.resolve(),
+  scoreMetadataSaveChains: new Map(),
   scoreEditId: "",
   folderActionId: "",
   editingFolderId: "",
@@ -8166,6 +8167,9 @@ async function toggleCurrentViewerFavorite() {
   elements.viewerFavoriteButton.disabled = true;
   try {
     await toggleScoreFavorite(scoreId);
+  } catch (error) {
+    console.error(error);
+    setStatus("收藏状态保存失败，请稍后重试。", true);
   } finally {
     if (state.currentViewerScoreId === scoreId) {
       elements.viewerFavoriteButton.disabled = false;
@@ -8179,26 +8183,23 @@ async function toggleScoreFavorite(scoreId) {
     return;
   }
 
+  const now = new Date().toISOString();
   const userId = score.userId || state.session?.user?.id || null;
   const updatedScore = {
     ...toScoreRecord(score),
     userId,
     favorite: !score.favorite,
+    updatedAt: now,
     syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
-  await putScore(updatedScore);
-  state.scores = state.scores.map((item) =>
-    item.id === scoreId
-      ? {
-        ...item,
-        ...updatedScore,
-        pages: item.pages,
-      }
-      : item,
-  );
-  const latestScore = state.scores.find((item) => item.id === scoreId);
-  setViewerFavoriteButton(latestScore);
-  renderScores();
+  replaceScoreMetadataInMemory(scoreId, updatedScore);
+  await queueScoreMetadataSave(scoreId, (latestScore) => ({
+    ...toScoreRecord(latestScore),
+    userId: latestScore.userId || state.session?.user?.id || null,
+    favorite: updatedScore.favorite,
+    updatedAt: now,
+    syncStatus: (latestScore.userId || state.session?.user?.id) ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  }));
 
   if (userId && state.cloudReady) {
     queueSync();
@@ -8212,13 +8213,27 @@ async function recordScoreOpened(scoreId) {
   }
 
   const userId = score.userId || state.session?.user?.id || null;
+  const openedAt = new Date().toISOString();
   const updatedScore = {
     ...toScoreRecord(score),
     userId,
-    lastOpenedAt: new Date().toISOString(),
+    lastOpenedAt: openedAt,
     syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
-  await putScore(updatedScore);
+  replaceScoreMetadataInMemory(scoreId, updatedScore);
+  await queueScoreMetadataSave(scoreId, (latestScore) => ({
+    ...toScoreRecord(latestScore),
+    userId: latestScore.userId || state.session?.user?.id || null,
+    lastOpenedAt: openedAt,
+    syncStatus: (latestScore.userId || state.session?.user?.id) ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  }));
+
+  if (userId && state.cloudReady) {
+    queueSync();
+  }
+}
+
+function replaceScoreMetadataInMemory(scoreId, updatedScore) {
   state.scores = state.scores.map((item) =>
     item.id === scoreId
       ? {
@@ -8228,11 +8243,33 @@ async function recordScoreOpened(scoreId) {
       }
       : item,
   );
-  renderScores();
-
-  if (userId && state.cloudReady) {
-    queueSync();
+  if (state.currentViewerScoreId === scoreId) {
+    setViewerFavoriteButton(state.scores.find((item) => item.id === scoreId));
   }
+  renderScores();
+}
+
+function queueScoreMetadataSave(scoreId, createRecord) {
+  const previous = state.scoreMetadataSaveChains.get(scoreId) || Promise.resolve();
+  const task = previous
+    .catch(() => {})
+    .then(async () => {
+      const latestScore = state.scores.find((item) => item.id === scoreId);
+      if (!latestScore) {
+        return null;
+      }
+
+      const record = createRecord(latestScore);
+      await putScore(record);
+      return record;
+    });
+  const cleanupTask = task.finally(() => {
+    if (state.scoreMetadataSaveChains.get(scoreId) === cleanupTask) {
+      state.scoreMetadataSaveChains.delete(scoreId);
+    }
+  });
+  state.scoreMetadataSaveChains.set(scoreId, cleanupTask);
+  return cleanupTask;
 }
 
 function setViewerPageIndicator(current, total) {
