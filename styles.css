@@ -795,6 +795,32 @@ noscript {
   display: none;
 }
 
+.setlist-score-picker {
+  min-height: 150px;
+  max-height: min(32vh, 240px);
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 118, 110, 0.34) transparent;
+}
+
+.setlist-score-picker::-webkit-scrollbar {
+  display: block;
+  width: 5px;
+}
+
+.setlist-score-picker::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.setlist-score-picker::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.34);
+}
+
+.setlist-score-picker .empty-state {
+  min-height: 150px;
+}
+
 .setlist-score-option,
 .setlist-order-row {
   display: grid;
@@ -1012,6 +1038,12 @@ body.preferences-screen-open .fab-button {
 
 .score-edit-field {
   margin: 0;
+}
+
+.score-edit-dialog.is-move-mode .score-edit-name-field,
+.score-edit-dialog.is-move-mode .score-edit-key-field,
+.score-edit-dialog.is-move-mode .score-edit-notes-field {
+  display: none;
 }
 
 .field textarea {

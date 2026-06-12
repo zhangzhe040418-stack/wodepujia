@@ -303,6 +303,7 @@ function bindElements() {
   elements.closeScoreActionButton = document.querySelector("#closeScoreActionButton");
   elements.scoreEditDialog = document.querySelector("#scoreEditDialog");
   elements.scoreEditForm = document.querySelector("#scoreEditForm");
+  elements.scoreEditTitle = document.querySelector("#scoreEditTitle");
   elements.scoreEditState = document.querySelector("#scoreEditState");
   elements.scoreEditName = document.querySelector("#scoreEditName");
   elements.scoreEditFolder = document.querySelector("#scoreEditFolder");
@@ -315,6 +316,7 @@ function bindElements() {
   elements.closeScoreEditButton = document.querySelector("#closeScoreEditButton");
   elements.cancelScoreEditButton = document.querySelector("#cancelScoreEditButton");
   elements.saveScoreEditButton = document.querySelector("#saveScoreEditButton");
+  elements.scoreEditSaveText = document.querySelector("#scoreEditSaveText");
   elements.closeAddButton = document.querySelector("#closeAddButton");
   elements.scoreForm = document.querySelector("#scoreForm");
   elements.scoreName = document.querySelector("#scoreName");
@@ -530,7 +532,7 @@ function bindEvents() {
   elements.scoreActionMoveButton?.addEventListener("click", () => {
     const scoreId = state.scoreActionId;
     closeScoreActionDialog();
-    openScoreEditDialog(scoreId, { focus: "folder" });
+    openScoreEditDialog(scoreId, { mode: "move" });
   });
   elements.scoreActionDeleteButton?.addEventListener("click", () => {
     const scoreId = state.scoreActionId;
@@ -1009,12 +1011,16 @@ function openScoreEditDialog(scoreId, options = {}) {
     return;
   }
 
+  const isMoveMode = options.mode === "move";
   state.scoreEditId = scoreId;
   populateScoreEditFolders(score.folderId);
+  elements.scoreEditDialog.classList.toggle("is-move-mode", isMoveMode);
+  elements.scoreEditTitle.textContent = isMoveMode ? "移动到文件夹" : "编辑歌谱信息";
+  elements.scoreEditSaveText.textContent = isMoveMode ? "移动" : "保存";
   elements.scoreEditName.value = score.name || "";
   elements.scoreEditKey.value = score.keySignature || "";
   elements.scoreEditNotes.value = score.notes || "";
-  setScoreEditStatus(options.focus === "folder" ? "请选择要移动到的文件夹后保存。" : "可修改名称、所属文件夹、调号和备注。");
+  setScoreEditStatus(isMoveMode ? "请选择要移动到的文件夹。" : "可修改名称、所属文件夹、调号和备注。");
 
   if (typeof elements.scoreEditDialog.showModal === "function") {
     elements.scoreEditDialog.showModal();
@@ -1024,13 +1030,16 @@ function openScoreEditDialog(scoreId, options = {}) {
 
   refreshIcons();
   requestAnimationFrame(() => {
-    (options.focus === "folder" ? elements.scoreEditFolderButton : elements.scoreEditName).focus();
+    (isMoveMode ? elements.scoreEditFolderButton : elements.scoreEditName).focus();
   });
 }
 
 function closeScoreEditDialog() {
   state.scoreEditId = "";
   closeScoreEditFolderPicker();
+  elements.scoreEditDialog.classList.remove("is-move-mode");
+  elements.scoreEditTitle.textContent = "编辑歌谱信息";
+  elements.scoreEditSaveText.textContent = "保存";
   elements.scoreEditForm.reset();
   elements.saveScoreEditButton.disabled = false;
   if (elements.scoreEditDialog.open) {
@@ -2807,7 +2816,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=80");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=81");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3964,6 +3973,7 @@ async function saveScoreEdit(event) {
     return;
   }
 
+  const isMoveMode = elements.scoreEditDialog.classList.contains("is-move-mode");
   const name = elements.scoreEditName.value.trim();
   if (!name) {
     setScoreEditStatus("请输入歌谱名。", true);
@@ -3991,16 +4001,16 @@ async function saveScoreEdit(event) {
   };
 
   elements.saveScoreEditButton.disabled = true;
-  setScoreEditStatus("正在保存...");
+  setScoreEditStatus(isMoveMode ? "正在移动..." : "正在保存...");
 
   try {
     await putScore(updatedScore);
     closeScoreEditDialog();
     await loadScores();
     if (userId && state.cloudReady) {
-      queueScoreCloudUpload(updatedScore.id, `《${updatedScore.name}》信息已保存，正在同步云端。`);
+      queueScoreCloudUpload(updatedScore.id, isMoveMode ? `《${updatedScore.name}》已移动，正在同步云端。` : `《${updatedScore.name}》信息已保存，正在同步云端。`);
     } else {
-      setStatus(`《${updatedScore.name}》信息已保存。`);
+      setStatus(isMoveMode ? `《${updatedScore.name}》已移动。` : `《${updatedScore.name}》信息已保存。`);
     }
   } catch (error) {
     console.error(error);

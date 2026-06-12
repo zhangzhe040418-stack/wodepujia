@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=80" />
+    <link rel="stylesheet" href="styles.css?v=81" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=80"></script>
+    <script defer charset="UTF-8" src="app.js?v=81"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -620,7 +620,7 @@
           </button>
         </div>
         <p class="auth-state" id="scoreEditState">可修改名称、所属文件夹、调号和备注。</p>
-        <label class="field score-edit-field">
+        <label class="field score-edit-field score-edit-name-field">
           <span>歌谱名</span>
           <input id="scoreEditName" name="scoreName" type="text" maxlength="60" autocomplete="off" required />
         </label>
@@ -635,11 +635,11 @@
             <div class="folder-select-options" id="scoreEditFolderOptions" role="listbox" hidden></div>
           </div>
         </label>
-        <label class="field score-edit-field">
+        <label class="field score-edit-field score-edit-key-field">
           <span>调号</span>
           <input id="scoreEditKey" name="scoreKey" type="text" maxlength="20" autocomplete="off" placeholder="例如 C、G、降B" />
         </label>
-        <label class="field score-edit-field">
+        <label class="field score-edit-field score-edit-notes-field">
           <span>备注</span>
           <textarea id="scoreEditNotes" name="scoreNotes" maxlength="200" rows="3" placeholder="可填写备注"></textarea>
         </label>
@@ -647,7 +647,7 @@
           <button class="cancel-delete-button" id="cancelScoreEditButton" type="button">取消</button>
           <button class="confirm-delete-button folder-save-button" id="saveScoreEditButton" type="submit">
             <i data-lucide="save" aria-hidden="true"></i>
-            <span>保存</span>
+            <span id="scoreEditSaveText">保存</span>
           </button>
         </div>
       </form>
