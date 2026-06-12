@@ -682,6 +682,7 @@ noscript {
   inset: 0;
   width: min(720px, calc(100vw - 24px));
   margin: auto;
+  overflow: hidden;
   touch-action: auto;
 }
 
@@ -689,8 +690,13 @@ noscript {
   width: 100%;
   max-height: min(88vh, 760px);
   max-height: min(88dvh, 760px);
+  max-width: 100%;
+  box-sizing: border-box;
+  align-content: start;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  touch-action: pan-y;
 }
 
 .setlist-field {
@@ -703,8 +709,9 @@ noscript {
 
 .setlist-editor-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
+  min-width: 0;
 }
 
 .setlist-editor-section {
@@ -725,10 +732,14 @@ noscript {
 .setlist-order-list {
   display: grid;
   gap: 6px;
+  max-width: 100%;
   max-height: 280px;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 2px;
   scrollbar-width: none;
+  touch-action: pan-y;
 }
 
 .setlist-score-picker::-webkit-scrollbar,
@@ -913,9 +924,14 @@ body.preferences-screen-open .fab-button {
 }
 
 .score-edit-surface {
+  max-width: 100%;
+  box-sizing: border-box;
   max-height: min(86vh, 720px);
   max-height: min(86dvh, 720px);
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   gap: 10px;
 }
 
@@ -948,14 +964,24 @@ body.preferences-screen-open .fab-button {
 }
 
 .dialog-pair-actions {
-  grid-template-columns: repeat(2, minmax(132px, 170px));
+  display: flex;
+  align-items: center;
   justify-content: center;
-  gap: 20px;
+  gap: 18px;
+  width: 100%;
 }
 
 .dialog-pair-actions > button {
-  width: 100%;
+  flex: 0 0 156px;
+  width: 156px;
+  max-width: calc((100vw - 72px) / 2);
   min-height: 42px;
+}
+
+.setlist-surface .dialog-pair-actions > button,
+.score-edit-surface .dialog-pair-actions > button {
+  flex-basis: 156px;
+  width: 156px;
 }
 
 .native-folder-select {
