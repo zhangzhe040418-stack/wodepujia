@@ -118,6 +118,8 @@ const state = {
   scoreActionId: "",
   pageManagerScoreId: "",
   pageManagerReplacePageId: "",
+  pageManagerPagesDraft: [],
+  pageManagerBusy: false,
   scoreEditId: "",
   folderActionId: "",
   editingFolderId: "",
@@ -572,10 +574,24 @@ function bindEvents() {
   });
   elements.closePageManagerButton?.addEventListener("click", closePageManagerDialog);
   elements.appendPageButton?.addEventListener("click", () => openFilePicker(elements.appendPageInput));
-  elements.appendPageInput?.addEventListener("change", () => appendManagedPages(elements.appendPageInput.files));
-  elements.replacePageInput?.addEventListener("change", () => replaceManagedPage(elements.replacePageInput.files?.[0]));
+  elements.appendPageInput?.addEventListener("change", (event) => {
+    event.stopPropagation();
+    appendManagedPages(elements.appendPageInput.files);
+  });
+  elements.appendPageInput?.addEventListener("cancel", handlePagePickerCancel);
+  elements.replacePageInput?.addEventListener("change", (event) => {
+    event.stopPropagation();
+    replaceManagedPage(elements.replacePageInput.files?.[0]);
+  });
+  elements.replacePageInput?.addEventListener("cancel", handlePagePickerCancel);
   elements.pageManagerList?.addEventListener("click", handlePageManagerAction);
   elements.pageManagerDialog?.addEventListener("cancel", (event) => {
+    if (event.target !== elements.pageManagerDialog) {
+      event.preventDefault();
+      event.stopPropagation();
+      handlePagePickerCancel(event);
+      return;
+    }
     event.preventDefault();
     closePageManagerDialog();
   });
@@ -4087,6 +4103,8 @@ function openPageManagerDialog(scoreId) {
 
   state.pageManagerScoreId = scoreId;
   state.pageManagerReplacePageId = "";
+  state.pageManagerPagesDraft = createPageManagerDraft(score);
+  state.pageManagerBusy = false;
   elements.pageManagerTitle.textContent = `管理《${score.name}》页面`;
   setPageManagerStatus("可调整页面顺序、替换图片或追加新页面。");
   renderPageManager();
@@ -4103,6 +4121,8 @@ function openPageManagerDialog(scoreId) {
 function closePageManagerDialog() {
   state.pageManagerScoreId = "";
   state.pageManagerReplacePageId = "";
+  state.pageManagerPagesDraft = [];
+  state.pageManagerBusy = false;
   elements.appendPageInput.value = "";
   elements.replacePageInput.value = "";
   if (elements.pageManagerDialog.open) {
@@ -4116,9 +4136,40 @@ function getPageManagerScore() {
   return state.scores.find((score) => score.id === state.pageManagerScoreId) || null;
 }
 
+function clonePageForManager(page) {
+  return {
+    ...page,
+  };
+}
+
+function createPageManagerDraft(score) {
+  return [...(score?.pages || [])]
+    .sort((a, b) => a.pageIndex - b.pageIndex)
+    .map(clonePageForManager);
+}
+
 function getPageManagerPages() {
   const score = getPageManagerScore();
-  return [...(score?.pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
+  const sourcePages = state.pageManagerPagesDraft.length ? state.pageManagerPagesDraft : score?.pages || [];
+  const latestPageById = new Map(state.scorePages.map((page) => [page.id, page]));
+
+  return sourcePages
+    .map((page) => {
+      const latestPage = latestPageById.get(page.id);
+      if (!latestPage) {
+        return clonePageForManager(page);
+      }
+
+      return {
+        ...latestPage,
+        ...page,
+        blob: page.blob?.size > 0 ? page.blob : latestPage.blob,
+        storagePath: page.storagePath || latestPage.storagePath,
+        storageSyncedAt: page.storageSyncedAt || latestPage.storageSyncedAt,
+        storageUploadVersion: page.storageUploadVersion || latestPage.storageUploadVersion,
+      };
+    })
+    .sort((a, b) => a.pageIndex - b.pageIndex);
 }
 
 function renderPageManager() {
@@ -4188,6 +4239,7 @@ function createPageManagerButton(iconName, label, pageId, action, disabled = fal
   button.dataset.pageId = pageId;
   button.dataset.pageAction = action;
   button.disabled = disabled;
+  button.addEventListener("click", handlePageManagerAction);
   button.append(createIcon(iconName));
   return button;
 }
@@ -4197,9 +4249,38 @@ function setPageManagerStatus(message, isError = false) {
   elements.pageManagerState.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
 
+function handlePagePickerCancel(event) {
+  event?.stopPropagation?.();
+  state.pageManagerReplacePageId = "";
+  if (elements.appendPageInput) {
+    elements.appendPageInput.value = "";
+  }
+  if (elements.replacePageInput) {
+    elements.replacePageInput.value = "";
+  }
+  if (state.pageManagerScoreId) {
+    setPageManagerStatus("已取消选择图片。");
+  }
+}
+
 async function handlePageManagerAction(event) {
-  const button = event.target.closest("button[data-page-action]");
+  if (event.__pageManagerHandled) {
+    return;
+  }
+  event.__pageManagerHandled = true;
+  event.preventDefault?.();
+  event.stopPropagation?.();
+
+  const target = event.currentTarget?.matches?.("button[data-page-action]")
+    ? event.currentTarget
+    : event.target instanceof Element
+      ? event.target.closest("button[data-page-action]")
+      : null;
+  const button = target;
   if (!button) {
+    return;
+  }
+  if (button.disabled || state.pageManagerBusy) {
     return;
   }
 
@@ -4213,18 +4294,23 @@ async function handlePageManagerAction(event) {
 
   if (action === "replace") {
     state.pageManagerReplacePageId = pageId;
+    setPageManagerStatus(`请选择第 ${index + 1} 页的新图片。`);
     openFilePicker(elements.replacePageInput);
     return;
   }
 
+  state.pageManagerBusy = true;
   try {
     if (action === "up" && index > 0) {
+      setPageManagerStatus("正在上移页面...");
       [pages[index - 1], pages[index]] = [pages[index], pages[index - 1]];
       await persistManagedPages(pages, [], "页面已上移。");
     } else if (action === "down" && index < pages.length - 1) {
+      setPageManagerStatus("正在下移页面...");
       [pages[index + 1], pages[index]] = [pages[index], pages[index + 1]];
       await persistManagedPages(pages, [], "页面已下移。");
     } else if (action === "cover" && index > 0) {
+      setPageManagerStatus("正在设置封面...");
       const [coverPage] = pages.splice(index, 1);
       pages.unshift(coverPage);
       await persistManagedPages(pages, [], "已设为封面。");
@@ -4236,6 +4322,8 @@ async function handlePageManagerAction(event) {
   } catch (error) {
     console.error(error);
     setPageManagerStatus(error.message || "页面操作失败，请稍后再试。", true);
+  } finally {
+    state.pageManagerBusy = false;
   }
 }
 
@@ -4272,6 +4360,7 @@ async function persistManagedPages(activePages, deletedPages = [], message = "�
   await putScorePageChanges(updatedScore, normalizedPages, normalizedDeletedPages);
   normalizedDeletedPages.forEach((page) => revokeScoreUrlForPage(page.id));
   await loadScores();
+  state.pageManagerPagesDraft = normalizedPages.map(clonePageForManager);
   renderPageManager();
   setPageManagerStatus(message);
 
@@ -4331,8 +4420,12 @@ async function appendManagedPages(fileList) {
   if (!score) {
     return;
   }
+  if (state.pageManagerBusy) {
+    return;
+  }
 
   try {
+    state.pageManagerBusy = true;
     setPageManagerStatus(`正在追加 1 / ${files.length} 页...`);
     const newPages = [];
     for (const [index, file] of files.entries()) {
@@ -4369,6 +4462,8 @@ async function appendManagedPages(fileList) {
   } catch (error) {
     console.error(error);
     setPageManagerStatus(error.message || "追加页面失败，请稍后再试。", true);
+  } finally {
+    state.pageManagerBusy = false;
   }
 }
 
@@ -4383,8 +4478,12 @@ async function replaceManagedPage(file) {
     setPageManagerStatus("请选择图片文件。", true);
     return;
   }
+  if (state.pageManagerBusy) {
+    return;
+  }
 
   try {
+    state.pageManagerBusy = true;
     setPageManagerStatus("正在替换页面...");
     const pages = getPageManagerPages();
     const page = pages.find((item) => item.id === pageId);
@@ -4417,6 +4516,8 @@ async function replaceManagedPage(file) {
   } catch (error) {
     console.error(error);
     setPageManagerStatus(error.message || "替换页面失败，请稍后再试。", true);
+  } finally {
+    state.pageManagerBusy = false;
   }
 }
 
