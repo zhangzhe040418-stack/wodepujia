@@ -423,13 +423,6 @@ noscript {
   object-fit: contain;
 }
 
-.score-preview img[data-rotation="90"],
-.score-preview img[data-rotation="180"],
-.score-preview img[data-rotation="270"] {
-  transform: rotate(var(--page-rotation));
-  transform-origin: center;
-}
-
 .folder-card {
   background: var(--surface);
 }
@@ -1132,13 +1125,6 @@ body.preferences-screen-open .fab-button {
   object-fit: cover;
   user-select: none;
   -webkit-user-drag: none;
-}
-
-.page-manager-thumb img[data-rotation="90"],
-.page-manager-thumb img[data-rotation="180"],
-.page-manager-thumb img[data-rotation="270"] {
-  transform: rotate(var(--page-rotation));
-  transform-origin: center;
 }
 
 .page-manager-body {
@@ -2731,13 +2717,6 @@ body.preferences-screen-open .fab-button {
   background: #ffffff;
   user-select: none;
   -webkit-user-drag: none;
-}
-
-.viewer-image-frame img[data-rotation="90"],
-.viewer-image-frame img[data-rotation="180"],
-.viewer-image-frame img[data-rotation="270"] {
-  transform: rotate(var(--page-rotation));
-  transform-origin: center;
 }
 
 .viewer-pages.has-multiple-pages .viewer-image-frame img {
