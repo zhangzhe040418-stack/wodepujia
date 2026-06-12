@@ -120,6 +120,7 @@ const state = {
   pageManagerReplacePageId: "",
   pageManagerPagesDraft: [],
   pageManagerBusy: false,
+  pageManagerSaveChain: Promise.resolve(),
   scoreEditId: "",
   folderActionId: "",
   editingFolderId: "",
@@ -3458,6 +3459,7 @@ function normalizeLocalPageRecord(page) {
     name: page.name || "歌谱图片",
     type: page.type || page.blob?.type || "image/jpeg",
     size: Number(page.size) || page.blob?.size || 0,
+    rotation: normalizePageRotation(page.rotation ?? page.rotation_degrees ?? page.rotate),
     blob: page.blob,
     storagePath: page.storagePath || null,
     storageSyncedAt: page.storageSyncedAt || null,
@@ -3467,6 +3469,11 @@ function normalizeLocalPageRecord(page) {
     deletedAt: page.deletedAt || null,
     syncStatus: page.syncStatus || SYNC_STATUS_LOCAL,
   };
+}
+
+function normalizePageRotation(value) {
+  const raw = Number(value) || 0;
+  return ((Math.round(raw / 90) * 90) % 360 + 360) % 360;
 }
 
 function normalizeLocalSetlistRecord(setlist) {
@@ -4164,9 +4171,13 @@ function getPageManagerPages() {
         ...latestPage,
         ...page,
         blob: page.blob?.size > 0 ? page.blob : latestPage.blob,
-        storagePath: page.storagePath || latestPage.storagePath,
-        storageSyncedAt: page.storageSyncedAt || latestPage.storageSyncedAt,
-        storageUploadVersion: page.storageUploadVersion || latestPage.storageUploadVersion,
+        storagePath: Object.prototype.hasOwnProperty.call(page, "storagePath") ? page.storagePath : latestPage.storagePath,
+        storageSyncedAt: Object.prototype.hasOwnProperty.call(page, "storageSyncedAt")
+          ? page.storageSyncedAt
+          : latestPage.storageSyncedAt,
+        storageUploadVersion: Object.prototype.hasOwnProperty.call(page, "storageUploadVersion")
+          ? page.storageUploadVersion
+          : latestPage.storageUploadVersion,
       };
     })
     .sort((a, b) => a.pageIndex - b.pageIndex);
@@ -4201,6 +4212,7 @@ function renderPageManager() {
     image.dataset.pageId = page.id;
     bindScoreImageRecovery(image, page.id);
     image.src = getScoreUrl(page);
+    applyPageImageRotation(image, page);
     image.alt = `《${score.name}》第 ${index + 1} 页`;
     thumb.append(image);
 
@@ -4335,14 +4347,22 @@ async function persistManagedPages(activePages, deletedPages = [], message = "�
 
   const now = new Date().toISOString();
   const userId = score.userId || state.session?.user?.id || null;
+  const previousPageById = new Map(state.scorePages.map((page) => [page.id, page]));
   const normalizedPages = activePages.map((page, index) => ({
     ...page,
     userId: page.userId || userId,
     pageIndex: index,
-    updatedAt: now,
     deletedAt: null,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-  }));
+  })).map((page) => {
+    const previousPage = previousPageById.get(page.id);
+    const changed = managedPageChanged(page, previousPage);
+
+    return {
+      ...page,
+      updatedAt: changed ? now : page.updatedAt || previousPage?.updatedAt || now,
+      syncStatus: changed && userId ? SYNC_STATUS_PENDING : page.syncStatus || previousPage?.syncStatus || SYNC_STATUS_LOCAL,
+    };
+  });
   const normalizedDeletedPages = deletedPages.map((page) => ({
     ...page,
     userId: page.userId || userId,
@@ -4356,17 +4376,87 @@ async function persistManagedPages(activePages, deletedPages = [], message = "�
     updatedAt: now,
     syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
+  const pagesToSave = normalizedPages.filter((page) => managedPageChanged(page, previousPageById.get(page.id)));
 
-  await putScorePageChanges(updatedScore, normalizedPages, normalizedDeletedPages);
   normalizedDeletedPages.forEach((page) => revokeScoreUrlForPage(page.id));
-  await loadScores();
   state.pageManagerPagesDraft = normalizedPages.map(clonePageForManager);
+  applyManagedPageState(updatedScore, normalizedPages, normalizedDeletedPages);
   renderPageManager();
+  renderScores();
   setPageManagerStatus(message);
 
-  if (userId && state.cloudReady) {
-    queueSync();
+  queueManagedPageSave(updatedScore, pagesToSave, normalizedDeletedPages, userId, state.pageManagerScoreId);
+}
+
+function managedPageChanged(page, previousPage) {
+  if (!previousPage) {
+    return true;
   }
+
+  return (
+    page.pageIndex !== previousPage.pageIndex ||
+    page.name !== previousPage.name ||
+    page.type !== previousPage.type ||
+    page.size !== previousPage.size ||
+    normalizePageRotation(page.rotation) !== normalizePageRotation(previousPage.rotation) ||
+    page.storagePath !== previousPage.storagePath ||
+    page.storageSyncedAt !== previousPage.storageSyncedAt ||
+    page.storageUploadVersion !== previousPage.storageUploadVersion ||
+    page.deletedAt !== previousPage.deletedAt ||
+    page.blob !== previousPage.blob
+  );
+}
+
+function applyManagedPageState(updatedScore, activePages, deletedPages = []) {
+  const scoreId = updatedScore.id;
+  const activeIds = new Set(activePages.map((page) => page.id));
+  const deletedIds = new Set(deletedPages.map((page) => page.id));
+
+  state.scorePages = [
+    ...state.scorePages.filter((page) => page.scoreId !== scoreId),
+    ...activePages,
+  ].filter((page) => !deletedIds.has(page.id));
+
+  state.scores = state.scores.map((score) => {
+    if (score.id !== scoreId) {
+      return score;
+    }
+
+    return {
+      ...score,
+      ...updatedScore,
+      pages: activePages
+        .filter((page) => activeIds.has(page.id))
+        .sort((a, b) => a.pageIndex - b.pageIndex),
+    };
+  });
+  state.scores.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
+function queueManagedPageSave(updatedScore, pagesToSave, deletedPages, userId, scoreId) {
+  state.pageManagerSaveChain = state.pageManagerSaveChain
+    .catch(() => {})
+    .then(async () => {
+      await putScorePageChanges(updatedScore, pagesToSave, deletedPages);
+      if (userId && state.cloudReady) {
+        queueSync();
+      }
+    });
+
+  state.pageManagerSaveChain.catch((error) => {
+    console.error(error);
+    if (state.pageManagerScoreId === scoreId) {
+      setPageManagerStatus(error.message || "页面已显示更新，但保存失败，请刷新后重试。", true);
+    }
+  });
+}
+
+function pageBlobNeedsCloudUpload(page, pageDeleted = false) {
+  if (pageDeleted || !page?.blob || page.blob.size <= 0) {
+    return false;
+  }
+
+  return !page.storagePath || !page.storageSyncedAt || Number(page.storageUploadVersion) < STORAGE_UPLOAD_VERSION;
 }
 
 async function deleteManagedPage(page) {
@@ -4393,17 +4483,10 @@ async function deleteManagedPage(page) {
 
 async function rotateManagedPage(page) {
   setPageManagerStatus("正在旋转页面...");
-  const editablePage = await ensurePageBlobForEdit(page);
-  const rotatedBlob = await rotateImageBlob(editablePage.blob, editablePage.type);
   const updatedPage = {
-    ...editablePage,
-    type: rotatedBlob.type || editablePage.type || "image/jpeg",
-    size: rotatedBlob.size,
-    blob: rotatedBlob,
-    storageSyncedAt: null,
-    storageUploadVersion: 0,
+    ...page,
+    rotation: (normalizePageRotation(page.rotation) + 90) % 360,
   };
-  revokeScoreUrlForPage(updatedPage.id);
   const pages = getPageManagerPages().map((item) => (item.id === updatedPage.id ? updatedPage : item));
   await persistManagedPages(pages, [], "页面已旋转 90 度。");
 }
@@ -4426,26 +4509,18 @@ async function appendManagedPages(fileList) {
 
   try {
     state.pageManagerBusy = true;
-    setPageManagerStatus(`正在追加 1 / ${files.length} 页...`);
+    setPageManagerStatus(`正在追加 ${files.length} 页...`);
     const newPages = [];
-    for (const [index, file] of files.entries()) {
-      const compressed = await withTimeout(
-        compressImageFile(file),
-        IMAGE_COMPRESSION_TIMEOUT,
-        `《${file.name}》压缩超时，已使用原图。`,
-      ).catch((error) => {
-        console.warn(error);
-        return file;
-      });
+    for (const file of files) {
       newPages.push({
         id: createId(),
         scoreId: score.id,
         userId: score.userId || state.session?.user?.id || null,
         pageIndex: 0,
         name: file.name,
-        type: compressed.type || file.type || "image/jpeg",
-        size: compressed.size,
-        blob: compressed,
+        type: file.type || "image/jpeg",
+        size: file.size,
+        blob: file,
         storagePath: null,
         storageSyncedAt: null,
         storageUploadVersion: 0,
@@ -4454,9 +4529,6 @@ async function appendManagedPages(fileList) {
         deletedAt: null,
         syncStatus: state.session?.user?.id ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
       });
-      if (index < files.length - 1) {
-        setPageManagerStatus(`正在追加 ${index + 2} / ${files.length} 页...`);
-      }
     }
     await persistManagedPages([...getPageManagerPages(), ...newPages], [], `已追加 ${newPages.length} 页。`);
   } catch (error) {
@@ -4490,20 +4562,12 @@ async function replaceManagedPage(file) {
     if (!page) {
       return;
     }
-    const compressed = await withTimeout(
-      compressImageFile(file),
-      IMAGE_COMPRESSION_TIMEOUT,
-      `《${file.name}》压缩超时，已使用原图。`,
-    ).catch((error) => {
-      console.warn(error);
-      return file;
-    });
     const updatedPage = {
       ...page,
       name: file.name,
-      type: compressed.type || file.type || "image/jpeg",
-      size: compressed.size,
-      blob: compressed,
+      type: file.type || "image/jpeg",
+      size: file.size,
+      blob: file,
       storageSyncedAt: null,
       storageUploadVersion: 0,
     };
@@ -4841,14 +4905,14 @@ async function uploadScoreToCloud(scoreId) {
       : [];
 
     let uploadIndex = 0;
-    const uploadTotal = pages.filter((page) => page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)).length;
+    const uploadTotal = pages.filter((page) => pageBlobNeedsCloudUpload(page)).length;
     const readyPages = (
       await runWithConcurrency(pages, SCORE_UPLOAD_CONCURRENCY, async (page) => {
         let storagePath = page.storagePath || null;
         let storageSyncedAt = page.storageSyncedAt || null;
         let pageSize = page.size;
         const hasBlob = Boolean(page.blob && page.blob.size > 0);
-        const shouldUploadBlob = hasBlob && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
+        const shouldUploadBlob = pageBlobNeedsCloudUpload(page);
         const shouldSyncMetadata = page.syncStatus !== SYNC_STATUS_SYNCED || shouldUploadBlob || !storagePath;
 
         if (!shouldSyncMetadata) {
@@ -5114,10 +5178,7 @@ async function uploadLocalChanges() {
     let storageSyncedAt = page.storageSyncedAt || null;
     let pageSize = page.size;
     const hasBlob = Boolean(page.blob && page.blob.size > 0);
-    const shouldUploadBlob =
-      !pageDeleted &&
-      hasBlob &&
-      (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
+    const shouldUploadBlob = pageBlobNeedsCloudUpload(page, pageDeleted);
     const shouldSyncMetadata = page.syncStatus !== SYNC_STATUS_SYNCED || shouldUploadBlob || (!pageDeleted && !storagePath);
 
     if (!shouldSyncMetadata) {
@@ -5722,6 +5783,7 @@ function toCloudPage(page) {
     name: page.name,
     type: page.type,
     size: page.size,
+    rotation: normalizePageRotation(page.rotation),
     storage_path: page.storagePath,
     created_at: page.createdAt,
     updated_at: page.updatedAt,
@@ -5796,6 +5858,7 @@ function fromCloudPage(row) {
     name: row.name,
     type: row.type,
     size: row.size,
+    rotation: row.rotation,
     storagePath: row.storage_path,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -6154,7 +6217,7 @@ async function ensureShareTargetsReady(targets) {
     .map((page) => ({ ...page, userId: page.userId || userId }));
 
   let uploadIndex = 0;
-  const pageNeedsUpload = (page) => page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED);
+  const pageNeedsUpload = (page) => pageBlobNeedsCloudUpload(page);
   const uploadTotal = selectedPages.filter(pageNeedsUpload).length;
   const uploadedPages = await runWithConcurrency(selectedPages, SHARE_UPLOAD_CONCURRENCY, async (page) => {
     let storagePath = page.storagePath || null;
@@ -6214,7 +6277,7 @@ async function ensureShareTargetsReady(targets) {
 async function ensureShareScoresUploaded(selectedScoreIds) {
   const scoreIds = Array.from(selectedScoreIds || []).filter(Boolean);
   const scoreIdsNeedingUpload = scoreIds.filter((scoreId) =>
-    state.scorePages.some((page) => page.scoreId === scoreId && page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)),
+    state.scorePages.some((page) => page.scoreId === scoreId && pageBlobNeedsCloudUpload(page)),
   );
 
   if (!scoreIdsNeedingUpload.length) {
@@ -6489,7 +6552,7 @@ async function prepareShareBatch(shareId, targets, code) {
 
   const selectedScoreIds = getShareTargetScoreIds(scoreIds, folderIds);
   const scoreIdsNeedingUpload = selectedScoreIds.filter((scoreId) =>
-    state.scorePages.some((page) => page.scoreId === scoreId && page.blob?.size > 0 && (!page.storagePath || page.syncStatus !== SYNC_STATUS_SYNCED)),
+    state.scorePages.some((page) => page.scoreId === scoreId && pageBlobNeedsCloudUpload(page)),
   );
 
   if (scoreIdsNeedingUpload.length) {
@@ -6654,6 +6717,7 @@ function createScoreShareItem(score, sharedFolderId) {
       name: page.name || `第 ${index + 1} 页`,
       type: page.type || "image/jpeg",
       size: page.size || page.blob?.size || 0,
+      rotation: normalizePageRotation(page.rotation),
       storage_path: page.storagePath || null,
       upload_status: page.storagePath ? "success" : "pending",
     }));
@@ -6939,6 +7003,7 @@ async function importSharedScoreSnapshot(scoreItem, userId, folderId, existingNa
       name: page.name,
       type: page.type,
       size: page.size,
+      rotation: page.rotation,
       storage_path: page.storage_path,
     })),
     userId,
@@ -7009,6 +7074,7 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
       name: pageRow.name || `第 ${index + 1} 页`,
       type: pageType,
       size: Number(pageRow.size) || 0,
+      rotation: normalizePageRotation(pageRow.rotation),
       storagePath: pageRow.storage_path,
       sourceShareId,
       sourceScoreId,
@@ -7410,6 +7476,7 @@ function createScoreCard(score) {
     image.dataset.pageId = firstPage.id;
     bindScoreImageRecovery(image, firstPage.id);
     image.src = getScoreUrl(firstPage);
+    applyPageImageRotation(image, firstPage);
     image.alt = `《${score.name}》第 1 页`;
     previewButton.append(image);
   }
@@ -8382,6 +8449,7 @@ function renderViewerPages(score) {
     image.dataset.pageId = page.id;
     bindScoreImageRecovery(image, page.id);
     image.src = getScoreUrl(page, { hydrate: false });
+    applyPageImageRotation(image, page);
     image.alt = `《${score.name}》第 ${index + 1} 页`;
 
     const imageFrame = document.createElement("div");
@@ -8538,6 +8606,13 @@ function getScoreUrl(page, options = {}) {
     state.scoreUrls.set(page.id, URL.createObjectURL(page.blob));
   }
   return state.scoreUrls.get(page.id);
+}
+
+function applyPageImageRotation(image, page) {
+  const rotation = normalizePageRotation(page?.rotation);
+  image.style.setProperty("--page-rotation", `${rotation}deg`);
+  image.dataset.rotation = String(rotation);
+  image.classList.toggle("is-rotated-sideways", rotation === 90 || rotation === 270);
 }
 
 function bindScoreImageRecovery(image, pageId) {
@@ -8719,6 +8794,7 @@ function refreshPageImages(page) {
   const src = getScoreUrl(page);
   document.querySelectorAll("img[data-page-id]").forEach((image) => {
     if (image.dataset.pageId === page.id) {
+      applyPageImageRotation(image, page);
       image.src = src;
     }
   });
