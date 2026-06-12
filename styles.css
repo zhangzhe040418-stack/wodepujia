@@ -680,22 +680,37 @@ noscript {
 .setlist-dialog {
   position: fixed;
   inset: 0;
-  width: min(720px, calc(100vw - 24px));
-  margin: auto;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   overflow: hidden;
+  background: var(--app-bg);
   touch-action: auto;
 }
 
 .setlist-surface {
   width: 100%;
-  max-height: min(88vh, 760px);
-  max-height: min(88dvh, 760px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  max-height: none;
   max-width: 100%;
   box-sizing: border-box;
   align-content: start;
+  padding: calc(18px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
 }
 
@@ -733,13 +748,44 @@ noscript {
   display: grid;
   gap: 6px;
   max-width: 100%;
-  max-height: 280px;
+  max-height: none;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 2px;
   scrollbar-width: none;
   touch-action: pan-y;
+}
+
+.delete-setlist-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  width: 151px;
+  max-width: calc((100vw - 72px) / 2);
+  min-height: 42px;
+  gap: 8px;
+  border-radius: 8px;
+  background: #fff1ef;
+  color: var(--danger);
+  font-weight: 800;
+}
+
+.delete-setlist-button:hover,
+.delete-setlist-button:focus-visible {
+  background: #ffe2dd;
+  outline: none;
+}
+
+.delete-setlist-button .lucide,
+.delete-setlist-button [data-lucide] {
+  width: 18px;
+  height: 18px;
+}
+
+.delete-setlist-button[hidden] {
+  display: none;
 }
 
 .setlist-score-picker::-webkit-scrollbar,
@@ -920,17 +966,44 @@ body.preferences-screen-open .fab-button {
 }
 
 .score-edit-dialog {
-  width: min(430px, calc(100vw - 28px));
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--app-bg);
+  touch-action: auto;
+}
+
+.score-edit-dialog::backdrop,
+.setlist-dialog::backdrop {
+  background: var(--app-bg);
 }
 
 .score-edit-surface {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
   max-width: 100%;
+  max-height: none;
   box-sizing: border-box;
-  max-height: min(86vh, 720px);
-  max-height: min(86dvh, 720px);
+  align-content: start;
+  padding: calc(18px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
   gap: 10px;
 }
@@ -972,16 +1045,16 @@ body.preferences-screen-open .fab-button {
 }
 
 .dialog-pair-actions > button {
-  flex: 0 0 156px;
-  width: 156px;
+  flex: 0 0 151px;
+  width: 151px;
   max-width: calc((100vw - 72px) / 2);
   min-height: 42px;
 }
 
 .setlist-surface .dialog-pair-actions > button,
 .score-edit-surface .dialog-pair-actions > button {
-  flex-basis: 156px;
-  width: 156px;
+  flex-basis: 151px;
+  width: 151px;
 }
 
 .native-folder-select {
@@ -1203,6 +1276,10 @@ body.preferences-screen-open .fab-button {
   width: 100%;
   height: 100%;
   text-align: center;
+}
+
+.upload-meta-field {
+  margin: 0;
 }
 
 .preferences-page {
@@ -1501,6 +1578,49 @@ body.preferences-screen-open .fab-button {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 22px 64px rgba(23, 33, 31, 0.24);
+}
+
+.auth-dialog.score-edit-dialog,
+.auth-dialog.setlist-dialog {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.auth-dialog.score-edit-dialog::backdrop,
+.auth-dialog.setlist-dialog::backdrop {
+  background: var(--app-bg);
+}
+
+.auth-surface.score-edit-surface,
+.auth-surface.setlist-surface {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  max-width: none;
+  max-height: none;
+  box-sizing: border-box;
+  align-content: start;
+  padding: calc(18px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
 
 .auth-head {
@@ -2155,9 +2275,38 @@ body.preferences-screen-open .fab-button {
 }
 
 .viewer-topbar strong {
+  min-width: 0;
+  max-width: 46vw;
+  overflow: hidden;
   font-size: 0.98rem;
   font-weight: 900;
   letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-key-signature {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  min-width: 0;
+  max-width: 32vw;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 900;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-key-signature[hidden] {
+  display: none;
 }
 
 .viewer-back-button {

@@ -196,6 +196,7 @@ function bindElements() {
   elements.closeSetlistButton = document.querySelector("#closeSetlistButton");
   elements.cancelSetlistButton = document.querySelector("#cancelSetlistButton");
   elements.saveSetlistButton = document.querySelector("#saveSetlistButton");
+  elements.deleteSetlistButton = document.querySelector("#deleteSetlistButton");
   elements.syncNowButton = document.querySelector("#syncNowButton");
   elements.shareScoresButton = document.querySelector("#shareScoresButton");
   elements.importShareButton = document.querySelector("#importShareButton");
@@ -317,6 +318,13 @@ function bindElements() {
   elements.closeAddButton = document.querySelector("#closeAddButton");
   elements.scoreForm = document.querySelector("#scoreForm");
   elements.scoreName = document.querySelector("#scoreName");
+  elements.scoreFolder = document.querySelector("#scoreFolder");
+  elements.scoreFolderPicker = document.querySelector("#scoreFolderPicker");
+  elements.scoreFolderButton = document.querySelector("#scoreFolderButton");
+  elements.scoreFolderLabel = document.querySelector("#scoreFolderLabel");
+  elements.scoreFolderOptions = document.querySelector("#scoreFolderOptions");
+  elements.scoreKey = document.querySelector("#scoreKey");
+  elements.scoreNotes = document.querySelector("#scoreNotes");
   elements.cameraButton = document.querySelector("#cameraButton");
   elements.galleryButton = document.querySelector("#galleryButton");
   elements.fileButton = document.querySelector("#fileButton");
@@ -334,6 +342,7 @@ function bindElements() {
   elements.confirmDeleteButton = document.querySelector("#confirmDeleteButton");
   elements.viewerDialog = document.querySelector("#viewerDialog");
   elements.viewerTitle = document.querySelector("#viewerTitle");
+  elements.viewerKeySignature = document.querySelector("#viewerKeySignature");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
 }
@@ -358,6 +367,7 @@ function bindEvents() {
   elements.setlistForm?.addEventListener("submit", saveSetlist);
   elements.closeSetlistButton?.addEventListener("click", closeSetlistDialog);
   elements.cancelSetlistButton?.addEventListener("click", closeSetlistDialog);
+  elements.deleteSetlistButton?.addEventListener("click", () => deleteSetlist(state.editingSetlistId));
   elements.setlistScoreSearch?.addEventListener("input", renderSetlistScorePicker);
   elements.setlistScorePicker?.addEventListener("change", handleSetlistPickerChange);
   elements.setlistOrderList?.addEventListener("click", handleSetlistOrderAction);
@@ -557,6 +567,13 @@ function bindEvents() {
 
   elements.scoreForm.addEventListener("submit", saveScore);
   elements.resetFormButton.addEventListener("click", resetForm);
+  elements.scoreFolderButton?.addEventListener("click", toggleScoreFolderPicker);
+  elements.scoreFolderOptions?.addEventListener("click", handleScoreFolderOptionClick);
+  elements.uploadScreen?.addEventListener("click", (event) => {
+    if (event.target instanceof Element && !event.target.closest("#scoreFolderPicker")) {
+      closeScoreFolderPicker();
+    }
+  });
   elements.viewerPages.addEventListener("wheel", handleViewerWheel, { passive: false });
   elements.viewerPages.addEventListener("pointerdown", handleViewerPointerDown);
   elements.viewerPages.addEventListener("pointermove", handleViewerPointerMove);
@@ -1093,6 +1110,80 @@ function updateScoreEditFolderLabel() {
   );
   elements.scoreEditFolderLabel.textContent = selectedOption?.textContent || "谱夹";
   elements.scoreEditFolderOptions.querySelectorAll(".folder-select-option").forEach((option) => {
+    const selected = (option.dataset.folderId || "") === selectedId;
+    option.classList.toggle("is-selected", selected);
+    option.setAttribute("aria-selected", String(selected));
+  });
+}
+
+function populateScoreFolders(selectedFolderId = "") {
+  if (!elements.scoreFolder || !elements.scoreFolderOptions) {
+    return;
+  }
+
+  elements.scoreFolder.replaceChildren();
+  elements.scoreFolderOptions.replaceChildren();
+  const rootOption = document.createElement("option");
+  rootOption.value = "";
+  rootOption.textContent = "谱夹";
+  elements.scoreFolder.append(rootOption);
+  elements.scoreFolderOptions.append(createScoreEditFolderOption("", "谱夹"));
+
+  state.folders
+    .filter((folder) => !folder.deletedAt)
+    .forEach((folder) => {
+      const option = document.createElement("option");
+      option.value = folder.id;
+      option.textContent = folder.name;
+      elements.scoreFolder.append(option);
+      elements.scoreFolderOptions.append(createScoreEditFolderOption(folder.id, folder.name));
+    });
+
+  elements.scoreFolder.value = selectedFolderId || "";
+  updateScoreFolderLabel();
+  closeScoreFolderPicker();
+}
+
+function toggleScoreFolderPicker() {
+  const nextOpen = elements.scoreFolderOptions.hidden;
+  elements.scoreFolderOptions.hidden = !nextOpen;
+  elements.scoreFolderButton.setAttribute("aria-expanded", String(nextOpen));
+  elements.scoreFolderPicker.classList.toggle("is-open", nextOpen);
+  updateScoreFolderLabel();
+}
+
+function closeScoreFolderPicker() {
+  if (!elements.scoreFolderOptions) {
+    return;
+  }
+  elements.scoreFolderOptions.hidden = true;
+  elements.scoreFolderButton?.setAttribute("aria-expanded", "false");
+  elements.scoreFolderPicker?.classList.remove("is-open");
+}
+
+function handleScoreFolderOptionClick(event) {
+  const button = event.target.closest("button[data-folder-id]");
+  if (!button) {
+    return;
+  }
+
+  elements.scoreFolder.value = button.dataset.folderId || "";
+  updateScoreFolderLabel();
+  closeScoreFolderPicker();
+  elements.scoreFolderButton.focus();
+}
+
+function updateScoreFolderLabel() {
+  if (!elements.scoreFolder || !elements.scoreFolderOptions) {
+    return;
+  }
+
+  const selectedId = elements.scoreFolder.value || "";
+  const selectedOption = Array.from(elements.scoreFolderOptions.querySelectorAll(".folder-select-option")).find(
+    (option) => (option.dataset.folderId || "") === selectedId,
+  );
+  elements.scoreFolderLabel.textContent = selectedOption?.textContent || "谱夹";
+  elements.scoreFolderOptions.querySelectorAll(".folder-select-option").forEach((option) => {
     const selected = (option.dataset.folderId || "") === selectedId;
     option.classList.toggle("is-selected", selected);
     option.setAttribute("aria-selected", String(selected));
@@ -2670,6 +2761,7 @@ async function signOut() {
 function openAddScreen() {
   state.addScreenOpen = true;
   state.activeTab = "library";
+  populateScoreFolders(state.currentFolderId || "");
   elements.libraryScreen.hidden = true;
   elements.myScreen.hidden = true;
   elements.uploadScreen.hidden = false;
@@ -2715,7 +2807,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=78");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=79");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3455,6 +3547,25 @@ function putSetlistWithItems(setlist, items, deletedItems = []) {
   });
 }
 
+function deleteSetlistRecord(setlistId) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME], "readwrite");
+    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
+    const itemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
+    const itemIndex = itemStore.index("setlistId");
+    const itemRequest = itemIndex.getAllKeys(setlistId);
+
+    setlistStore.delete(setlistId);
+    itemRequest.onsuccess = () => {
+      itemRequest.result.forEach((key) => itemStore.delete(key));
+    };
+    itemRequest.onerror = () => reject(itemRequest.error);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
 function deleteScoreRecord(id) {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
@@ -3791,16 +3902,17 @@ async function saveScore(event) {
 
   const now = new Date().toISOString();
   const userId = state.session?.user?.id || null;
+  const folderId = elements.scoreFolder ? elements.scoreFolder.value || null : state.currentFolderId || null;
   const score = {
     id: createId(),
     userId,
     name,
     normalizedName: normalizeText(name),
-    folderId: state.currentFolderId || null,
+    folderId,
     tags: [],
-    keySignature: "",
+    keySignature: elements.scoreKey?.value.trim() || "",
     usage: "",
-    notes: "",
+    notes: elements.scoreNotes?.value.trim() || "",
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
@@ -6540,6 +6652,8 @@ function createShareCodeValue() {
 
 function resetForm(showMessage = true) {
   elements.scoreForm.reset();
+  populateScoreFolders(state.currentFolderId || "");
+  closeScoreFolderPicker();
   clearPendingUrls();
   state.pendingPages = [];
   renderPending();
@@ -6852,6 +6966,8 @@ function openSetlistDialog(setlistId = "") {
   elements.setlistDate.value = setlist?.date || new Date().toISOString().slice(0, 10);
   elements.setlistScene.value = setlist?.scene || "";
   elements.setlistScoreSearch.value = "";
+  elements.deleteSetlistButton.hidden = !setlist;
+  elements.deleteSetlistButton.disabled = false;
   setSetlistDialogStatus("");
   renderSetlistScorePicker();
   renderSetlistOrderList();
@@ -6870,6 +6986,8 @@ function closeSetlistDialog() {
   state.setlistDraftScoreIds = [];
   elements.setlistForm.reset();
   elements.saveSetlistButton.disabled = false;
+  elements.deleteSetlistButton.hidden = true;
+  elements.deleteSetlistButton.disabled = false;
   setSetlistDialogStatus("");
   if (elements.setlistDialog.open) {
     elements.setlistDialog.close();
@@ -7085,6 +7203,66 @@ async function saveSetlist(event) {
   }
 }
 
+async function deleteSetlist(id) {
+  const setlist = state.setlists.find((item) => item.id === id);
+  if (!setlist) {
+    return;
+  }
+
+  const itemCount = getSetlistItems(id).length;
+  const confirmed = await requestDeleteConfirmation({
+    title: "删除歌单？",
+    message: `确定删除《${setlist.name}》歌单吗？其中 ${itemCount} 首歌谱不会被删除。`,
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  elements.deleteSetlistButton.disabled = true;
+  setSetlistDialogStatus("正在删除...");
+
+  try {
+    const deletedAt = new Date().toISOString();
+    const userId = setlist.userId || state.session?.user?.id || null;
+    const setlistItems = state.setlistItems.filter((item) => item.setlistId === id);
+
+    if (shouldKeepDeleteTombstone(setlist)) {
+      await putSetlistWithItems(
+        {
+          ...setlist,
+          userId,
+          deletedAt,
+          updatedAt: deletedAt,
+          syncStatus: SYNC_STATUS_PENDING,
+        },
+        [],
+        setlistItems.map((item) => ({
+          ...item,
+          userId: item.userId || userId,
+          deletedAt,
+          updatedAt: deletedAt,
+          syncStatus: SYNC_STATUS_PENDING,
+        })),
+      );
+      queueSync();
+    } else {
+      await deleteSetlistRecord(id);
+    }
+
+    if (state.currentViewerSetlistId === id && elements.viewerDialog.open) {
+      closeViewer();
+    }
+    closeSetlistDialog();
+    await loadScores();
+    setStatus(`《${setlist.name}》歌单已删除。`);
+  } catch (error) {
+    console.error(error);
+    setSetlistDialogStatus("删除歌单失败，请稍后再试。", true);
+  } finally {
+    elements.deleteSetlistButton.disabled = false;
+  }
+}
+
 function setSetlistDialogStatus(message, isError = false) {
   elements.setlistDialogState.textContent = message || "";
   elements.setlistDialogState.hidden = !message;
@@ -7138,6 +7316,7 @@ function openViewer(id) {
   state.currentViewerScoreId = score.id;
   state.currentViewerSetlistId = null;
   elements.viewerTitle.textContent = "查看歌谱";
+  setViewerKeySignature(score.keySignature);
   renderViewerPages(score);
 
   if (typeof elements.viewerDialog.showModal === "function") {
@@ -7176,6 +7355,7 @@ function openSetlistViewer(id) {
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = setlist.id;
   elements.viewerTitle.textContent = setlist.name;
+  setViewerKeySignature("");
   renderViewerPages(virtualScore);
 
   if (typeof elements.viewerDialog.showModal === "function") {
@@ -7203,6 +7383,7 @@ function closeViewer(options = {}) {
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = null;
   elements.viewerTitle.textContent = "查看歌谱";
+  setViewerKeySignature("");
 
   if (elements.viewerDialog.open) {
     elements.viewerDialog.close();
@@ -7214,6 +7395,16 @@ function closeViewer(options = {}) {
   if (shouldReturnHistory) {
     window.history.back();
   }
+}
+
+function setViewerKeySignature(value) {
+  if (!elements.viewerKeySignature) {
+    return;
+  }
+
+  const keySignature = String(value || "").trim();
+  elements.viewerKeySignature.textContent = keySignature ? `调号 ${keySignature}` : "";
+  elements.viewerKeySignature.hidden = !keySignature;
 }
 
 function resetViewerGestureState() {

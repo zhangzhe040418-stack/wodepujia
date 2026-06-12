@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=78" />
+    <link rel="stylesheet" href="styles.css?v=79" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=78"></script>
+    <script defer charset="UTF-8" src="app.js?v=79"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -261,6 +261,26 @@
           <label class="field">
             <span>歌谱名</span>
             <input id="scoreName" name="scoreName" type="text" maxlength="60" placeholder="例如：送别" required />
+          </label>
+
+          <label class="field upload-meta-field">
+            <span>所属文件夹</span>
+            <select class="native-folder-select" id="scoreFolder" name="scoreFolder" tabindex="-1" aria-hidden="true"></select>
+            <div class="folder-select" id="scoreFolderPicker">
+              <button class="folder-select-button" id="scoreFolderButton" type="button" aria-haspopup="listbox" aria-expanded="false">
+                <span id="scoreFolderLabel">谱夹</span>
+                <i data-lucide="chevron-down" aria-hidden="true"></i>
+              </button>
+              <div class="folder-select-options" id="scoreFolderOptions" role="listbox" hidden></div>
+            </div>
+          </label>
+          <label class="field upload-meta-field">
+            <span>调号</span>
+            <input id="scoreKey" name="scoreKey" type="text" maxlength="20" autocomplete="off" placeholder="可选，例如 C、G、降B" />
+          </label>
+          <label class="field upload-meta-field">
+            <span>备注</span>
+            <textarea id="scoreNotes" name="scoreNotes" maxlength="200" rows="3" placeholder="可选"></textarea>
           </label>
 
           <div class="source-group" role="group" aria-label="上传方式">
@@ -689,6 +709,10 @@
         </div>
 
         <p class="share-dialog-status" id="setlistDialogState" role="status" aria-live="polite" hidden></p>
+        <button class="delete-setlist-button" id="deleteSetlistButton" type="button" hidden>
+          <i data-lucide="trash-2" aria-hidden="true"></i>
+          <span>删除歌单</span>
+        </button>
         <div class="auth-actions score-edit-actions dialog-pair-actions">
           <button class="cancel-delete-button" id="cancelSetlistButton" type="button">取消</button>
           <button class="confirm-delete-button folder-save-button" id="saveSetlistButton" type="submit">
@@ -707,7 +731,7 @@
             <span>返回</span>
           </button>
           <strong id="viewerTitle">查看歌谱</strong>
-          <span aria-hidden="true"></span>
+          <span class="viewer-key-signature" id="viewerKeySignature" hidden></span>
         </div>
         <div class="viewer-pages" id="viewerPages"></div>
       </div>
