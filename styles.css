@@ -673,8 +673,10 @@ noscript {
 }
 
 .setlist-card-actions {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .setlist-dialog {
@@ -1475,6 +1477,7 @@ body.preferences-screen-open .fab-button {
 
 .field input,
 .field select {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   max-width: 100%;
@@ -1505,6 +1508,12 @@ body.preferences-screen-open .fab-button {
 .searchbar:focus-within {
   border-color: rgba(15, 118, 110, 0.72);
   box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
+}
+
+#setlistDate {
+  min-width: 0;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .profile-contact-list {
@@ -1593,8 +1602,11 @@ body.preferences-screen-open .fab-button {
   padding: 0;
   border: 0;
   border-radius: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--app-bg);
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .auth-dialog.score-edit-dialog::backdrop,
@@ -1607,6 +1619,7 @@ body.preferences-screen-open .fab-button {
   width: 100%;
   min-height: 100vh;
   min-height: 100dvh;
+  height: auto;
   max-width: none;
   max-height: none;
   box-sizing: border-box;
@@ -1616,10 +1629,7 @@ body.preferences-screen-open .fab-button {
   border-radius: 0;
   background: var(--surface);
   box-shadow: none;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
+  overflow: visible;
   touch-action: pan-y;
 }
 
@@ -1688,6 +1698,22 @@ body.preferences-screen-open .fab-button {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.auth-actions.dialog-pair-actions {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  width: 100%;
+}
+
+.auth-actions.dialog-pair-actions > button {
+  flex: 0 1 151px;
+  width: 151px;
+  max-width: calc((100vw - 72px) / 2);
+  box-sizing: border-box;
 }
 
 .auth-actions .cancel-delete-button[hidden] {

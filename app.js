@@ -2807,7 +2807,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=79");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=80");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -6935,7 +6935,15 @@ function createSetlistCard(setlist) {
     event.stopPropagation();
     openSetlistDialog(setlist.id);
   });
-  actions.append(manageButton);
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "danger-button";
+  deleteButton.type = "button";
+  deleteButton.append(createIcon("trash-2"), document.createTextNode("删除"));
+  deleteButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    deleteSetlist(setlist.id);
+  });
+  actions.append(manageButton, deleteButton);
 
   card.append(icon, body, actions);
   return card;
