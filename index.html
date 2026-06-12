@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=81" />
+    <link rel="stylesheet" href="styles.css?v=82" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=81"></script>
+    <script defer charset="UTF-8" src="app.js?v=82"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -603,6 +603,10 @@
             <i data-lucide="folder-input" aria-hidden="true"></i>
             <span>移动到文件夹</span>
           </button>
+          <button class="choice-button" id="scoreActionPagesButton" type="button">
+            <i data-lucide="copy-plus" aria-hidden="true"></i>
+            <span>管理页面</span>
+          </button>
           <button class="choice-button danger-choice-button" id="scoreActionDeleteButton" type="button">
             <i data-lucide="trash-2" aria-hidden="true"></i>
             <span>删除歌谱</span>
@@ -651,6 +655,27 @@
           </button>
         </div>
       </form>
+    </dialog>
+
+    <dialog class="auth-dialog page-manager-dialog" id="pageManagerDialog" aria-labelledby="pageManagerTitle">
+      <div class="auth-surface page-manager-surface">
+        <div class="auth-head">
+          <h2 id="pageManagerTitle">管理页面</h2>
+          <button class="icon-button" id="closePageManagerButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p class="auth-state" id="pageManagerState">可调整页面顺序、替换图片或追加新页面。</p>
+        <div class="page-manager-toolbar">
+          <button class="confirm-delete-button folder-save-button" id="appendPageButton" type="button">
+            <i data-lucide="plus" aria-hidden="true"></i>
+            <span>追加新页面</span>
+          </button>
+        </div>
+        <input id="appendPageInput" type="file" accept="image/*" multiple hidden />
+        <input id="replacePageInput" type="file" accept="image/*" hidden />
+        <div class="page-manager-list" id="pageManagerList"></div>
+      </div>
     </dialog>
 
     <dialog class="confirm-dialog" id="deleteDialog" aria-labelledby="deleteDialogTitle">
@@ -731,7 +756,14 @@
             <span>返回</span>
           </button>
           <strong id="viewerTitle">查看歌谱</strong>
-          <span class="viewer-key-signature" id="viewerKeySignature" hidden></span>
+          <div class="viewer-topbar-controls">
+            <span class="viewer-key-signature" id="viewerKeySignature" hidden></span>
+            <span class="viewer-page-indicator" id="viewerPageIndicator">1 / 1</span>
+            <button class="viewer-performance-button" id="viewerPerformanceButton" type="button">
+              <i data-lucide="monitor-up" aria-hidden="true"></i>
+              <span id="viewerPerformanceText">演出</span>
+            </button>
+          </div>
         </div>
         <div class="viewer-pages" id="viewerPages"></div>
       </div>

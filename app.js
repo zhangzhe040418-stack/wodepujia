@@ -80,6 +80,9 @@ const state = {
   pageHydrationTimer: 0,
   pageHydrationRunning: false,
   pageHydrationQueued: false,
+  viewerPageIndicatorFrame: 0,
+  viewerPerformanceMode: false,
+  wakeLockSentinel: null,
   installPrompt: null,
   addScreenOpen: false,
   accountSyncTimer: 0,
@@ -113,6 +116,8 @@ const state = {
   deleteDialogResolve: null,
   verifyDialogResolve: null,
   scoreActionId: "",
+  pageManagerScoreId: "",
+  pageManagerReplacePageId: "",
   scoreEditId: "",
   folderActionId: "",
   editingFolderId: "",
@@ -299,8 +304,17 @@ function bindElements() {
   elements.scoreActionTitle = document.querySelector("#scoreActionTitle");
   elements.scoreActionEditButton = document.querySelector("#scoreActionEditButton");
   elements.scoreActionMoveButton = document.querySelector("#scoreActionMoveButton");
+  elements.scoreActionPagesButton = document.querySelector("#scoreActionPagesButton");
   elements.scoreActionDeleteButton = document.querySelector("#scoreActionDeleteButton");
   elements.closeScoreActionButton = document.querySelector("#closeScoreActionButton");
+  elements.pageManagerDialog = document.querySelector("#pageManagerDialog");
+  elements.pageManagerTitle = document.querySelector("#pageManagerTitle");
+  elements.pageManagerState = document.querySelector("#pageManagerState");
+  elements.pageManagerList = document.querySelector("#pageManagerList");
+  elements.closePageManagerButton = document.querySelector("#closePageManagerButton");
+  elements.appendPageButton = document.querySelector("#appendPageButton");
+  elements.appendPageInput = document.querySelector("#appendPageInput");
+  elements.replacePageInput = document.querySelector("#replacePageInput");
   elements.scoreEditDialog = document.querySelector("#scoreEditDialog");
   elements.scoreEditForm = document.querySelector("#scoreEditForm");
   elements.scoreEditTitle = document.querySelector("#scoreEditTitle");
@@ -345,6 +359,9 @@ function bindElements() {
   elements.viewerDialog = document.querySelector("#viewerDialog");
   elements.viewerTitle = document.querySelector("#viewerTitle");
   elements.viewerKeySignature = document.querySelector("#viewerKeySignature");
+  elements.viewerPageIndicator = document.querySelector("#viewerPageIndicator");
+  elements.viewerPerformanceButton = document.querySelector("#viewerPerformanceButton");
+  elements.viewerPerformanceText = document.querySelector("#viewerPerformanceText");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
 }
@@ -534,6 +551,11 @@ function bindEvents() {
     closeScoreActionDialog();
     openScoreEditDialog(scoreId, { mode: "move" });
   });
+  elements.scoreActionPagesButton?.addEventListener("click", () => {
+    const scoreId = state.scoreActionId;
+    closeScoreActionDialog();
+    openPageManagerDialog(scoreId);
+  });
   elements.scoreActionDeleteButton?.addEventListener("click", () => {
     const scoreId = state.scoreActionId;
     closeScoreActionDialog();
@@ -547,6 +569,15 @@ function bindEvents() {
     if (event.target === elements.scoreActionDialog) {
       closeScoreActionDialog();
     }
+  });
+  elements.closePageManagerButton?.addEventListener("click", closePageManagerDialog);
+  elements.appendPageButton?.addEventListener("click", () => openFilePicker(elements.appendPageInput));
+  elements.appendPageInput?.addEventListener("change", () => appendManagedPages(elements.appendPageInput.files));
+  elements.replacePageInput?.addEventListener("change", () => replaceManagedPage(elements.replacePageInput.files?.[0]));
+  elements.pageManagerList?.addEventListener("click", handlePageManagerAction);
+  elements.pageManagerDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closePageManagerDialog();
   });
   elements.scoreEditForm?.addEventListener("submit", saveScoreEdit);
   elements.closeScoreEditButton?.addEventListener("click", closeScoreEditDialog);
@@ -581,11 +612,16 @@ function bindEvents() {
   elements.viewerPages.addEventListener("pointermove", handleViewerPointerMove);
   elements.viewerPages.addEventListener("pointerup", handleViewerPointerEnd);
   elements.viewerPages.addEventListener("pointercancel", handleViewerPointerEnd);
+  elements.viewerPages.addEventListener("scroll", scheduleViewerPageIndicatorUpdate, { passive: true });
   elements.viewerDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
+    if (state.viewerPerformanceMode) {
+      return;
+    }
     closeViewer();
   });
   elements.viewerBackButton.addEventListener("click", closeViewer);
+  elements.viewerPerformanceButton?.addEventListener("click", toggleViewerPerformanceMode);
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
   elements.confirmDeleteButton.addEventListener("click", () => closeDeleteDialog(true));
   elements.deleteDialog.addEventListener("cancel", (event) => {
@@ -605,8 +641,16 @@ function bindEvents() {
   window.addEventListener("orientationchange", () => {
     window.setTimeout(clampFabIntoBounds, 250);
   });
+  document.addEventListener("visibilitychange", handleWakeLockVisibilityChange);
   window.addEventListener("popstate", (event) => {
     if (state.viewerHistoryActive) {
+      if (state.viewerPerformanceMode) {
+        const historyState = state.currentViewerSetlistId
+          ? { setlistViewer: state.currentViewerSetlistId }
+          : { viewer: state.currentViewerScoreId };
+        window.history.pushState(historyState, "");
+        return;
+      }
       closeViewer({ fromHistory: true });
       return;
     }
@@ -2816,7 +2860,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=81");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=82");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3532,6 +3576,21 @@ function putScorePage(page) {
   });
 }
 
+function putScorePageChanges(score, activePages, deletedPages = []) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
+    const scoreStore = transaction.objectStore(STORE_NAME);
+    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+
+    scoreStore.put(toScoreRecord(score));
+    [...activePages, ...deletedPages].forEach((page) => pageStore.put(page));
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
 function putFolder(folder) {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction(FOLDER_STORE_NAME, "readwrite");
@@ -4017,6 +4076,389 @@ async function saveScoreEdit(event) {
     setScoreEditStatus(getErrorMessage(error) || "保存失败，请稍后再试。", true);
   } finally {
     elements.saveScoreEditButton.disabled = false;
+  }
+}
+
+function openPageManagerDialog(scoreId) {
+  const score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    return;
+  }
+
+  state.pageManagerScoreId = scoreId;
+  state.pageManagerReplacePageId = "";
+  elements.pageManagerTitle.textContent = `管理《${score.name}》页面`;
+  setPageManagerStatus("可调整页面顺序、替换图片或追加新页面。");
+  renderPageManager();
+
+  if (typeof elements.pageManagerDialog.showModal === "function") {
+    elements.pageManagerDialog.showModal();
+  } else {
+    elements.pageManagerDialog.setAttribute("open", "");
+  }
+
+  refreshIcons();
+}
+
+function closePageManagerDialog() {
+  state.pageManagerScoreId = "";
+  state.pageManagerReplacePageId = "";
+  elements.appendPageInput.value = "";
+  elements.replacePageInput.value = "";
+  if (elements.pageManagerDialog.open) {
+    elements.pageManagerDialog.close();
+  } else {
+    elements.pageManagerDialog.removeAttribute("open");
+  }
+}
+
+function getPageManagerScore() {
+  return state.scores.find((score) => score.id === state.pageManagerScoreId) || null;
+}
+
+function getPageManagerPages() {
+  const score = getPageManagerScore();
+  return [...(score?.pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
+}
+
+function renderPageManager() {
+  const score = getPageManagerScore();
+  const pages = getPageManagerPages();
+  elements.pageManagerList.replaceChildren();
+
+  if (!score) {
+    elements.pageManagerList.append(createEmptyState("没有找到歌谱", "请关闭后重新打开。"));
+    refreshIcons();
+    return;
+  }
+
+  if (!pages.length) {
+    elements.pageManagerList.append(createEmptyState("还没有页面", "可以追加新页面。"));
+    refreshIcons();
+    return;
+  }
+
+  pages.forEach((page, index) => {
+    const row = document.createElement("article");
+    row.className = "page-manager-row";
+    row.dataset.pageId = page.id;
+
+    const thumb = document.createElement("div");
+    thumb.className = "page-manager-thumb";
+    const image = document.createElement("img");
+    image.draggable = false;
+    image.dataset.pageId = page.id;
+    bindScoreImageRecovery(image, page.id);
+    image.src = getScoreUrl(page);
+    image.alt = `《${score.name}》第 ${index + 1} 页`;
+    thumb.append(image);
+
+    const body = document.createElement("div");
+    body.className = "page-manager-body";
+    const title = document.createElement("strong");
+    title.textContent = `第 ${index + 1} 页`;
+    const meta = document.createElement("span");
+    meta.textContent = page.name || "歌谱图片";
+    body.append(title, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "page-manager-actions";
+    actions.append(
+      createPageManagerButton("arrow-up", "上移", page.id, "up", index === 0),
+      createPageManagerButton("arrow-down", "下移", page.id, "down", index === pages.length - 1),
+      createPageManagerButton("rotate-cw", "旋转", page.id, "rotate", false),
+      createPageManagerButton("image-up", "替换", page.id, "replace", false),
+      createPageManagerButton("star", "设封面", page.id, "cover", index === 0),
+      createPageManagerButton("trash-2", "删除", page.id, "delete", pages.length <= 1, true),
+    );
+
+    row.append(thumb, body, actions);
+    elements.pageManagerList.append(row);
+  });
+
+  refreshIcons();
+}
+
+function createPageManagerButton(iconName, label, pageId, action, disabled = false, danger = false) {
+  const button = document.createElement("button");
+  button.className = danger ? "page-manager-icon-button is-danger" : "page-manager-icon-button";
+  button.type = "button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.dataset.pageId = pageId;
+  button.dataset.pageAction = action;
+  button.disabled = disabled;
+  button.append(createIcon(iconName));
+  return button;
+}
+
+function setPageManagerStatus(message, isError = false) {
+  elements.pageManagerState.textContent = message || "";
+  elements.pageManagerState.style.color = isError ? "var(--danger)" : "var(--muted)";
+}
+
+async function handlePageManagerAction(event) {
+  const button = event.target.closest("button[data-page-action]");
+  if (!button) {
+    return;
+  }
+
+  const pageId = button.dataset.pageId;
+  const action = button.dataset.pageAction;
+  const pages = getPageManagerPages();
+  const index = pages.findIndex((page) => page.id === pageId);
+  if (index < 0) {
+    return;
+  }
+
+  if (action === "replace") {
+    state.pageManagerReplacePageId = pageId;
+    openFilePicker(elements.replacePageInput);
+    return;
+  }
+
+  try {
+    if (action === "up" && index > 0) {
+      [pages[index - 1], pages[index]] = [pages[index], pages[index - 1]];
+      await persistManagedPages(pages, [], "页面已上移。");
+    } else if (action === "down" && index < pages.length - 1) {
+      [pages[index + 1], pages[index]] = [pages[index], pages[index + 1]];
+      await persistManagedPages(pages, [], "页面已下移。");
+    } else if (action === "cover" && index > 0) {
+      const [coverPage] = pages.splice(index, 1);
+      pages.unshift(coverPage);
+      await persistManagedPages(pages, [], "已设为封面。");
+    } else if (action === "rotate") {
+      await rotateManagedPage(pages[index]);
+    } else if (action === "delete") {
+      await deleteManagedPage(pages[index]);
+    }
+  } catch (error) {
+    console.error(error);
+    setPageManagerStatus(error.message || "页面操作失败，请稍后再试。", true);
+  }
+}
+
+async function persistManagedPages(activePages, deletedPages = [], message = "页面已更新。") {
+  const score = getPageManagerScore();
+  if (!score) {
+    throw new Error("没有找到歌谱。");
+  }
+
+  const now = new Date().toISOString();
+  const userId = score.userId || state.session?.user?.id || null;
+  const normalizedPages = activePages.map((page, index) => ({
+    ...page,
+    userId: page.userId || userId,
+    pageIndex: index,
+    updatedAt: now,
+    deletedAt: null,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  }));
+  const normalizedDeletedPages = deletedPages.map((page) => ({
+    ...page,
+    userId: page.userId || userId,
+    deletedAt: now,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  }));
+  const updatedScore = {
+    ...toScoreRecord(score),
+    userId,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+
+  await putScorePageChanges(updatedScore, normalizedPages, normalizedDeletedPages);
+  normalizedDeletedPages.forEach((page) => revokeScoreUrlForPage(page.id));
+  await loadScores();
+  renderPageManager();
+  setPageManagerStatus(message);
+
+  if (userId && state.cloudReady) {
+    queueSync();
+  }
+}
+
+async function deleteManagedPage(page) {
+  const pages = getPageManagerPages();
+  if (pages.length <= 1) {
+    setPageManagerStatus("至少需要保留一页。", true);
+    return;
+  }
+
+  const confirmed = await requestDeleteConfirmation({
+    title: "删除这一页？",
+    message: `确定删除第 ${page.pageIndex + 1} 页吗？删除后会同步到云端。`,
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  await persistManagedPages(
+    pages.filter((item) => item.id !== page.id),
+    [page],
+    "页面已删除。",
+  );
+}
+
+async function rotateManagedPage(page) {
+  setPageManagerStatus("正在旋转页面...");
+  const editablePage = await ensurePageBlobForEdit(page);
+  const rotatedBlob = await rotateImageBlob(editablePage.blob, editablePage.type);
+  const updatedPage = {
+    ...editablePage,
+    type: rotatedBlob.type || editablePage.type || "image/jpeg",
+    size: rotatedBlob.size,
+    blob: rotatedBlob,
+    storageSyncedAt: null,
+    storageUploadVersion: 0,
+  };
+  revokeScoreUrlForPage(updatedPage.id);
+  const pages = getPageManagerPages().map((item) => (item.id === updatedPage.id ? updatedPage : item));
+  await persistManagedPages(pages, [], "页面已旋转 90 度。");
+}
+
+async function appendManagedPages(fileList) {
+  const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+  elements.appendPageInput.value = "";
+  if (!files.length) {
+    setPageManagerStatus("请选择图片文件。", true);
+    return;
+  }
+
+  const score = getPageManagerScore();
+  if (!score) {
+    return;
+  }
+
+  try {
+    setPageManagerStatus(`正在追加 1 / ${files.length} 页...`);
+    const newPages = [];
+    for (const [index, file] of files.entries()) {
+      const compressed = await withTimeout(
+        compressImageFile(file),
+        IMAGE_COMPRESSION_TIMEOUT,
+        `《${file.name}》压缩超时，已使用原图。`,
+      ).catch((error) => {
+        console.warn(error);
+        return file;
+      });
+      newPages.push({
+        id: createId(),
+        scoreId: score.id,
+        userId: score.userId || state.session?.user?.id || null,
+        pageIndex: 0,
+        name: file.name,
+        type: compressed.type || file.type || "image/jpeg",
+        size: compressed.size,
+        blob: compressed,
+        storagePath: null,
+        storageSyncedAt: null,
+        storageUploadVersion: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        deletedAt: null,
+        syncStatus: state.session?.user?.id ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+      });
+      if (index < files.length - 1) {
+        setPageManagerStatus(`正在追加 ${index + 2} / ${files.length} 页...`);
+      }
+    }
+    await persistManagedPages([...getPageManagerPages(), ...newPages], [], `已追加 ${newPages.length} 页。`);
+  } catch (error) {
+    console.error(error);
+    setPageManagerStatus(error.message || "追加页面失败，请稍后再试。", true);
+  }
+}
+
+async function replaceManagedPage(file) {
+  const pageId = state.pageManagerReplacePageId;
+  state.pageManagerReplacePageId = "";
+  elements.replacePageInput.value = "";
+  if (!pageId || !file) {
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    setPageManagerStatus("请选择图片文件。", true);
+    return;
+  }
+
+  try {
+    setPageManagerStatus("正在替换页面...");
+    const pages = getPageManagerPages();
+    const page = pages.find((item) => item.id === pageId);
+    if (!page) {
+      return;
+    }
+    const compressed = await withTimeout(
+      compressImageFile(file),
+      IMAGE_COMPRESSION_TIMEOUT,
+      `《${file.name}》压缩超时，已使用原图。`,
+    ).catch((error) => {
+      console.warn(error);
+      return file;
+    });
+    const updatedPage = {
+      ...page,
+      name: file.name,
+      type: compressed.type || file.type || "image/jpeg",
+      size: compressed.size,
+      blob: compressed,
+      storageSyncedAt: null,
+      storageUploadVersion: 0,
+    };
+    revokeScoreUrlForPage(updatedPage.id);
+    await persistManagedPages(
+      pages.map((item) => (item.id === updatedPage.id ? updatedPage : item)),
+      [],
+      "页面已替换。",
+    );
+  } catch (error) {
+    console.error(error);
+    setPageManagerStatus(error.message || "替换页面失败，请稍后再试。", true);
+  }
+}
+
+async function ensurePageBlobForEdit(page) {
+  let editablePage = state.scorePages.find((item) => item.id === page.id) || page;
+  if (editablePage.blob?.size > 0) {
+    return editablePage;
+  }
+
+  if (editablePage.storagePath) {
+    await hydrateScorePage(editablePage);
+    editablePage = state.scorePages.find((item) => item.id === page.id) || editablePage;
+  }
+
+  if (!editablePage.blob?.size) {
+    throw new Error("这一页图片尚未下载完成，请刷新同步后再试。");
+  }
+
+  return editablePage;
+}
+
+async function rotateImageBlob(blob, type = "image/jpeg") {
+  const source = await loadImageSource(blob);
+  try {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { alpha: false });
+    canvas.width = source.height;
+    canvas.height = source.width;
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.translate(canvas.width, 0);
+    context.rotate(Math.PI / 2);
+    context.drawImage(source.image, 0, 0);
+    const outputType = getSafeImageMimeType(type) || "image/jpeg";
+    const quality = outputType === "image/webp" ? IMAGE_WEBP_QUALITY : IMAGE_JPEG_QUALITY;
+    const rotatedBlob = (await canvasToBlob(canvas, outputType, quality)) || (await canvasToBlob(canvas, "image/jpeg", IMAGE_JPEG_QUALITY));
+    if (!rotatedBlob) {
+      throw new Error("页面旋转失败，请稍后再试。");
+    }
+    return rotatedBlob;
+  } finally {
+    source.close?.();
   }
 }
 
@@ -7335,6 +7777,7 @@ function openViewer(id) {
   state.currentViewerSetlistId = null;
   elements.viewerTitle.textContent = "查看歌谱";
   setViewerKeySignature(score.keySignature);
+  exitViewerPerformanceMode({ silent: true });
   renderViewerPages(score);
 
   if (typeof elements.viewerDialog.showModal === "function") {
@@ -7374,6 +7817,7 @@ function openSetlistViewer(id) {
   state.currentViewerSetlistId = setlist.id;
   elements.viewerTitle.textContent = setlist.name;
   setViewerKeySignature("");
+  exitViewerPerformanceMode({ silent: true });
   renderViewerPages(virtualScore);
 
   if (typeof elements.viewerDialog.showModal === "function") {
@@ -7402,6 +7846,7 @@ function closeViewer(options = {}) {
   state.currentViewerSetlistId = null;
   elements.viewerTitle.textContent = "查看歌谱";
   setViewerKeySignature("");
+  exitViewerPerformanceMode({ silent: true });
 
   if (elements.viewerDialog.open) {
     elements.viewerDialog.close();
@@ -7423,6 +7868,132 @@ function setViewerKeySignature(value) {
   const keySignature = String(value || "").trim();
   elements.viewerKeySignature.textContent = keySignature ? `调号 ${keySignature}` : "";
   elements.viewerKeySignature.hidden = !keySignature;
+}
+
+function setViewerPageIndicator(current, total) {
+  if (!elements.viewerPageIndicator) {
+    return;
+  }
+  const safeTotal = Math.max(1, Number(total) || 1);
+  const safeCurrent = clamp(Number(current) || 1, 1, safeTotal);
+  elements.viewerPageIndicator.textContent = `${safeCurrent} / ${safeTotal}`;
+}
+
+function scheduleViewerPageIndicatorUpdate() {
+  if (state.viewerPageIndicatorFrame) {
+    return;
+  }
+
+  state.viewerPageIndicatorFrame = requestAnimationFrame(() => {
+    state.viewerPageIndicatorFrame = 0;
+    updateViewerPageIndicator();
+  });
+}
+
+function updateViewerPageIndicator() {
+  const pages = Array.from(elements.viewerPages.querySelectorAll(".viewer-page"));
+  if (!pages.length) {
+    setViewerPageIndicator(1, 1);
+    return;
+  }
+
+  const horizontal = elements.viewerPages.classList.contains("is-horizontal-mode") && !elements.viewerPages.classList.contains("is-zoomed");
+  let currentIndex = 0;
+
+  if (horizontal) {
+    const pageWidth = Math.max(1, pages[0].getBoundingClientRect().width || elements.viewerPages.clientWidth);
+    currentIndex = clamp(Math.round(elements.viewerPages.scrollLeft / pageWidth), 0, pages.length - 1);
+  } else {
+    const offsets = pages.map((page) => page.offsetTop);
+    const canUseOffsets = offsets.some((offset, index) => index > 0 && offset !== offsets[0]);
+    if (canUseOffsets) {
+      const targetTop = elements.viewerPages.scrollTop + Math.max(1, elements.viewerPages.clientHeight * 0.25);
+      offsets.forEach((offset, index) => {
+        if (offset <= targetTop) {
+          currentIndex = index;
+        }
+      });
+    } else {
+      const containerRect = elements.viewerPages.getBoundingClientRect();
+      const target = containerRect.top + containerRect.height / 2;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      pages.forEach((page, index) => {
+        const rect = page.getBoundingClientRect();
+        const center = rect.top + rect.height / 2;
+        const distance = Math.abs(center - target);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          currentIndex = index;
+        }
+      });
+    }
+  }
+
+  setViewerPageIndicator(currentIndex + 1, pages.length);
+}
+
+async function toggleViewerPerformanceMode() {
+  if (state.viewerPerformanceMode) {
+    await exitViewerPerformanceMode();
+  } else {
+    await enterViewerPerformanceMode();
+  }
+}
+
+async function enterViewerPerformanceMode() {
+  state.viewerPerformanceMode = true;
+  elements.viewerDialog.classList.add("is-performance-mode");
+  elements.viewerPerformanceText.textContent = "退出";
+  elements.viewerPerformanceButton?.setAttribute("aria-pressed", "true");
+  await requestViewerWakeLock();
+}
+
+async function exitViewerPerformanceMode(options = {}) {
+  if (!state.viewerPerformanceMode && !state.wakeLockSentinel) {
+    return;
+  }
+
+  state.viewerPerformanceMode = false;
+  elements.viewerDialog?.classList.remove("is-performance-mode");
+  if (elements.viewerPerformanceText) {
+    elements.viewerPerformanceText.textContent = "演出";
+  }
+  elements.viewerPerformanceButton?.setAttribute("aria-pressed", "false");
+  await releaseViewerWakeLock();
+  if (!options.silent) {
+    setStatus("");
+  }
+}
+
+async function requestViewerWakeLock() {
+  if (!("wakeLock" in navigator) || typeof navigator.wakeLock?.request !== "function") {
+    return;
+  }
+
+  try {
+    state.wakeLockSentinel = await navigator.wakeLock.request("screen");
+    state.wakeLockSentinel.addEventListener("release", () => {
+      state.wakeLockSentinel = null;
+    });
+  } catch (error) {
+    console.warn("Wake Lock unavailable.", error);
+  }
+}
+
+async function releaseViewerWakeLock() {
+  const sentinel = state.wakeLockSentinel;
+  state.wakeLockSentinel = null;
+  try {
+    await sentinel?.release?.();
+  } catch (error) {
+    console.warn("Wake Lock release failed.", error);
+  }
+}
+
+function handleWakeLockVisibilityChange() {
+  if (document.visibilityState === "visible" && state.viewerPerformanceMode && !state.wakeLockSentinel) {
+    requestViewerWakeLock();
+  }
 }
 
 function resetViewerGestureState() {
@@ -7701,6 +8272,7 @@ function renderViewerPages(score) {
   pages.forEach((page, index) => {
     const figure = document.createElement("figure");
     figure.className = "viewer-page";
+    figure.dataset.pageNumber = String(index + 1);
 
     const image = document.createElement("img");
     image.draggable = false;
@@ -7718,6 +8290,8 @@ function renderViewerPages(score) {
     figure.append(imageFrame);
     elements.viewerPages.append(figure);
   });
+  setViewerPageIndicator(1, pages.length || 1);
+  scheduleViewerPageIndicatorUpdate();
 }
 
 function getLatestScorePages(scoreId, fallbackPages = []) {
