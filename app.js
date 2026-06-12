@@ -3242,6 +3242,7 @@ async function loadScores() {
   renderScores();
   renderSetlists();
   queueBackgroundPageHydration();
+  refreshVisibleScoreImages();
 }
 
 function openDatabase() {
@@ -4225,10 +4226,8 @@ function renderPageManager() {
     thumb.className = "page-manager-thumb";
     const image = document.createElement("img");
     image.draggable = false;
-    image.dataset.pageId = page.id;
-    bindScoreImageRecovery(image, page.id);
-    image.src = getScoreUrl(page);
     image.alt = `《${score.name}》第 ${index + 1} 页`;
+    bindScorePageImage(image, page);
     thumb.append(image);
 
     const body = document.createElement("div");
@@ -7568,10 +7567,8 @@ function createScoreCard(score) {
   if (firstPage) {
     const image = document.createElement("img");
     image.draggable = false;
-    image.dataset.pageId = firstPage.id;
-    bindScoreImageRecovery(image, firstPage.id);
-    image.src = getScoreUrl(firstPage);
     image.alt = `《${score.name}》第 1 页`;
+    bindScorePageImage(image, firstPage);
     previewButton.append(image);
   }
   if (score.favorite) {
@@ -8705,9 +8702,6 @@ function renderViewerPages(score) {
     image.draggable = false;
     image.decoding = "async";
     image.loading = "eager";
-    image.dataset.pageId = page.id;
-    bindScoreImageRecovery(image, page.id);
-    image.src = getScoreUrl(page, { hydrate: false });
     image.alt = `《${score.name}》第 ${index + 1} 页`;
 
     const imageFrame = document.createElement("div");
@@ -8716,6 +8710,7 @@ function renderViewerPages(score) {
 
     figure.append(imageFrame);
     elements.viewerPages.append(figure);
+    bindScorePageImage(image, page);
   });
   setViewerPageIndicator(1, pages.length || 1);
   scheduleViewerPageIndicatorUpdate();
@@ -8864,6 +8859,49 @@ function getScoreUrl(page, options = {}) {
     state.scoreUrls.set(page.id, URL.createObjectURL(page.blob));
   }
   return state.scoreUrls.get(page.id);
+}
+
+function bindScorePageImage(image, page, options = {}) {
+  if (!image || !page?.id) {
+    return;
+  }
+
+  image.dataset.pageId = page.id;
+  bindScoreImageRecovery(image, page.id);
+  updateScorePageImageSource(image, page);
+
+  if (options.hydrate !== false) {
+    scheduleScorePageHydration(page);
+  }
+}
+
+function updateScorePageImageSource(image, page) {
+  const latestPage = getLatestPageRecord(page) || page;
+  const src = getScoreUrl(latestPage, { hydrate: false });
+  image.src = src;
+  image.classList.toggle("is-score-placeholder", src === SCORE_IMAGE_PLACEHOLDER);
+}
+
+function getLatestPageRecord(pageOrId) {
+  const pageId = typeof pageOrId === "string" ? pageOrId : pageOrId?.id;
+  if (!pageId) {
+    return null;
+  }
+
+  return state.scorePages.find((page) => page.id === pageId) || null;
+}
+
+function scheduleScorePageHydration(page, delay = 0) {
+  if (!pageNeedsHydration(page)) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    const latestPage = getLatestPageRecord(page) || page;
+    if (pageNeedsHydration(latestPage)) {
+      hydrateScorePage(latestPage);
+    }
+  }, delay);
 }
 
 function bindScoreImageRecovery(image, pageId) {
@@ -9042,11 +9080,22 @@ function replaceLocalPage(updatedPage) {
 }
 
 function refreshPageImages(page) {
-  const src = getScoreUrl(page);
   document.querySelectorAll("img[data-page-id]").forEach((image) => {
     if (image.dataset.pageId === page.id) {
-      image.src = src;
+      updateScorePageImageSource(image, page);
     }
+  });
+}
+
+function refreshVisibleScoreImages() {
+  document.querySelectorAll("img[data-page-id]").forEach((image) => {
+    const page = getLatestPageRecord(image.dataset.pageId);
+    if (!page) {
+      return;
+    }
+
+    updateScorePageImageSource(image, page);
+    scheduleScorePageHydration(page);
   });
 }
 
