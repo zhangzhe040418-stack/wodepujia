@@ -37,6 +37,12 @@ const VIEWER_MODE_LANDSCAPE = "landscape";
 const THEME_STORAGE_KEY = "my-score-folder-theme";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
+const LIBRARY_FILTER_ALL = "all";
+const LIBRARY_FILTER_RECENT = "recent";
+const LIBRARY_FILTER_FAVORITE = "favorite";
+const SCORE_SORT_RECENT_OPENED = "recentOpened";
+const SCORE_SORT_RECENT_ADDED = "recentAdded";
+const SCORE_SORT_NAME = "name";
 const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
@@ -96,6 +102,8 @@ const state = {
   copyFeedbackTimer: 0,
   activeTab: "library",
   currentFolderId: null,
+  libraryFilter: LIBRARY_FILTER_ALL,
+  scoreSort: SCORE_SORT_RECENT_ADDED,
   viewerMode: readViewerModePreference(),
   themeMode: readThemePreference(),
   authMode: "guest",
@@ -188,6 +196,8 @@ function bindElements() {
   elements.scoreGrid = document.querySelector("#scoreGrid");
   elements.searchInput = document.querySelector("#searchInput");
   elements.clearSearchButton = document.querySelector("#clearSearchButton");
+  elements.libraryFilterButtons = Array.from(document.querySelectorAll("[data-library-filter]"));
+  elements.scoreSortSelect = document.querySelector("#scoreSortSelect");
   elements.setlistSummary = document.querySelector("#setlistSummary");
   elements.setlistList = document.querySelector("#setlistList");
   elements.createSetlistButton = document.querySelector("#createSetlistButton");
@@ -365,6 +375,7 @@ function bindElements() {
   elements.viewerPageIndicator = document.querySelector("#viewerPageIndicator");
   elements.viewerPerformanceButton = document.querySelector("#viewerPerformanceButton");
   elements.viewerPerformanceText = document.querySelector("#viewerPerformanceText");
+  elements.viewerFavoriteButton = document.querySelector("#viewerFavoriteButton");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
 }
@@ -382,6 +393,10 @@ function bindEvents() {
 
   elements.scoreName.addEventListener("input", updateSaveState);
   elements.searchInput.addEventListener("input", renderScores);
+  elements.libraryFilterButtons?.forEach((button) => {
+    button.addEventListener("click", () => setLibraryFilter(button.dataset.libraryFilter));
+  });
+  elements.scoreSortSelect?.addEventListener("change", () => setScoreSort(elements.scoreSortSelect.value));
   elements.navLibraryButton.addEventListener("click", () => switchMainTab("library"));
   elements.navSetlistsButton?.addEventListener("click", () => switchMainTab("setlists"));
   elements.navMineButton.addEventListener("click", () => switchMainTab("mine"));
@@ -639,6 +654,7 @@ function bindEvents() {
   });
   elements.viewerBackButton.addEventListener("click", closeViewer);
   elements.viewerPerformanceButton?.addEventListener("click", toggleViewerPerformanceMode);
+  elements.viewerFavoriteButton?.addEventListener("click", toggleCurrentViewerFavorite);
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
   elements.confirmDeleteButton.addEventListener("click", () => closeDeleteDialog(true));
   elements.deleteDialog.addEventListener("cancel", (event) => {
@@ -3425,6 +3441,8 @@ function normalizeLocalScoreRecord(score) {
     keySignature: String(score.keySignature || score.key_signature || "").trim(),
     usage: String(score.usage || "").trim(),
     notes: String(score.notes || "").trim(),
+    favorite: Boolean(score.favorite),
+    lastOpenedAt: score.lastOpenedAt || score.last_opened_at || null,
     createdAt: score.createdAt || new Date().toISOString(),
     updatedAt: score.updatedAt || score.createdAt || new Date().toISOString(),
     deletedAt: score.deletedAt || null,
@@ -3998,6 +4016,8 @@ async function saveScore(event) {
     keySignature: elements.scoreKey?.value.trim() || "",
     usage: "",
     notes: elements.scoreNotes?.value.trim() || "",
+    favorite: false,
+    lastOpenedAt: null,
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
@@ -5724,6 +5744,8 @@ function toCloudScore(score) {
     key_signature: score.keySignature || "",
     usage: score.usage || "",
     notes: score.notes || "",
+    favorite: Boolean(score.favorite),
+    last_opened_at: score.lastOpenedAt || null,
     created_at: score.createdAt,
     updated_at: score.updatedAt,
     deleted_at: score.deletedAt || null,
@@ -5797,6 +5819,8 @@ function fromCloudScore(row) {
     keySignature: row.key_signature,
     usage: row.usage,
     notes: row.notes,
+    favorite: row.favorite,
+    lastOpenedAt: row.last_opened_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -7259,37 +7283,138 @@ function hasDuplicateFolderName(name, excludeFolderId = "") {
   );
 }
 
+function getLibraryFilter() {
+  return [LIBRARY_FILTER_ALL, LIBRARY_FILTER_RECENT, LIBRARY_FILTER_FAVORITE].includes(state.libraryFilter)
+    ? state.libraryFilter
+    : LIBRARY_FILTER_ALL;
+}
+
+function setLibraryFilter(filter) {
+  const nextFilter = [LIBRARY_FILTER_ALL, LIBRARY_FILTER_RECENT, LIBRARY_FILTER_FAVORITE].includes(filter)
+    ? filter
+    : LIBRARY_FILTER_ALL;
+  if (state.libraryFilter === nextFilter) {
+    updateLibraryFilterUi();
+    return;
+  }
+
+  state.libraryFilter = nextFilter;
+  renderScores();
+}
+
+function getScoreSort() {
+  return [SCORE_SORT_RECENT_OPENED, SCORE_SORT_RECENT_ADDED, SCORE_SORT_NAME].includes(state.scoreSort)
+    ? state.scoreSort
+    : SCORE_SORT_RECENT_ADDED;
+}
+
+function setScoreSort(sortMode) {
+  const nextSort = [SCORE_SORT_RECENT_OPENED, SCORE_SORT_RECENT_ADDED, SCORE_SORT_NAME].includes(sortMode)
+    ? sortMode
+    : SCORE_SORT_RECENT_ADDED;
+  if (state.scoreSort === nextSort) {
+    updateLibraryFilterUi();
+    return;
+  }
+
+  state.scoreSort = nextSort;
+  renderScores();
+}
+
+function updateLibraryFilterUi() {
+  const activeFilter = getLibraryFilter();
+  const sortMode = getScoreSort();
+  elements.libraryFilterButtons?.forEach((button) => {
+    const selected = button.dataset.libraryFilter === activeFilter;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
+  if (elements.scoreSortSelect && elements.scoreSortSelect.value !== sortMode) {
+    elements.scoreSortSelect.value = sortMode;
+  }
+}
+
+function filterScoresByLibraryFilter(scores, filter) {
+  if (filter === LIBRARY_FILTER_FAVORITE) {
+    return scores.filter((score) => score.favorite);
+  }
+  if (filter === LIBRARY_FILTER_RECENT) {
+    return scores.filter((score) => score.lastOpenedAt);
+  }
+  return scores;
+}
+
+function sortScoresForLibrary(scores, sortMode) {
+  return [...scores].sort((a, b) => {
+    if (sortMode === SCORE_SORT_NAME) {
+      return compareScoreName(a, b);
+    }
+
+    if (sortMode === SCORE_SORT_RECENT_OPENED) {
+      const openedDifference = getScoreTime(b.lastOpenedAt) - getScoreTime(a.lastOpenedAt);
+      if (openedDifference !== 0) {
+        return openedDifference;
+      }
+    } else {
+      const addedDifference = getScoreTime(b.createdAt) - getScoreTime(a.createdAt);
+      if (addedDifference !== 0) {
+        return addedDifference;
+      }
+    }
+
+    return getScoreTime(b.updatedAt) - getScoreTime(a.updatedAt) || compareScoreName(a, b);
+  });
+}
+
+function compareScoreName(a, b) {
+  return String(a?.name || "").localeCompare(String(b?.name || ""), "zh-Hans-CN", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function getScoreTime(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
 function renderScores() {
   const query = elements.searchInput.value.trim();
   const normalizedQuery = normalizeText(query);
   const currentFolder = getCurrentFolder();
   const inFolder = Boolean(currentFolder);
   const currentFolderId = inFolder ? currentFolder.id : null;
+  const activeFilter = getLibraryFilter();
+  const sortMode = getScoreSort();
   const visibleScores = state.scores.filter((score) => (score.folderId || null) === currentFolderId);
   const visibleFolders = inFolder ? [] : state.folders;
-  const searchableScores = normalizedQuery && !inFolder ? state.scores : visibleScores;
-  const filteredScores = normalizedQuery
-    ? searchableScores.filter((score) => scoreMatchesQuery(score, normalizedQuery))
-    : visibleScores;
+  const globalScoreSearch = !inFolder && (Boolean(normalizedQuery) || activeFilter !== LIBRARY_FILTER_ALL);
+  const scoreSource = globalScoreSearch ? state.scores : visibleScores;
+  const folderSource = activeFilter === LIBRARY_FILTER_ALL ? visibleFolders : [];
+  const filteredScores = sortScoresForLibrary(
+    filterScoresByLibraryFilter(scoreSource, activeFilter).filter((score) => scoreMatchesQuery(score, normalizedQuery)),
+    sortMode,
+  );
   const filteredFolders = normalizedQuery
-    ? visibleFolders.filter((folder) => folder.normalizedName.includes(normalizedQuery))
-    : visibleFolders;
+    ? folderSource.filter((folder) => folder.normalizedName.includes(normalizedQuery))
+    : folderSource;
   const total = visibleScores.length + visibleFolders.length;
   const resultTotal = filteredScores.length + filteredFolders.length;
 
+  updateLibraryFilterUi();
   elements.libraryTitle.textContent = currentFolder?.name || "谱夹";
   elements.folderBackButton.hidden = !inFolder;
   elements.librarySummary.textContent = inFolder
     ? `${currentFolder.name} · ${visibleScores.length} 份歌谱`
     : `${state.folders.length} 个文件夹 · ${visibleScores.length} 份歌谱`;
-  elements.resultCount.textContent = query
+  elements.resultCount.textContent = normalizedQuery || activeFilter !== LIBRARY_FILTER_ALL
     ? `${resultTotal} 个结果`
     : inFolder
       ? `${visibleScores.length} 份歌谱`
       : `${state.folders.length} 个文件夹 · ${visibleScores.length} 份歌谱`;
   elements.scoreGrid.replaceChildren();
 
-  if (!total && !normalizedQuery) {
+  if (!total && !normalizedQuery && activeFilter === LIBRARY_FILTER_ALL) {
     elements.scoreGrid.append(
       createEmptyState(
         inFolder ? "文件夹是空的" : "还没有歌谱",
@@ -7301,7 +7426,19 @@ function renderScores() {
   }
 
   if (!resultTotal) {
-    elements.scoreGrid.append(createEmptyState("没有找到", "换一个歌谱名试试。"));
+    const emptyTitle =
+      activeFilter === LIBRARY_FILTER_FAVORITE
+        ? "还没有收藏"
+        : activeFilter === LIBRARY_FILTER_RECENT
+          ? "还没有最近打开"
+          : "没有找到";
+    const emptyDetail =
+      activeFilter === LIBRARY_FILTER_FAVORITE
+        ? "打开歌谱后点击右上角星标收藏。"
+        : activeFilter === LIBRARY_FILTER_RECENT
+          ? "打开过的歌谱会显示在这里。"
+          : "换一个歌谱名、标签或备注试试。";
+    elements.scoreGrid.append(createEmptyState(emptyTitle, emptyDetail));
     refreshIcons();
     return;
   }
@@ -7429,6 +7566,12 @@ function createScoreCard(score) {
     image.src = getScoreUrl(firstPage);
     image.alt = `《${score.name}》第 1 页`;
     previewButton.append(image);
+  }
+  if (score.favorite) {
+    const favoriteMark = document.createElement("span");
+    favoriteMark.className = "score-favorite-mark";
+    favoriteMark.append(createIcon("star"));
+    previewButton.append(favoriteMark);
   }
 
   const name = document.createElement("h3");
@@ -7893,10 +8036,14 @@ function openViewer(id) {
   setViewerZoom(VIEWER_MIN_ZOOM);
   state.currentViewerScoreId = score.id;
   state.currentViewerSetlistId = null;
-  elements.viewerTitle.textContent = "查看歌谱";
+  if (elements.viewerTitle) {
+    elements.viewerTitle.textContent = "查看歌谱";
+  }
   setViewerKeySignature(score.keySignature);
+  setViewerFavoriteButton(score);
   exitViewerPerformanceMode({ silent: true });
   renderViewerPages(score);
+  recordScoreOpened(score.id).catch((error) => console.warn(error));
 
   if (typeof elements.viewerDialog.showModal === "function") {
     elements.viewerDialog.showModal();
@@ -7933,8 +8080,11 @@ function openSetlistViewer(id) {
   setViewerZoom(VIEWER_MIN_ZOOM);
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = setlist.id;
-  elements.viewerTitle.textContent = setlist.name;
+  if (elements.viewerTitle) {
+    elements.viewerTitle.textContent = setlist.name;
+  }
   setViewerKeySignature("");
+  setViewerFavoriteButton(null);
   exitViewerPerformanceMode({ silent: true });
   renderViewerPages(virtualScore);
 
@@ -7962,8 +8112,11 @@ function closeViewer(options = {}) {
   state.viewerHistoryActive = false;
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = null;
-  elements.viewerTitle.textContent = "查看歌谱";
+  if (elements.viewerTitle) {
+    elements.viewerTitle.textContent = "查看歌谱";
+  }
   setViewerKeySignature("");
+  setViewerFavoriteButton(null);
   exitViewerPerformanceMode({ silent: true });
 
   if (elements.viewerDialog.open) {
@@ -7986,6 +8139,100 @@ function setViewerKeySignature(value) {
   const keySignature = String(value || "").trim();
   elements.viewerKeySignature.textContent = keySignature ? `调号 ${keySignature}` : "";
   elements.viewerKeySignature.hidden = !keySignature;
+}
+
+function setViewerFavoriteButton(score) {
+  if (!elements.viewerFavoriteButton) {
+    return;
+  }
+
+  const hasScore = Boolean(score?.id);
+  const favorite = Boolean(score?.favorite);
+  elements.viewerFavoriteButton.hidden = !hasScore;
+  elements.viewerFavoriteButton.disabled = !hasScore;
+  elements.viewerFavoriteButton.classList.toggle("is-active", favorite);
+  elements.viewerFavoriteButton.setAttribute("aria-pressed", favorite ? "true" : "false");
+  const label = favorite ? "取消收藏" : "收藏歌谱";
+  elements.viewerFavoriteButton.title = label;
+  elements.viewerFavoriteButton.setAttribute("aria-label", label);
+}
+
+async function toggleCurrentViewerFavorite() {
+  const scoreId = state.currentViewerScoreId;
+  if (!scoreId) {
+    return;
+  }
+
+  elements.viewerFavoriteButton.disabled = true;
+  try {
+    await toggleScoreFavorite(scoreId);
+  } finally {
+    if (state.currentViewerScoreId === scoreId) {
+      elements.viewerFavoriteButton.disabled = false;
+    }
+  }
+}
+
+async function toggleScoreFavorite(scoreId) {
+  const score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    return;
+  }
+
+  const userId = score.userId || state.session?.user?.id || null;
+  const updatedScore = {
+    ...toScoreRecord(score),
+    userId,
+    favorite: !score.favorite,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+  await putScore(updatedScore);
+  state.scores = state.scores.map((item) =>
+    item.id === scoreId
+      ? {
+        ...item,
+        ...updatedScore,
+        pages: item.pages,
+      }
+      : item,
+  );
+  const latestScore = state.scores.find((item) => item.id === scoreId);
+  setViewerFavoriteButton(latestScore);
+  renderScores();
+
+  if (userId && state.cloudReady) {
+    queueSync();
+  }
+}
+
+async function recordScoreOpened(scoreId) {
+  const score = state.scores.find((item) => item.id === scoreId);
+  if (!score) {
+    return;
+  }
+
+  const userId = score.userId || state.session?.user?.id || null;
+  const updatedScore = {
+    ...toScoreRecord(score),
+    userId,
+    lastOpenedAt: new Date().toISOString(),
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+  await putScore(updatedScore);
+  state.scores = state.scores.map((item) =>
+    item.id === scoreId
+      ? {
+        ...item,
+        ...updatedScore,
+        pages: item.pages,
+      }
+      : item,
+  );
+  renderScores();
+
+  if (userId && state.cloudReady) {
+    queueSync();
+  }
 }
 
 function setViewerPageIndicator(current, total) {
@@ -8831,6 +9078,7 @@ function normalizeTags(value) {
 function getScoreSearchText(score) {
   return normalizeText([
     score?.name,
+    ...(Array.isArray(score?.tags) ? score.tags : []),
     score?.keySignature,
     score?.notes,
   ].join(" "));
