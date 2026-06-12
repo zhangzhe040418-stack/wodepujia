@@ -462,29 +462,6 @@ noscript {
   white-space: nowrap;
 }
 
-.score-tags {
-  display: flex;
-  justify-content: center;
-  width: 100%;
-  min-height: 18px;
-  gap: 3px;
-  overflow: hidden;
-}
-
-.score-tags span {
-  max-width: 48%;
-  padding: 1px 5px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: clamp(0.52rem, 1.9vw, 0.68rem);
-  font-weight: 800;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .my-screen {
   min-height: calc(100vh - 80px);
   min-height: calc(100dvh - 80px);
@@ -625,14 +602,22 @@ noscript {
 }
 
 .setlist-create-button {
+  position: fixed;
+  right: 18px;
+  right: calc(18px + env(safe-area-inset-right));
+  bottom: 74px;
+  bottom: calc(74px + env(safe-area-inset-bottom));
+  z-index: 13;
   min-height: 42px;
-  padding: 0 14px;
+  padding: 0 18px;
+  box-shadow: 0 14px 28px rgba(15, 118, 110, 0.2);
   white-space: nowrap;
 }
 
 .setlist-list {
   display: grid;
   gap: 10px;
+  padding-bottom: 78px;
 }
 
 .setlist-card {
@@ -693,7 +678,11 @@ noscript {
 }
 
 .setlist-dialog {
+  position: fixed;
+  inset: 0;
   width: min(720px, calc(100vw - 24px));
+  margin: auto;
+  touch-action: auto;
 }
 
 .setlist-surface {
@@ -701,6 +690,7 @@ noscript {
   max-height: min(88vh, 760px);
   max-height: min(88dvh, 760px);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .setlist-field {
@@ -955,6 +945,106 @@ body.preferences-screen-open .fab-button {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.dialog-pair-actions {
+  grid-template-columns: repeat(2, minmax(132px, 170px));
+  justify-content: center;
+  gap: 20px;
+}
+
+.dialog-pair-actions > button {
+  width: 100%;
+  min-height: 42px;
+}
+
+.native-folder-select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.folder-select {
+  position: relative;
+  min-width: 0;
+}
+
+.folder-select-button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  align-items: center;
+  width: 100%;
+  min-height: 46px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+  text-align: left;
+}
+
+.folder-select-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-select-button:hover,
+.folder-select-button:focus-visible,
+.folder-select.is-open .folder-select-button {
+  border-color: rgba(15, 118, 110, 0.45);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  outline: none;
+}
+
+.folder-select-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 8;
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 38px rgba(23, 33, 31, 0.16);
+  scrollbar-width: none;
+}
+
+.folder-select-options[hidden] {
+  display: none;
+}
+
+.folder-select-options::-webkit-scrollbar {
+  display: none;
+}
+
+.folder-select-option {
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 800;
+  text-align: left;
+}
+
+.folder-select-option:hover,
+.folder-select-option:focus-visible,
+.folder-select-option.is-selected {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  outline: none;
 }
 
 .upload-screen {
@@ -2220,6 +2310,8 @@ body.preferences-screen-open .fab-button {
 :root[data-theme="dark"] .field input,
 :root[data-theme="dark"] .field select,
 :root[data-theme="dark"] .field textarea,
+:root[data-theme="dark"] .folder-select-button,
+:root[data-theme="dark"] .folder-select-options,
 :root[data-theme="dark"] .profile-contact-row,
 :root[data-theme="dark"] .profile-birthday-button,
 :root[data-theme="dark"] .auth-surface,
@@ -2273,6 +2365,16 @@ body.preferences-screen-open .fab-button {
   color: var(--accent-strong);
 }
 
+:root[data-theme="dark"] .folder-select-button:hover,
+:root[data-theme="dark"] .folder-select-button:focus-visible,
+:root[data-theme="dark"] .folder-select.is-open .folder-select-button,
+:root[data-theme="dark"] .folder-select-option:hover,
+:root[data-theme="dark"] .folder-select-option:focus-visible,
+:root[data-theme="dark"] .folder-select-option.is-selected {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
 :root[data-theme="dark"] .preference-choice-icon,
 :root[data-theme="dark"] .mine-strip-icon {
   background: #163d37;
@@ -2285,8 +2387,7 @@ body.preferences-screen-open .fab-button {
   color: var(--danger);
 }
 
-:root[data-theme="dark"] .more-button,
-:root[data-theme="dark"] .score-tags span {
+:root[data-theme="dark"] .more-button {
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
@@ -2381,7 +2482,11 @@ body.preferences-screen-open .fab-button {
   }
 
   .setlist-create-button {
-    width: 100%;
+    right: 14px;
+    right: calc(14px + env(safe-area-inset-right));
+    bottom: 76px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    width: auto;
   }
 
   .setlist-card {

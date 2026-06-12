@@ -114,6 +114,8 @@ const state = {
   verifyDialogResolve: null,
   scoreActionId: "",
   scoreEditId: "",
+  folderActionId: "",
+  editingFolderId: "",
   editingSetlistId: "",
   viewerZoom: VIEWER_MIN_ZOOM,
   viewerPointers: new Map(),
@@ -282,9 +284,16 @@ function bindElements() {
   elements.chooseScoreButton = document.querySelector("#chooseScoreButton");
   elements.folderDialog = document.querySelector("#folderDialog");
   elements.folderForm = document.querySelector("#folderForm");
+  elements.folderDialogTitle = document.querySelector("#folderDialogTitle");
   elements.folderName = document.querySelector("#folderName");
   elements.cancelFolderButton = document.querySelector("#cancelFolderButton");
   elements.saveFolderButton = document.querySelector("#saveFolderButton");
+  elements.folderSaveButtonText = document.querySelector("#folderSaveButtonText");
+  elements.folderActionDialog = document.querySelector("#folderActionDialog");
+  elements.folderActionTitle = document.querySelector("#folderActionTitle");
+  elements.folderActionEditButton = document.querySelector("#folderActionEditButton");
+  elements.folderActionDeleteButton = document.querySelector("#folderActionDeleteButton");
+  elements.closeFolderActionButton = document.querySelector("#closeFolderActionButton");
   elements.scoreActionDialog = document.querySelector("#scoreActionDialog");
   elements.scoreActionTitle = document.querySelector("#scoreActionTitle");
   elements.scoreActionEditButton = document.querySelector("#scoreActionEditButton");
@@ -296,9 +305,11 @@ function bindElements() {
   elements.scoreEditState = document.querySelector("#scoreEditState");
   elements.scoreEditName = document.querySelector("#scoreEditName");
   elements.scoreEditFolder = document.querySelector("#scoreEditFolder");
-  elements.scoreEditTags = document.querySelector("#scoreEditTags");
+  elements.scoreEditFolderPicker = document.querySelector("#scoreEditFolderPicker");
+  elements.scoreEditFolderButton = document.querySelector("#scoreEditFolderButton");
+  elements.scoreEditFolderLabel = document.querySelector("#scoreEditFolderLabel");
+  elements.scoreEditFolderOptions = document.querySelector("#scoreEditFolderOptions");
   elements.scoreEditKey = document.querySelector("#scoreEditKey");
-  elements.scoreEditUsage = document.querySelector("#scoreEditUsage");
   elements.scoreEditNotes = document.querySelector("#scoreEditNotes");
   elements.closeScoreEditButton = document.querySelector("#closeScoreEditButton");
   elements.cancelScoreEditButton = document.querySelector("#cancelScoreEditButton");
@@ -480,6 +491,26 @@ function bindEvents() {
       closeFolderDialog();
     }
   });
+  elements.closeFolderActionButton?.addEventListener("click", closeFolderActionDialog);
+  elements.folderActionEditButton?.addEventListener("click", () => {
+    const folderId = state.folderActionId;
+    closeFolderActionDialog();
+    openFolderDialog(folderId);
+  });
+  elements.folderActionDeleteButton?.addEventListener("click", () => {
+    const folderId = state.folderActionId;
+    closeFolderActionDialog();
+    deleteFolder(folderId);
+  });
+  elements.folderActionDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeFolderActionDialog();
+  });
+  elements.folderActionDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.folderActionDialog) {
+      closeFolderActionDialog();
+    }
+  });
   elements.closeScoreActionButton?.addEventListener("click", closeScoreActionDialog);
   elements.scoreActionEditButton?.addEventListener("click", () => {
     const scoreId = state.scoreActionId;
@@ -508,11 +539,16 @@ function bindEvents() {
   elements.scoreEditForm?.addEventListener("submit", saveScoreEdit);
   elements.closeScoreEditButton?.addEventListener("click", closeScoreEditDialog);
   elements.cancelScoreEditButton?.addEventListener("click", closeScoreEditDialog);
+  elements.scoreEditFolderButton?.addEventListener("click", toggleScoreEditFolderPicker);
+  elements.scoreEditFolderOptions?.addEventListener("click", handleScoreEditFolderOptionClick);
   elements.scoreEditDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
     closeScoreEditDialog();
   });
   elements.scoreEditDialog?.addEventListener("click", (event) => {
+    if (event.target instanceof Element && !event.target.closest("#scoreEditFolderPicker")) {
+      closeScoreEditFolderPicker();
+    }
     if (event.target === elements.scoreEditDialog) {
       closeScoreEditDialog();
     }
@@ -868,8 +904,13 @@ function closeAddChoiceDialog() {
   }
 }
 
-function openFolderDialog() {
+function openFolderDialog(folderId = "") {
+  const folder = folderId ? state.folders.find((item) => item.id === folderId) : null;
+  state.editingFolderId = folder?.id || "";
   elements.folderForm.reset();
+  elements.folderDialogTitle.textContent = folder ? "编辑文件夹名称" : "新建文件夹";
+  elements.folderName.value = folder?.name || "";
+  elements.folderSaveButtonText.textContent = folder ? "保存" : "创建";
 
   if (typeof elements.folderDialog.showModal === "function") {
     elements.folderDialog.showModal();
@@ -882,6 +923,7 @@ function openFolderDialog() {
 }
 
 function closeFolderDialog() {
+  state.editingFolderId = "";
   if (elements.folderDialog.open) {
     elements.folderDialog.close();
   } else {
@@ -890,6 +932,33 @@ function closeFolderDialog() {
 
   elements.folderForm.reset();
   elements.saveFolderButton.disabled = false;
+  elements.folderDialogTitle.textContent = "新建文件夹";
+  elements.folderSaveButtonText.textContent = "创建";
+}
+
+function openFolderActionDialog(folderId) {
+  const folder = state.folders.find((item) => item.id === folderId);
+  if (!folder) {
+    return;
+  }
+
+  state.folderActionId = folderId;
+  elements.folderActionTitle.textContent = `《${folder.name}》`;
+  if (typeof elements.folderActionDialog.showModal === "function") {
+    elements.folderActionDialog.showModal();
+  } else {
+    elements.folderActionDialog.setAttribute("open", "");
+  }
+  refreshIcons();
+}
+
+function closeFolderActionDialog() {
+  state.folderActionId = "";
+  if (elements.folderActionDialog.open) {
+    elements.folderActionDialog.close();
+  } else {
+    elements.folderActionDialog.removeAttribute("open");
+  }
 }
 
 function openScoreActionDialog(scoreId) {
@@ -926,11 +995,9 @@ function openScoreEditDialog(scoreId, options = {}) {
   state.scoreEditId = scoreId;
   populateScoreEditFolders(score.folderId);
   elements.scoreEditName.value = score.name || "";
-  elements.scoreEditTags.value = formatTagsInput(score.tags);
   elements.scoreEditKey.value = score.keySignature || "";
-  elements.scoreEditUsage.value = score.usage || "";
   elements.scoreEditNotes.value = score.notes || "";
-  setScoreEditStatus(options.focus === "folder" ? "请选择要移动到的文件夹后保存。" : "可修改名称、文件夹和标签。");
+  setScoreEditStatus(options.focus === "folder" ? "请选择要移动到的文件夹后保存。" : "可修改名称、所属文件夹、调号和备注。");
 
   if (typeof elements.scoreEditDialog.showModal === "function") {
     elements.scoreEditDialog.showModal();
@@ -940,12 +1007,13 @@ function openScoreEditDialog(scoreId, options = {}) {
 
   refreshIcons();
   requestAnimationFrame(() => {
-    (options.focus === "folder" ? elements.scoreEditFolder : elements.scoreEditName).focus();
+    (options.focus === "folder" ? elements.scoreEditFolderButton : elements.scoreEditName).focus();
   });
 }
 
 function closeScoreEditDialog() {
   state.scoreEditId = "";
+  closeScoreEditFolderPicker();
   elements.scoreEditForm.reset();
   elements.saveScoreEditButton.disabled = false;
   if (elements.scoreEditDialog.open) {
@@ -957,10 +1025,12 @@ function closeScoreEditDialog() {
 
 function populateScoreEditFolders(selectedFolderId = "") {
   elements.scoreEditFolder.replaceChildren();
+  elements.scoreEditFolderOptions.replaceChildren();
   const rootOption = document.createElement("option");
   rootOption.value = "";
   rootOption.textContent = "谱夹";
   elements.scoreEditFolder.append(rootOption);
+  elements.scoreEditFolderOptions.append(createScoreEditFolderOption("", "谱夹"));
 
   state.folders
     .filter((folder) => !folder.deletedAt)
@@ -969,9 +1039,64 @@ function populateScoreEditFolders(selectedFolderId = "") {
       option.value = folder.id;
       option.textContent = folder.name;
       elements.scoreEditFolder.append(option);
+      elements.scoreEditFolderOptions.append(createScoreEditFolderOption(folder.id, folder.name));
     });
 
   elements.scoreEditFolder.value = selectedFolderId || "";
+  updateScoreEditFolderLabel();
+  closeScoreEditFolderPicker();
+}
+
+function createScoreEditFolderOption(value, label) {
+  const button = document.createElement("button");
+  button.className = "folder-select-option";
+  button.type = "button";
+  button.setAttribute("role", "option");
+  button.dataset.folderId = value;
+  button.textContent = label;
+  return button;
+}
+
+function toggleScoreEditFolderPicker() {
+  const nextOpen = elements.scoreEditFolderOptions.hidden;
+  elements.scoreEditFolderOptions.hidden = !nextOpen;
+  elements.scoreEditFolderButton.setAttribute("aria-expanded", String(nextOpen));
+  elements.scoreEditFolderPicker.classList.toggle("is-open", nextOpen);
+  updateScoreEditFolderLabel();
+}
+
+function closeScoreEditFolderPicker() {
+  if (!elements.scoreEditFolderOptions) {
+    return;
+  }
+  elements.scoreEditFolderOptions.hidden = true;
+  elements.scoreEditFolderButton?.setAttribute("aria-expanded", "false");
+  elements.scoreEditFolderPicker?.classList.remove("is-open");
+}
+
+function handleScoreEditFolderOptionClick(event) {
+  const button = event.target.closest("button[data-folder-id]");
+  if (!button) {
+    return;
+  }
+
+  elements.scoreEditFolder.value = button.dataset.folderId || "";
+  updateScoreEditFolderLabel();
+  closeScoreEditFolderPicker();
+  elements.scoreEditFolderButton.focus();
+}
+
+function updateScoreEditFolderLabel() {
+  const selectedId = elements.scoreEditFolder.value || "";
+  const selectedOption = Array.from(elements.scoreEditFolderOptions.querySelectorAll(".folder-select-option")).find(
+    (option) => (option.dataset.folderId || "") === selectedId,
+  );
+  elements.scoreEditFolderLabel.textContent = selectedOption?.textContent || "谱夹";
+  elements.scoreEditFolderOptions.querySelectorAll(".folder-select-option").forEach((option) => {
+    const selected = (option.dataset.folderId || "") === selectedId;
+    option.classList.toggle("is-selected", selected);
+    option.setAttribute("aria-selected", String(selected));
+  });
 }
 
 function setScoreEditStatus(message, isError = false) {
@@ -2590,7 +2715,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=76");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=77");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3728,8 +3853,6 @@ async function saveScoreEdit(event) {
   }
 
   const name = elements.scoreEditName.value.trim();
-  const tags = parseTagsInput(elements.scoreEditTags.value);
-  const longTags = getTooLongTags(tags);
   if (!name) {
     setScoreEditStatus("请输入歌谱名。", true);
     elements.scoreEditName.focus();
@@ -3738,11 +3861,6 @@ async function saveScoreEdit(event) {
   if (hasDuplicateScoreName(name, score.id)) {
     setScoreEditStatus("已存在同名歌谱。", true);
     elements.scoreEditName.focus();
-    return;
-  }
-  if (longTags.length) {
-    setScoreEditStatus(`标签“${longTags[0]}”超过6个字。`, true);
-    elements.scoreEditTags.focus();
     return;
   }
 
@@ -3754,9 +3872,7 @@ async function saveScoreEdit(event) {
     name,
     normalizedName: normalizeText(name),
     folderId: elements.scoreEditFolder.value || null,
-    tags,
     keySignature: elements.scoreEditKey.value.trim(),
-    usage: elements.scoreEditUsage.value.trim(),
     notes: elements.scoreEditNotes.value.trim(),
     updatedAt: now,
     syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
@@ -3790,7 +3906,7 @@ async function createFolder(event) {
     elements.folderName.focus();
     return;
   }
-  if (hasDuplicateFolderName(name)) {
+  if (hasDuplicateFolderName(name, state.editingFolderId)) {
     setStatus("已存在同名文件夹", true);
     elements.folderName.focus();
     return;
@@ -3798,12 +3914,16 @@ async function createFolder(event) {
 
   const now = new Date().toISOString();
   const userId = state.session?.user?.id || null;
+  const existingFolder = state.editingFolderId
+    ? state.folders.find((folder) => folder.id === state.editingFolderId)
+    : null;
   const folder = {
-    id: createId(),
+    ...(existingFolder || {}),
+    id: existingFolder?.id || createId(),
     userId,
     name,
     normalizedName: normalizeText(name),
-    createdAt: now,
+    createdAt: existingFolder?.createdAt || now,
     updatedAt: now,
     deletedAt: null,
     syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
@@ -3816,7 +3936,12 @@ async function createFolder(event) {
     elements.searchInput.value = "";
     closeFolderDialog();
     await loadScores();
-    openFolder(folder.id);
+    if (existingFolder) {
+      renderScores();
+      setStatus(`《${folder.name}》文件夹名称已保存。`);
+    } else {
+      openFolder(folder.id);
+    }
     if (userId && state.cloudReady) {
       queueFolderCloudUpload(folder.id);
     }
@@ -6439,13 +6564,15 @@ function hasDuplicateScoreName(name, excludeScoreId = "") {
   );
 }
 
-function hasDuplicateFolderName(name) {
+function hasDuplicateFolderName(name, excludeFolderId = "") {
   const normalizedName = normalizeText(name);
   if (!normalizedName) {
     return false;
   }
 
-  return state.folders.some((folder) => !folder.deletedAt && getSharedFolderNormalizedName(folder) === normalizedName);
+  return state.folders.some(
+    (folder) => !folder.deletedAt && folder.id !== excludeFolderId && getSharedFolderNormalizedName(folder) === normalizedName,
+  );
 }
 
 function renderScores() {
@@ -6580,16 +6707,16 @@ function createFolderCard(folder) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
-  const deleteButton = document.createElement("button");
-  deleteButton.className = "danger-button";
-  deleteButton.type = "button";
-  deleteButton.append(createIcon("trash-2"), document.createTextNode("删除"));
-  deleteButton.addEventListener("click", (event) => {
+  const moreButton = document.createElement("button");
+  moreButton.className = "more-button";
+  moreButton.type = "button";
+  moreButton.append(createIcon("ellipsis"), document.createTextNode("更多"));
+  moreButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    deleteFolder(folder.id);
+    openFolderActionDialog(folder.id);
   });
 
-  actions.append(deleteButton);
+  actions.append(moreButton);
   card.append(previewButton, name, detail, actions);
   return card;
 }
@@ -6628,8 +6755,6 @@ function createScoreCard(score) {
   detail.className = "score-detail";
   detail.textContent = `${score.pages.length} 页`;
 
-  const tags = createScoreTagList(score.tags);
-
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
@@ -6644,27 +6769,8 @@ function createScoreCard(score) {
 
   actions.append(moreButton);
   card.append(previewButton, name, detail);
-  if (tags) {
-    card.append(tags);
-  }
   card.append(actions);
   return card;
-}
-
-function createScoreTagList(tags = []) {
-  const normalizedTags = normalizeTags(tags).slice(0, 2);
-  if (!normalizedTags.length) {
-    return null;
-  }
-
-  const list = document.createElement("div");
-  list.className = "score-tags";
-  normalizedTags.forEach((tag) => {
-    const badge = document.createElement("span");
-    badge.textContent = tag;
-    list.append(badge);
-  });
-  return list;
 }
 
 function renderSetlists() {
@@ -7821,24 +7927,10 @@ function normalizeTags(value) {
   return tags;
 }
 
-function parseTagsInput(value) {
-  return normalizeTags(value);
-}
-
-function getTooLongTags(tags) {
-  return tags.filter((tag) => Array.from(tag).length > 6);
-}
-
-function formatTagsInput(tags) {
-  return normalizeTags(tags).join("，");
-}
-
 function getScoreSearchText(score) {
   return normalizeText([
     score?.name,
-    ...(score?.tags || []),
     score?.keySignature,
-    score?.usage,
     score?.notes,
   ].join(" "));
 }

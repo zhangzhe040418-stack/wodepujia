@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=76" />
+    <link rel="stylesheet" href="styles.css?v=77" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=76"></script>
+    <script defer charset="UTF-8" src="app.js?v=77"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -539,10 +539,31 @@
           <button class="cancel-delete-button" id="cancelFolderButton" type="button">取消</button>
           <button class="confirm-delete-button folder-save-button" id="saveFolderButton" type="submit">
             <i data-lucide="check" aria-hidden="true"></i>
-            <span>创建</span>
+            <span id="folderSaveButtonText">创建</span>
           </button>
         </div>
       </form>
+    </dialog>
+
+    <dialog class="choice-dialog folder-action-dialog" id="folderActionDialog" aria-labelledby="folderActionTitle">
+      <div class="choice-surface folder-action-surface">
+        <div class="auth-head">
+          <h2 id="folderActionTitle">文件夹操作</h2>
+          <button class="icon-button" id="closeFolderActionButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="choice-actions">
+          <button class="choice-button" id="folderActionEditButton" type="button">
+            <i data-lucide="square-pen" aria-hidden="true"></i>
+            <span>编辑文件夹名称</span>
+          </button>
+          <button class="choice-button danger-choice-button" id="folderActionDeleteButton" type="button">
+            <i data-lucide="trash-2" aria-hidden="true"></i>
+            <span>删除文件夹</span>
+          </button>
+        </div>
+      </div>
     </dialog>
 
     <dialog class="choice-dialog score-action-dialog" id="scoreActionDialog" aria-labelledby="scoreActionTitle">
@@ -578,32 +599,31 @@
             <i data-lucide="x" aria-hidden="true"></i>
           </button>
         </div>
-        <p class="auth-state" id="scoreEditState">可修改名称、文件夹和标签。</p>
+        <p class="auth-state" id="scoreEditState">可修改名称、所属文件夹、调号和备注。</p>
         <label class="field score-edit-field">
           <span>歌谱名</span>
           <input id="scoreEditName" name="scoreName" type="text" maxlength="60" autocomplete="off" required />
         </label>
         <label class="field score-edit-field">
           <span>所属文件夹</span>
-          <select id="scoreEditFolder" name="scoreFolder"></select>
-        </label>
-        <label class="field score-edit-field">
-          <span>标签</span>
-          <input id="scoreEditTags" name="scoreTags" type="text" maxlength="80" autocomplete="off" placeholder="多个标签用逗号隔开，每个不超过6个字" />
+          <select class="native-folder-select" id="scoreEditFolder" name="scoreFolder" tabindex="-1" aria-hidden="true"></select>
+          <div class="folder-select" id="scoreEditFolderPicker">
+            <button class="folder-select-button" id="scoreEditFolderButton" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span id="scoreEditFolderLabel">谱夹</span>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </button>
+            <div class="folder-select-options" id="scoreEditFolderOptions" role="listbox" hidden></div>
+          </div>
         </label>
         <label class="field score-edit-field">
           <span>调号</span>
           <input id="scoreEditKey" name="scoreKey" type="text" maxlength="20" autocomplete="off" placeholder="例如 C、G、降B" />
         </label>
         <label class="field score-edit-field">
-          <span>用途</span>
-          <input id="scoreEditUsage" name="scoreUsage" type="text" maxlength="30" autocomplete="off" placeholder="例如 主日、练习、献诗" />
-        </label>
-        <label class="field score-edit-field">
           <span>备注</span>
           <textarea id="scoreEditNotes" name="scoreNotes" maxlength="200" rows="3" placeholder="可填写备注"></textarea>
         </label>
-        <div class="auth-actions score-edit-actions">
+        <div class="auth-actions score-edit-actions dialog-pair-actions">
           <button class="cancel-delete-button" id="cancelScoreEditButton" type="button">取消</button>
           <button class="confirm-delete-button folder-save-button" id="saveScoreEditButton" type="submit">
             <i data-lucide="save" aria-hidden="true"></i>
@@ -669,7 +689,7 @@
         </div>
 
         <p class="share-dialog-status" id="setlistDialogState" role="status" aria-live="polite" hidden></p>
-        <div class="auth-actions score-edit-actions">
+        <div class="auth-actions score-edit-actions dialog-pair-actions">
           <button class="cancel-delete-button" id="cancelSetlistButton" type="button">取消</button>
           <button class="confirm-delete-button folder-save-button" id="saveSetlistButton" type="submit">
             <i data-lucide="save" aria-hidden="true"></i>
