@@ -77,6 +77,7 @@ const state = {
   pageTempUrls: new Map(),
   pageDownloads: new Set(),
   pageRecoveryAttempts: new Map(),
+  pageOptimizations: new Set(),
   pageHydrationTimer: 0,
   pageHydrationRunning: false,
   pageHydrationQueued: false,
@@ -3915,7 +3916,7 @@ function canvasToBlob(canvas, type, quality) {
 }
 
 function createCompressedFile(blob, originalName, extension) {
-  const baseName = originalName.replace(/\.[^.]+$/, "") || "score-page";
+  const baseName = String(originalName || "score-page").replace(/\.[^.]+$/, "") || "score-page";
   return new File([blob], `${baseName}.${extension}`, {
     type: blob.type,
     lastModified: Date.now(),
@@ -4459,6 +4460,78 @@ function pageBlobNeedsCloudUpload(page, pageDeleted = false) {
   return !page.storagePath || !page.storageSyncedAt || Number(page.storageUploadVersion) < STORAGE_UPLOAD_VERSION;
 }
 
+function queuePageBlobOptimization(pageId, sourceBlob, options = {}) {
+  if (!pageId || !sourceBlob?.size || state.pageOptimizations.has(pageId)) {
+    return;
+  }
+
+  state.pageOptimizations.add(pageId);
+  window.setTimeout(async () => {
+    try {
+      await optimizePageBlob(pageId, sourceBlob, options);
+    } catch (error) {
+      console.warn(error);
+    } finally {
+      state.pageOptimizations.delete(pageId);
+    }
+  }, 0);
+}
+
+async function optimizePageBlob(pageId, sourceBlob, options = {}) {
+  const page = state.scorePages.find((item) => item.id === pageId);
+  if (!page || page.deletedAt || !sourceBlob?.size) {
+    return;
+  }
+
+  const shouldCompress =
+    options.force ||
+    !sourceBlob.type ||
+    !["image/jpeg", "image/png", "image/webp"].includes(sourceBlob.type) ||
+    sourceBlob.size > 900 * 1024;
+
+  if (!shouldCompress) {
+    return;
+  }
+
+  const optimizedBlob = await withTimeout(
+    compressImageFile(sourceBlob),
+    IMAGE_COMPRESSION_TIMEOUT,
+    `《${page.name || "歌谱图片"}》图片处理超时，已保留原图。`,
+  ).catch((error) => {
+    console.warn(error);
+    return null;
+  });
+  if (!optimizedBlob?.size || optimizedBlob === sourceBlob) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const userId = page.userId || state.session?.user?.id || null;
+  const optimizedPage = {
+    ...page,
+    type: optimizedBlob.type || "image/jpeg",
+    size: optimizedBlob.size,
+    blob: optimizedBlob,
+    storageSyncedAt: null,
+    storageUploadVersion: 0,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+
+  revokeScoreUrlForPage(optimizedPage.id);
+  await putScorePage(optimizedPage);
+  replaceLocalPage(optimizedPage);
+  if (state.pageManagerScoreId === optimizedPage.scoreId) {
+    state.pageManagerPagesDraft = getPageManagerPages().map((item) => (item.id === optimizedPage.id ? optimizedPage : item));
+    renderPageManager();
+  }
+  refreshPageImages(optimizedPage);
+  renderScores();
+  if (userId && state.cloudReady) {
+    queueSync();
+  }
+}
+
 async function deleteManagedPage(page) {
   const pages = getPageManagerPages();
   if (pages.length <= 1) {
@@ -4531,6 +4604,7 @@ async function appendManagedPages(fileList) {
       });
     }
     await persistManagedPages([...getPageManagerPages(), ...newPages], [], `已追加 ${newPages.length} 页。`);
+    newPages.forEach((page) => queuePageBlobOptimization(page.id, page.blob));
   } catch (error) {
     console.error(error);
     setPageManagerStatus(error.message || "追加页面失败，请稍后再试。", true);
@@ -4577,6 +4651,7 @@ async function replaceManagedPage(file) {
       [],
       "页面已替换。",
     );
+    queuePageBlobOptimization(updatedPage.id, file, { force: true });
   } catch (error) {
     console.error(error);
     setPageManagerStatus(error.message || "替换页面失败，请稍后再试。", true);
@@ -8610,6 +8685,13 @@ function getScoreUrl(page, options = {}) {
 
 function applyPageImageRotation(image, page) {
   const rotation = normalizePageRotation(page?.rotation);
+  if (!rotation) {
+    image.style.removeProperty("--page-rotation");
+    image.removeAttribute("data-rotation");
+    image.classList.remove("is-rotated-sideways");
+    return;
+  }
+
   image.style.setProperty("--page-rotation", `${rotation}deg`);
   image.dataset.rotation = String(rotation);
   image.classList.toggle("is-rotated-sideways", rotation === 90 || rotation === 270);
@@ -8630,11 +8712,21 @@ function bindScoreImageRecovery(image, pageId) {
 
 async function recoverBrokenScoreImage(pageId) {
   const page = state.scorePages.find((item) => item.id === pageId);
-  if (!page?.storagePath) {
+  if (!page) {
     return;
   }
 
   const attempts = state.pageRecoveryAttempts.get(pageId) || 0;
+  if (page.blob?.size > 0 && attempts < 1) {
+    state.pageRecoveryAttempts.set(pageId, attempts + 1);
+    queuePageBlobOptimization(page.id, page.blob, { force: true });
+    return;
+  }
+
+  if (!page.storagePath) {
+    return;
+  }
+
   if (attempts >= 2) {
     return;
   }
