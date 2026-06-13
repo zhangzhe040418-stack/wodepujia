@@ -46,6 +46,7 @@ const SCORE_SORT_NAME = "name";
 const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
+const LOCAL_SAVE_TIMEOUT = 45000;
 const CLOUD_QUERY_TIMEOUT = 30000;
 const CLOUD_UPLOAD_TIMEOUT = 120000;
 const CLOUD_DOWNLOAD_TIMEOUT = 90000;
@@ -55,7 +56,7 @@ const SHARE_UPLOAD_CONCURRENCY = 3;
 const SCORE_UPLOAD_CONCURRENCY = 3;
 const SHARE_BACKGROUND_UPLOAD_CONCURRENCY = 1;
 const SHARE_BATCH_EMBED_LIMIT = 700 * 1024;
-const PAGE_BACKGROUND_HYDRATE_DELAY = 0;
+const PAGE_BACKGROUND_HYDRATE_DELAY = 1200;
 const PAGE_BACKGROUND_HYDRATE_CONCURRENCY = 2;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
@@ -81,6 +82,7 @@ const state = {
   scoreUrls: new Map(),
   pendingUrls: new Map(),
   pageTempUrls: new Map(),
+  pageTempUrlRequests: new Map(),
   pageDownloads: new Set(),
   pageRecoveryAttempts: new Map(),
   pageHydrationTimer: 0,
@@ -3241,8 +3243,8 @@ async function loadScores() {
   await consolidateDuplicateFoldersByName();
   renderScores();
   renderSetlists();
-  queueBackgroundPageHydration();
   refreshVisibleScoreImages();
+  queueBackgroundPageHydration();
 }
 
 function openDatabase() {
@@ -4046,22 +4048,57 @@ async function saveScore(event) {
   setStatus("正在保存...");
 
   try {
-    await putScoreWithPages(score, pages);
+    await withTimeout(
+      putScoreWithPages(score, pages),
+      LOCAL_SAVE_TIMEOUT,
+      "本地保存超时，请先减少单次添加的图片数量，或检查手机剩余空间后重试。",
+    );
+    insertSavedScoreInMemory(score, pages);
     resetForm(false);
     elements.searchInput.value = "";
-    await loadScores();
+    closeAddScreen();
+    renderScores();
     if (userId && state.cloudReady) {
       queueScoreCloudUpload(score.id, `已保存《${name}》，正在直传云端。`);
     } else {
       setStatus(`已保存《${name}》。`);
     }
-    closeAddScreen();
   } catch (error) {
     console.error(error);
     setStatus(getStorageSaveErrorMessage(error), true);
   } finally {
     updateSaveState();
   }
+}
+
+function insertSavedScoreInMemory(score, pages) {
+  const normalizedScore = normalizeLocalScoreRecord(score);
+  const normalizedPages = pages.map(normalizeLocalPageRecord).sort((a, b) => a.pageIndex - b.pageIndex);
+  const existingScoreIds = new Set(state.scores.map((item) => item.id));
+  const existingPageIds = new Set(state.scorePages.map((page) => page.id));
+
+  if (!existingScoreIds.has(normalizedScore.id)) {
+    state.scores.unshift({
+      ...normalizedScore,
+      pages: normalizedPages,
+    });
+  } else {
+    state.scores = state.scores.map((item) =>
+      item.id === normalizedScore.id
+        ? {
+          ...item,
+          ...normalizedScore,
+          pages: normalizedPages,
+        }
+        : item,
+    );
+  }
+
+  state.scorePages = [
+    ...state.scorePages.filter((page) => !existingPageIds.has(page.id) || page.scoreId !== normalizedScore.id),
+    ...normalizedPages,
+  ];
+  state.scores.sort((a, b) => getScoreTime(b.createdAt) - getScoreTime(a.createdAt) || getScoreTime(b.updatedAt) - getScoreTime(a.updatedAt));
 }
 
 async function saveScoreEdit(event) {
@@ -8899,9 +8936,61 @@ function scheduleScorePageHydration(page, delay = 0) {
   window.setTimeout(() => {
     const latestPage = getLatestPageRecord(page) || page;
     if (pageNeedsHydration(latestPage)) {
-      hydrateScorePage(latestPage);
+      ensureScorePageDisplayUrl(latestPage);
+      queueBackgroundPageHydration();
     }
   }, delay);
+}
+
+async function ensureScorePageDisplayUrl(page) {
+  if (!pageNeedsHydration(page) || state.pageTempUrls.has(page.id)) {
+    return state.pageTempUrls.get(page.id) || "";
+  }
+  if (!state.cloudReady || !state.session) {
+    return "";
+  }
+
+  try {
+    const tempUrl = await getScorePageTempUrl(page);
+    if (tempUrl) {
+      refreshPageImages(page);
+    }
+    return tempUrl;
+  } catch (error) {
+    console.warn(error);
+    return "";
+  }
+}
+
+function getScorePageTempUrl(page) {
+  if (!page?.id || !page.storagePath) {
+    return Promise.resolve("");
+  }
+
+  const existingUrl = state.pageTempUrls.get(page.id);
+  if (existingUrl) {
+    return Promise.resolve(existingUrl);
+  }
+
+  const existingRequest = state.pageTempUrlRequests.get(page.id);
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  const request = getCloudFileTempUrl(page.storagePath)
+    .then((tempUrl) => {
+      if (tempUrl) {
+        state.pageTempUrls.set(page.id, tempUrl);
+      }
+      return tempUrl || "";
+    })
+    .finally(() => {
+      if (state.pageTempUrlRequests.get(page.id) === request) {
+        state.pageTempUrlRequests.delete(page.id);
+      }
+    });
+  state.pageTempUrlRequests.set(page.id, request);
+  return request;
 }
 
 function bindScoreImageRecovery(image, pageId) {
@@ -8931,6 +9020,7 @@ async function recoverBrokenScoreImage(pageId) {
 
   revokeScoreUrlForPage(pageId);
   state.pageTempUrls.delete(pageId);
+  state.pageTempUrlRequests.delete(pageId);
   const recoveryPage = {
     ...page,
     blob: null,
@@ -9033,8 +9123,10 @@ async function hydrateScorePage(page) {
 
   state.pageDownloads.add(page.id);
   try {
-    const tempUrl = await getCloudFileTempUrl(page.storagePath);
-    state.pageTempUrls.set(page.id, tempUrl);
+    const tempUrl = await getScorePageTempUrl(page);
+    if (!tempUrl) {
+      return;
+    }
     refreshPageImages(page);
 
     const blob = await downloadCloudFileFromUrl(tempUrl, page.size, page.type);
@@ -9110,6 +9202,7 @@ function revokeScoreUrls(score) {
   score.pages.forEach((page) => {
     revokeScoreUrlForPage(page.id);
     state.pageTempUrls.delete(page.id);
+    state.pageTempUrlRequests.delete(page.id);
   });
 }
 
@@ -9119,6 +9212,7 @@ function revokeScoreUrlForPage(pageId) {
     URL.revokeObjectURL(url);
     state.scoreUrls.delete(pageId);
   }
+  state.pageTempUrlRequests.delete(pageId);
 }
 
 function revokePendingUrl(id) {
@@ -9138,6 +9232,7 @@ function revokeAllUrls() {
   state.scoreUrls.forEach((url) => URL.revokeObjectURL(url));
   state.scoreUrls.clear();
   state.pageTempUrls.clear();
+  state.pageTempUrlRequests.clear();
   clearPendingUrls();
 }
 
