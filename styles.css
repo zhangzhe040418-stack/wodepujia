@@ -4910,14 +4910,12 @@ body {
 
 /* v101 score cover preview: subtle loose-leaf binder style */
 .score-card:not(.folder-card) .score-preview {
+  padding: 0;
   border-color: rgba(202, 208, 218, 0.82);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 251, 242, 0.96)),
-    var(--paper);
+  background: var(--paper);
   box-shadow:
     -7px 8px 18px rgba(31, 41, 51, 0.08),
-    inset 15px 0 18px rgba(37, 99, 235, 0.07),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.58);
+    inset 15px 0 18px rgba(37, 99, 235, 0.07);
 }
 
 .score-card:not(.folder-card) .score-preview::before {
@@ -4957,19 +4955,19 @@ body {
 
 .score-card:not(.folder-card) .score-preview img {
   z-index: 1;
-  border-radius: 12px;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
   box-shadow: none;
 }
 
 :root[data-theme="dark"] .score-card:not(.folder-card) .score-preview {
   border-color: rgba(219, 211, 195, 0.42);
-  background:
-    linear-gradient(180deg, rgba(253, 249, 240, 0.94), rgba(243, 238, 227, 0.98)),
-    var(--paper);
+  background: var(--paper);
   box-shadow:
     -7px 8px 18px rgba(0, 0, 0, 0.22),
-    inset 15px 0 18px rgba(80, 90, 105, 0.12),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.36);
+    inset 15px 0 18px rgba(80, 90, 105, 0.12);
 }
 
 :root[data-theme="dark"] .score-card:not(.folder-card) .score-preview::before {
