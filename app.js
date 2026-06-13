@@ -47,6 +47,7 @@ const FAB_DRAG_START_DISTANCE = 4;
 const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
 const LOCAL_SAVE_TIMEOUT = 45000;
+const PAGE_SAVE_TIMEOUT = 18000;
 const CLOUD_QUERY_TIMEOUT = 30000;
 const CLOUD_UPLOAD_TIMEOUT = 120000;
 const CLOUD_DOWNLOAD_TIMEOUT = 90000;
@@ -56,7 +57,7 @@ const SHARE_UPLOAD_CONCURRENCY = 3;
 const SCORE_UPLOAD_CONCURRENCY = 3;
 const SHARE_BACKGROUND_UPLOAD_CONCURRENCY = 1;
 const SHARE_BATCH_EMBED_LIMIT = 700 * 1024;
-const PAGE_BACKGROUND_HYDRATE_DELAY = 1200;
+const PAGE_BACKGROUND_HYDRATE_DELAY = 2600;
 const PAGE_BACKGROUND_HYDRATE_CONCURRENCY = 2;
 const SCORE_IMAGE_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420"><rect width="320" height="420" fill="#f4f7f6"/><rect x="32" y="32" width="256" height="356" rx="8" fill="#fff" stroke="#c7d2cf"/><path d="M82 140h156M82 172h156M82 204h156M82 236h156M82 268h156" stroke="#9ca9a6" stroke-width="8" stroke-linecap="round"/><circle cx="130" cy="296" r="18" fill="#9ca9a6"/><path d="M146 296V118" stroke="#9ca9a6" stroke-width="12" stroke-linecap="round"/></svg>',
@@ -3577,43 +3578,72 @@ function getAllSetlistItems() {
   });
 }
 
-function putScore(score) {
+function putStoreRecord(storeName, record, timeoutMs = LOCAL_SAVE_TIMEOUT, timeoutMessage = "本地数据库写入超时，请重新打开 App 后再试。") {
   return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction(STORE_NAME, "readwrite");
-    const request = transaction.objectStore(STORE_NAME).put(toScoreRecord(score));
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    let settled = false;
+    const transaction = state.db.transaction(storeName, "readwrite");
+    const request = transaction.objectStore(storeName).put(record);
+    const timer = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      try {
+        transaction.abort();
+      } catch (error) {
+        console.warn(error);
+      }
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    const finish = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      callback();
+    };
+
+    request.onerror = () => finish(() => reject(request.error || transaction.error));
+    transaction.oncomplete = () => finish(resolve);
+    transaction.onerror = () => finish(() => reject(transaction.error || request.error));
+    transaction.onabort = () => finish(() => reject(transaction.error || request.error || new Error("本地数据库写入中断。")));
   });
 }
 
-function putScoreWithPages(score, pages) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
+function putScore(score) {
+  return putStoreRecord(STORE_NAME, toScoreRecord(score));
+}
 
-    scoreStore.put(toScoreRecord(score));
-    pages.forEach((page, index) => {
-      pageStore.put({
-        ...page,
-        scoreId: score.id,
-        pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
-      });
-    });
+async function putScoreWithPages(score, pages, options = {}) {
+  const preparedPages = pages.map((page, index) => ({
+    ...page,
+    scoreId: score.id,
+    pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+  }));
 
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+  try {
+    for (const [index, page] of preparedPages.entries()) {
+      options.onProgress?.(index + 1, preparedPages.length);
+      await putStoreRecord(
+        PAGE_STORE_NAME,
+        page,
+        PAGE_SAVE_TIMEOUT,
+        `第 ${index + 1} 页图片保存超时，请减少单次添加页数后重试。`,
+      );
+      await nextFrame();
+    }
+
+    await putStoreRecord(STORE_NAME, toScoreRecord(score), LOCAL_SAVE_TIMEOUT);
+  } catch (error) {
+    deleteScoreRecord(score.id).catch((cleanupError) => console.warn(cleanupError));
+    throw error;
+  }
 }
 
 function putScorePage(page) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction(PAGE_STORE_NAME, "readwrite");
-    const request = transaction.objectStore(PAGE_STORE_NAME).put(page);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+  return putStoreRecord(PAGE_STORE_NAME, page);
 }
 
 function putScorePageChanges(score, activePages, deletedPages = []) {
@@ -4049,8 +4079,12 @@ async function saveScore(event) {
 
   try {
     await withTimeout(
-      putScoreWithPages(score, pages),
-      LOCAL_SAVE_TIMEOUT,
+      putScoreWithPages(score, pages, {
+        onProgress: (current, total) => {
+          setStatus(total > 1 ? `正在保存图片 ${current} / ${total}...` : "正在保存图片...");
+        },
+      }),
+      Math.max(LOCAL_SAVE_TIMEOUT, pages.length * PAGE_SAVE_TIMEOUT + 5000),
       "本地保存超时，请先减少单次添加的图片数量，或检查手机剩余空间后重试。",
     );
     insertSavedScoreInMemory(score, pages);
@@ -4075,7 +4109,6 @@ function insertSavedScoreInMemory(score, pages) {
   const normalizedScore = normalizeLocalScoreRecord(score);
   const normalizedPages = pages.map(normalizeLocalPageRecord).sort((a, b) => a.pageIndex - b.pageIndex);
   const existingScoreIds = new Set(state.scores.map((item) => item.id));
-  const existingPageIds = new Set(state.scorePages.map((page) => page.id));
 
   if (!existingScoreIds.has(normalizedScore.id)) {
     state.scores.unshift({
@@ -4095,7 +4128,7 @@ function insertSavedScoreInMemory(score, pages) {
   }
 
   state.scorePages = [
-    ...state.scorePages.filter((page) => !existingPageIds.has(page.id) || page.scoreId !== normalizedScore.id),
+    ...state.scorePages.filter((page) => page.scoreId !== normalizedScore.id),
     ...normalizedPages,
   ];
   state.scores.sort((a, b) => getScoreTime(b.createdAt) - getScoreTime(a.createdAt) || getScoreTime(b.updatedAt) - getScoreTime(a.updatedAt));
@@ -4824,7 +4857,7 @@ function queueScoreCloudUpload(scoreId, message = "") {
       console.error(error);
       setStatus(error.message || "歌谱云端上传失败，请稍后点刷新重试。", true);
     });
-  }, 0);
+  }, 1800);
 }
 
 function startScoreCloudUpload(scoreId) {
@@ -8508,7 +8541,7 @@ async function prepareSetlistViewerPages(setlistId) {
 
     const setlist = state.setlists.find((item) => item.id === setlistId);
     const virtualScore = setlist ? createSetlistViewerScore(setlist) : null;
-    await hydrateScorePages(virtualScore?.pages || []);
+    prioritizeScorePageDisplay(virtualScore?.pages || []);
   } catch (error) {
     console.warn(error);
   }
@@ -8772,7 +8805,7 @@ async function prepareViewerPages(scoreId, fallbackPages = []) {
       rerenderOpenViewerIfPageListChanged(scoreId);
     }
 
-    await hydrateScorePages(pages);
+    prioritizeScorePageDisplay(pages);
   } catch (error) {
     console.warn(error);
   }
@@ -8937,7 +8970,6 @@ function scheduleScorePageHydration(page, delay = 0) {
     const latestPage = getLatestPageRecord(page) || page;
     if (pageNeedsHydration(latestPage)) {
       ensureScorePageDisplayUrl(latestPage);
-      queueBackgroundPageHydration();
     }
   }, delay);
 }
@@ -9045,6 +9077,18 @@ async function hydrateScorePages(pages) {
   } catch (error) {
     console.warn(error);
   }
+}
+
+function prioritizeScorePageDisplay(pages) {
+  const pendingPages = (pages || []).filter(pageNeedsHydration);
+  if (!pendingPages.length) {
+    return;
+  }
+
+  pendingPages.slice(0, 12).forEach((page, index) => {
+    scheduleScorePageHydration(page, index * 80);
+  });
+  queueBackgroundPageHydration();
 }
 
 function queueBackgroundPageHydration(delay = PAGE_BACKGROUND_HYDRATE_DELAY) {
