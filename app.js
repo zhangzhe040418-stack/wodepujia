@@ -381,7 +381,6 @@ function bindElements() {
   elements.viewerPageIndicator = document.querySelector("#viewerPageIndicator");
   elements.viewerPerformanceButton = document.querySelector("#viewerPerformanceButton");
   elements.viewerPerformanceText = document.querySelector("#viewerPerformanceText");
-  elements.viewerRefreshButton = document.querySelector("#viewerRefreshButton");
   elements.viewerFavoriteButton = document.querySelector("#viewerFavoriteButton");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
@@ -661,7 +660,6 @@ function bindEvents() {
   });
   elements.viewerBackButton.addEventListener("click", closeViewer);
   elements.viewerPerformanceButton?.addEventListener("click", toggleViewerPerformanceMode);
-  elements.viewerRefreshButton?.addEventListener("click", refreshCurrentViewer);
   elements.viewerFavoriteButton?.addEventListener("click", toggleCurrentViewerFavorite);
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
   elements.confirmDeleteButton.addEventListener("click", () => closeDeleteDialog(true));
@@ -5629,29 +5627,49 @@ async function getCloudFileTempUrl(fileID) {
     throw new Error("歌谱图片缺少云端文件 ID。");
   }
 
+  const urlMap = await getCloudFileTempUrls([fileID]);
+  const url = urlMap.get(fileID);
+  if (!url) {
+    throw new Error("歌谱图片下载地址为空。");
+  }
+
+  return url;
+}
+
+async function getCloudFileTempUrls(fileIDs) {
+  const targets = [...new Set((fileIDs || []).filter(Boolean))];
+  if (!targets.length) {
+    return new Map();
+  }
+
   const result = await withTimeout(
     state.cloudApp.getTempFileURL({
-      fileList: [fileID],
+      fileList: targets,
     }),
     CLOUD_QUERY_TIMEOUT,
     "歌谱图片下载授权超时，请检查网络后重试。",
   );
   assertCloudResult(result);
 
-  const fileInfo = result.fileList?.[0] || result.data?.fileList?.[0];
-  if (!fileInfo) {
-    throw new Error("无法获取歌谱图片下载地址。");
-  }
-  if (fileInfo.code && fileInfo.code !== "SUCCESS") {
-    throw new Error(fileInfo.message || fileInfo.msg || "歌谱图片下载地址获取失败。");
-  }
+  const fileList = result.fileList || result.data?.fileList || [];
+  const urls = new Map();
+  fileList.forEach((fileInfo, index) => {
+    if (!fileInfo || (fileInfo.code && fileInfo.code !== "SUCCESS")) {
+      return;
+    }
 
-  const url = fileInfo.tempFileURL || fileInfo.download_url || fileInfo.url;
-  if (!url) {
-    throw new Error("歌谱图片下载地址为空。");
-  }
+    const url = getCloudTempUrlFromInfo(fileInfo);
+    const fileID = fileInfo.fileID || fileInfo.fileId || fileInfo.file_id || targets[index];
+    if (fileID && url) {
+      urls.set(fileID, url);
+    }
+  });
 
-  return url;
+  return urls;
+}
+
+function getCloudTempUrlFromInfo(fileInfo) {
+  return fileInfo?.tempFileURL || fileInfo?.download_url || fileInfo?.url || "";
 }
 
 function isMissingCloudCollectionError(error) {
@@ -8215,64 +8233,6 @@ function closeViewer(options = {}) {
   }
 }
 
-async function refreshCurrentViewer() {
-  if (!elements.viewerDialog?.open || elements.viewerRefreshButton?.disabled) {
-    return;
-  }
-
-  elements.viewerRefreshButton.disabled = true;
-  elements.viewerRefreshButton.classList.add("is-refreshing");
-
-  try {
-    await exitViewerPerformanceMode({ silent: true });
-    resetViewerGestureState();
-    setViewerZoom(VIEWER_MIN_ZOOM);
-
-    if (state.currentViewerScoreId) {
-      const score = state.scores.find((item) => item.id === state.currentViewerScoreId);
-      if (!score) {
-        return;
-      }
-
-      const scorePages = getLatestScorePages(score.id, score.pages);
-      const viewerScore = {
-        ...score,
-        pages: scorePages,
-      };
-      setViewerKeySignature(score.keySignature);
-      setViewerFavoriteButton(score);
-      renderViewerPages(viewerScore);
-      await nextFrame();
-      elements.viewerPages.scrollTo({ left: 0, top: 0 });
-      await prepareViewerPages(score.id, scorePages);
-      return;
-    }
-
-    if (state.currentViewerSetlistId) {
-      const setlist = state.setlists.find((item) => item.id === state.currentViewerSetlistId);
-      if (!setlist) {
-        return;
-      }
-
-      const virtualScore = createSetlistViewerScore(setlist);
-      setViewerKeySignature("");
-      setViewerFavoriteButton(null);
-      renderViewerPages(virtualScore);
-      await nextFrame();
-      elements.viewerPages.scrollTo({ left: 0, top: 0 });
-      await prepareSetlistViewerPages(setlist.id);
-    }
-  } catch (error) {
-    console.error(error);
-    setStatus("刷新歌谱失败，请稍后再试。", true);
-  } finally {
-    elements.viewerRefreshButton.classList.remove("is-refreshing");
-    if (elements.viewerDialog?.open) {
-      elements.viewerRefreshButton.disabled = false;
-    }
-  }
-}
-
 function setViewerKeySignature(value) {
   if (!elements.viewerKeySignature) {
     return;
@@ -8587,7 +8547,16 @@ async function prepareSetlistViewerPages(setlistId) {
       return;
     }
 
-    if (await ensureCloudMediaReady()) {
+    const initialSetlist = state.setlists.find((item) => item.id === setlistId);
+    prioritizeScorePageDisplay(initialSetlist ? createSetlistViewerScore(initialSetlist).pages : []);
+
+    if (!(await ensureCloudMediaReady())) {
+      return;
+    }
+
+    prioritizeScorePageDisplay(initialSetlist ? createSetlistViewerScore(initialSetlist).pages : []);
+
+    try {
       await runWithConcurrency(scores, 2, (score) => refreshScorePagesFromCloud(score.id));
       const setlist = state.setlists.find((item) => item.id === setlistId);
       if (setlist && elements.viewerDialog.open && state.currentViewerSetlistId === setlistId) {
@@ -8599,6 +8568,8 @@ async function prepareSetlistViewerPages(setlistId) {
           elements.viewerPages.scrollTo({ top: previousScrollTop, left: previousScrollLeft });
         });
       }
+    } catch (error) {
+      console.warn(error);
     }
 
     const setlist = state.setlists.find((item) => item.id === setlistId);
@@ -8843,23 +8814,28 @@ function renderViewerPages(score) {
 
     figure.append(imageFrame);
     elements.viewerPages.append(figure);
-    bindScorePageImage(image, page);
+    bindScorePageImage(image, page, { hydrate: false });
   });
   setViewerPageIndicator(1, pages.length || 1);
   scheduleViewerPageIndicatorUpdate();
+  prioritizeScorePageDisplay(pages);
 }
 
 function getLatestScorePages(scoreId, fallbackPages = []) {
   const latestScore = state.scores.find((score) => score.id === scoreId);
+  const scorePages = state.scorePages.filter((page) => page.scoreId === scoreId && !page.deletedAt);
+  const scoreRecordPages = (latestScore?.pages || []).filter((page) => !page.deletedAt);
   const viewerPages =
     state.currentViewerScoreId === scoreId
       ? state.currentViewerPages.filter((page) => page.scoreId === scoreId)
       : [];
   const pages =
-    latestScore?.pages?.length
-      ? latestScore.pages
-      : state.scorePages.some((page) => page.scoreId === scoreId)
-        ? state.scorePages.filter((page) => page.scoreId === scoreId && !page.deletedAt)
+    scorePages.length > scoreRecordPages.length
+      ? scorePages
+      : scoreRecordPages.length
+        ? scoreRecordPages
+        : scorePages.length
+          ? scorePages
         : viewerPages.length
           ? viewerPages
           : fallbackPages;
@@ -8873,12 +8849,24 @@ async function prepareViewerPages(scoreId, fallbackPages = []) {
       return;
     }
 
-    if (await ensureCloudMediaReady()) {
+    prioritizeScorePageDisplay(pages);
+
+    if (!(await ensureCloudMediaReady())) {
+      return;
+    }
+
+    pages = getLatestScorePages(scoreId, pages);
+    prioritizeScorePageDisplay(pages);
+
+    try {
       await refreshScorePagesFromCloud(scoreId);
       pages = getLatestScorePages(scoreId, pages);
       rerenderOpenViewerIfPageListChanged(scoreId);
+    } catch (error) {
+      console.warn(error);
     }
 
+    pages = getLatestScorePages(scoreId, pages);
     prioritizeScorePageDisplay(pages);
   } catch (error) {
     console.warn(error);
@@ -8895,8 +8883,13 @@ function rerenderOpenViewerIfPageListChanged(scoreId) {
     return;
   }
 
+  const latestPages = getLatestScorePages(scoreId, state.currentViewerPages);
+  if (!latestPages.length) {
+    return;
+  }
+
   const renderedIds = Array.from(elements.viewerPages.querySelectorAll("img[data-page-id]")).map((image) => image.dataset.pageId);
-  const latestIds = (score.pages || []).map((page) => page.id);
+  const latestIds = latestPages.map((page) => page.id);
   const samePages = renderedIds.length === latestIds.length && renderedIds.every((id, index) => id === latestIds[index]);
   if (samePages) {
     return;
@@ -8904,7 +8897,10 @@ function rerenderOpenViewerIfPageListChanged(scoreId) {
 
   const previousScrollTop = elements.viewerPages.scrollTop;
   const previousScrollLeft = elements.viewerPages.scrollLeft;
-  renderViewerPages(score);
+  renderViewerPages({
+    ...score,
+    pages: latestPages,
+  });
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ top: previousScrollTop, left: previousScrollLeft });
   });
@@ -8971,6 +8967,9 @@ function upsertLocalPagesInMemory(pages) {
     pageById.set(page.id, page);
   });
   state.scorePages = Array.from(pageById.values());
+  if (state.currentViewerPages.length) {
+    state.currentViewerPages = state.currentViewerPages.map((page) => pageById.get(page.id) || page);
+  }
 
   const pagesByScoreId = new Map();
   state.scorePages.forEach((page) => {
@@ -9032,7 +9031,7 @@ function getLatestPageRecord(pageOrId) {
     return null;
   }
 
-  return state.scorePages.find((page) => page.id === pageId) || null;
+  return state.scorePages.find((page) => page.id === pageId) || state.currentViewerPages.find((page) => page.id === pageId) || null;
 }
 
 function scheduleScorePageHydration(page, delay = 0) {
@@ -9159,10 +9158,53 @@ function prioritizeScorePageDisplay(pages) {
     return;
   }
 
-  pendingPages.slice(0, 12).forEach((page, index) => {
-    scheduleScorePageHydration(page, index * 80);
+  warmScorePageTempUrls(pendingPages).catch((error) => console.warn(error));
+  pendingPages.forEach((page, index) => {
+    scheduleScorePageHydration(page, index * 35);
   });
   queueBackgroundPageHydration();
+}
+
+async function warmScorePageTempUrls(pages) {
+  const pendingPages = (pages || []).filter(
+    (page) => pageNeedsHydration(page) && page.storagePath && !state.pageTempUrls.has(page.id) && !state.pageTempUrlRequests.has(page.id),
+  );
+  if (!pendingPages.length) {
+    return;
+  }
+
+  if (!(await ensureCloudMediaReady())) {
+    return;
+  }
+
+  const chunks = chunkArray(pendingPages, 20);
+  for (const pageChunk of chunks) {
+    const chunkRequest = getCloudFileTempUrls(pageChunk.map((page) => page.storagePath));
+    pageChunk.forEach((page) => {
+      state.pageTempUrlRequests.set(
+        page.id,
+        chunkRequest.then((urlMap) => urlMap.get(page.storagePath) || "").catch(() => ""),
+      );
+    });
+
+    try {
+      const urlMap = await chunkRequest;
+      pageChunk.forEach((page) => {
+        const tempUrl = urlMap.get(page.storagePath);
+        if (!tempUrl) {
+          return;
+        }
+
+        state.pageTempUrls.set(page.id, tempUrl);
+        refreshPageImages(page);
+      });
+    } finally {
+      pageChunk.forEach((page) => {
+        state.pageTempUrlRequests.delete(page.id);
+      });
+    }
+    await nextFrame();
+  }
 }
 
 function queueBackgroundPageHydration(delay = PAGE_BACKGROUND_HYDRATE_DELAY) {
@@ -9271,6 +9313,9 @@ function replaceLocalPage(updatedPage) {
   state.scorePages = existingPage
     ? state.scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page))
     : [...state.scorePages, updatedPage];
+  if (state.currentViewerPages.some((page) => page.id === updatedPage.id)) {
+    state.currentViewerPages = state.currentViewerPages.map((page) => (page.id === updatedPage.id ? updatedPage : page));
+  }
   state.scores = state.scores.map((score) => {
     if (score.id !== updatedPage.scoreId) {
       return score;

@@ -2648,7 +2648,6 @@ body.preferences-screen-open .fab-button {
   height: 15px;
 }
 
-.viewer-refresh-button,
 .viewer-favorite-button {
   display: inline-grid;
   place-items: center;
@@ -2657,18 +2656,6 @@ body.preferences-screen-open .fab-button {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent-strong);
-}
-
-.viewer-refresh-button:hover,
-.viewer-refresh-button:focus-visible {
-  background: var(--accent);
-  color: #ffffff;
-  outline: none;
-}
-
-.viewer-refresh-button.is-refreshing .lucide,
-.viewer-refresh-button.is-refreshing [data-lucide] {
-  animation: sync-spin 0.8s linear infinite;
 }
 
 .viewer-favorite-button:hover,
@@ -2684,8 +2671,6 @@ body.preferences-screen-open .fab-button {
   fill: currentColor;
 }
 
-.viewer-refresh-button .lucide,
-.viewer-refresh-button [data-lucide],
 .viewer-favorite-button .lucide,
 .viewer-favorite-button [data-lucide] {
   width: 20px;
@@ -2700,7 +2685,6 @@ body.preferences-screen-open .fab-button {
 
 .viewer-dialog.is-performance-mode .viewer-back-button,
 .viewer-dialog.is-performance-mode .viewer-key-signature,
-.viewer-dialog.is-performance-mode .viewer-refresh-button,
 .viewer-dialog.is-performance-mode .viewer-favorite-button {
   display: none;
 }
@@ -2894,7 +2878,6 @@ body.preferences-screen-open .fab-button {
 :root[data-theme="dark"] .page-manager-row,
 :root[data-theme="dark"] .page-manager-thumb,
 :root[data-theme="dark"] .viewer-page-indicator,
-:root[data-theme="dark"] .viewer-refresh-button,
 :root[data-theme="dark"] .viewer-favorite-button,
 :root[data-theme="dark"] .mine-strip-button,
 :root[data-theme="dark"] .mine-auth-panel,
@@ -2984,12 +2967,6 @@ body.preferences-screen-open .fab-button {
 :root[data-theme="dark"] .more-button {
   background: var(--accent-soft);
   color: var(--accent-strong);
-}
-
-:root[data-theme="dark"] .viewer-refresh-button:hover,
-:root[data-theme="dark"] .viewer-refresh-button:focus-visible {
-  background: var(--accent);
-  color: #ffffff;
 }
 
 :root[data-theme="dark"] .viewer-favorite-button:hover,
