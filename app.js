@@ -146,6 +146,7 @@ const state = {
   viewerTapStart: null,
   viewerLastTap: null,
   viewerHistoryActive: false,
+  currentViewerPages: [],
   folderHistoryActive: false,
   currentViewerScoreId: null,
   currentViewerSetlistId: null,
@@ -380,6 +381,7 @@ function bindElements() {
   elements.viewerPageIndicator = document.querySelector("#viewerPageIndicator");
   elements.viewerPerformanceButton = document.querySelector("#viewerPerformanceButton");
   elements.viewerPerformanceText = document.querySelector("#viewerPerformanceText");
+  elements.viewerRefreshButton = document.querySelector("#viewerRefreshButton");
   elements.viewerFavoriteButton = document.querySelector("#viewerFavoriteButton");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
@@ -659,6 +661,7 @@ function bindEvents() {
   });
   elements.viewerBackButton.addEventListener("click", closeViewer);
   elements.viewerPerformanceButton?.addEventListener("click", toggleViewerPerformanceMode);
+  elements.viewerRefreshButton?.addEventListener("click", refreshCurrentViewer);
   elements.viewerFavoriteButton?.addEventListener("click", toggleCurrentViewerFavorite);
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
   elements.confirmDeleteButton.addEventListener("click", () => closeDeleteDialog(true));
@@ -8187,6 +8190,7 @@ function closeViewer(options = {}) {
   state.viewerHistoryActive = false;
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = null;
+  state.currentViewerPages = [];
   state.libraryRenderQueued = false;
   if (elements.viewerTitle) {
     elements.viewerTitle.textContent = "查看歌谱";
@@ -8208,6 +8212,64 @@ function closeViewer(options = {}) {
 
   if (shouldRenderLibrary && state.activeTab === "library") {
     renderScores();
+  }
+}
+
+async function refreshCurrentViewer() {
+  if (!elements.viewerDialog?.open || elements.viewerRefreshButton?.disabled) {
+    return;
+  }
+
+  elements.viewerRefreshButton.disabled = true;
+  elements.viewerRefreshButton.classList.add("is-refreshing");
+
+  try {
+    await exitViewerPerformanceMode({ silent: true });
+    resetViewerGestureState();
+    setViewerZoom(VIEWER_MIN_ZOOM);
+
+    if (state.currentViewerScoreId) {
+      const score = state.scores.find((item) => item.id === state.currentViewerScoreId);
+      if (!score) {
+        return;
+      }
+
+      const scorePages = getLatestScorePages(score.id, score.pages);
+      const viewerScore = {
+        ...score,
+        pages: scorePages,
+      };
+      setViewerKeySignature(score.keySignature);
+      setViewerFavoriteButton(score);
+      renderViewerPages(viewerScore);
+      await nextFrame();
+      elements.viewerPages.scrollTo({ left: 0, top: 0 });
+      await prepareViewerPages(score.id, scorePages);
+      return;
+    }
+
+    if (state.currentViewerSetlistId) {
+      const setlist = state.setlists.find((item) => item.id === state.currentViewerSetlistId);
+      if (!setlist) {
+        return;
+      }
+
+      const virtualScore = createSetlistViewerScore(setlist);
+      setViewerKeySignature("");
+      setViewerFavoriteButton(null);
+      renderViewerPages(virtualScore);
+      await nextFrame();
+      elements.viewerPages.scrollTo({ left: 0, top: 0 });
+      await prepareSetlistViewerPages(setlist.id);
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus("刷新歌谱失败，请稍后再试。", true);
+  } finally {
+    elements.viewerRefreshButton.classList.remove("is-refreshing");
+    if (elements.viewerDialog?.open) {
+      elements.viewerRefreshButton.disabled = false;
+    }
   }
 }
 
@@ -8759,6 +8821,7 @@ function closeDeleteDialog(confirmed) {
 function renderViewerPages(score) {
   const pages = [...(score.pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
   const horizontalMode = state.viewerMode === VIEWER_MODE_LANDSCAPE && pages.length > 1;
+  state.currentViewerPages = pages;
   elements.viewerPages.replaceChildren();
   elements.viewerPages.classList.toggle("has-multiple-pages", pages.length > 1);
   elements.viewerPages.classList.toggle("is-horizontal-mode", horizontalMode);
@@ -8788,7 +8851,18 @@ function renderViewerPages(score) {
 
 function getLatestScorePages(scoreId, fallbackPages = []) {
   const latestScore = state.scores.find((score) => score.id === scoreId);
-  const pages = latestScore?.pages?.length ? latestScore.pages : fallbackPages;
+  const viewerPages =
+    state.currentViewerScoreId === scoreId
+      ? state.currentViewerPages.filter((page) => page.scoreId === scoreId)
+      : [];
+  const pages =
+    latestScore?.pages?.length
+      ? latestScore.pages
+      : state.scorePages.some((page) => page.scoreId === scoreId)
+        ? state.scorePages.filter((page) => page.scoreId === scoreId && !page.deletedAt)
+        : viewerPages.length
+          ? viewerPages
+          : fallbackPages;
   return [...(pages || [])].sort((a, b) => a.pageIndex - b.pageIndex);
 }
 

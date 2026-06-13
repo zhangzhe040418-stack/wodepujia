@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=93" />
+    <link rel="stylesheet" href="styles.css?v=94" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=93"></script>
+    <script defer charset="UTF-8" src="app.js?v=94"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -778,6 +778,9 @@
           </div>
           <span class="viewer-page-indicator" id="viewerPageIndicator">1 / 1</span>
           <div class="viewer-right-controls">
+            <button class="viewer-refresh-button" id="viewerRefreshButton" type="button" title="刷新歌谱" aria-label="刷新歌谱">
+              <i data-lucide="refresh-cw" aria-hidden="true"></i>
+            </button>
             <span class="viewer-key-signature" id="viewerKeySignature" hidden></span>
             <button class="viewer-favorite-button" id="viewerFavoriteButton" type="button" title="收藏歌谱" aria-label="收藏歌谱">
               <i data-lucide="star" aria-hidden="true"></i>
