@@ -1972,7 +1972,7 @@ function writeThemePreference(mode) {
 function applyThemePreference(mode) {
   const nextMode = mode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
   document.documentElement.dataset.theme = nextMode;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextMode === THEME_DARK ? "#0b1211" : "#0f766e");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextMode === THEME_DARK ? "#11110f" : "#2563eb");
 }
 
 function openPreferencesScreen() {
