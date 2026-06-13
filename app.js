@@ -7519,7 +7519,11 @@ function renderScores() {
     elements.scoreGrid.append(
       createEmptyState(
         inFolder ? "文件夹是空的" : "还没有歌谱",
-        inFolder ? "点击右下角添加歌谱。" : "点击右下角添加文件夹或歌谱。",
+        inFolder ? "添加几份常用乐谱，排练时会更顺手。" : "添加第一份乐谱，开始整理你的谱库。",
+        {
+          label: "添加歌谱",
+          onClick: () => handleAddButtonClick(),
+        },
       ),
     );
     refreshIcons();
@@ -7679,7 +7683,7 @@ function createScoreCard(score) {
 
   const detail = document.createElement("p");
   detail.className = "score-detail";
-  detail.textContent = `${score.pages.length} 页`;
+  detail.textContent = [`${score.pages.length} 页`, score.keySignature].filter(Boolean).join(" · ");
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
@@ -8110,7 +8114,7 @@ function getSetlistSortTime(setlist) {
   return Number.isNaN(updatedTime) ? 0 : updatedTime;
 }
 
-function createEmptyState(title, detail) {
+function createEmptyState(title, detail, action = null) {
   const empty = document.createElement("div");
   empty.className = "empty-state";
 
@@ -8120,6 +8124,18 @@ function createEmptyState(title, detail) {
   const paragraph = document.createElement("span");
   paragraph.textContent = detail;
   content.append(strong, paragraph);
+
+  if (action?.label && typeof action.onClick === "function") {
+    const button = document.createElement("button");
+    button.className = "empty-action-button";
+    button.type = "button";
+    button.textContent = action.label;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      action.onClick(event);
+    });
+    content.append(button);
+  }
 
   empty.append(content);
   return empty;
