@@ -438,7 +438,7 @@ function bindEvents() {
     renderScores();
     elements.searchInput.blur();
   });
-  elements.syncNowButton.addEventListener("click", handleManualSync);
+  elements.syncNowButton?.addEventListener("click", handleManualSync);
   elements.accountButton?.addEventListener("click", openAuthDialog);
   elements.closeAuthButton.addEventListener("click", closeAuthDialog);
   elements.authForm.addEventListener("submit", signInWithPassword);
@@ -1618,7 +1618,9 @@ function updateAccountUi() {
   if (elements.accountButtonText) {
     elements.accountButtonText.textContent = accountButtonText;
   }
-  elements.syncNowButton.disabled = state.syncing || Boolean(state.cloudInitializing);
+  if (elements.syncNowButton) {
+    elements.syncNowButton.disabled = state.syncing || Boolean(state.cloudInitializing);
+  }
   elements.shareScoresButton.disabled = !state.cloudReady || !state.session;
   elements.importShareButton.disabled = !state.cloudReady || !state.session;
 
@@ -5025,8 +5027,10 @@ async function handleManualSync() {
     return;
   }
 
-  elements.syncNowButton.classList.add("is-syncing");
-  elements.syncNowButton.disabled = true;
+  elements.syncNowButton?.classList.add("is-syncing");
+  if (elements.syncNowButton) {
+    elements.syncNowButton.disabled = true;
+  }
   state.syncing = true;
   updateAccountUi();
 
@@ -5058,7 +5062,7 @@ async function handleManualSync() {
     setStatus(error.message || "刷新失败，请检查网络和 CloudBase 配置。", true);
   } finally {
     state.syncing = false;
-    elements.syncNowButton.classList.remove("is-syncing");
+    elements.syncNowButton?.classList.remove("is-syncing");
     updateAccountUi();
   }
 }

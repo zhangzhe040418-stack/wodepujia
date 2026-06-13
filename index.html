@@ -23,10 +23,10 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=96" />
+    <link rel="stylesheet" href="styles.css?v=97" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=95"></script>
+    <script defer charset="UTF-8" src="app.js?v=97"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -40,10 +40,18 @@
             <p id="librarySummary">正在读取谱夹</p>
           </div>
         </div>
-        <button class="install-button" id="installAppButton" type="button" hidden>
-          <i data-lucide="download" aria-hidden="true"></i>
-          <span>安装</span>
-        </button>
+        <div class="topbar-actions" aria-label="歌谱操作">
+          <button class="icon-button topbar-action-button" id="shareScoresButton" type="button" title="分享歌谱" aria-label="分享歌谱">
+            <i data-lucide="share-2" aria-hidden="true"></i>
+          </button>
+          <button class="icon-button topbar-action-button" id="importShareButton" type="button" title="输入同步码" aria-label="输入同步码">
+            <i data-lucide="key-round" aria-hidden="true"></i>
+          </button>
+          <button class="install-button" id="installAppButton" type="button" hidden>
+            <i data-lucide="download" aria-hidden="true"></i>
+            <span>安装</span>
+          </button>
+        </div>
       </header>
 
       <main class="workspace" id="libraryScreen">
@@ -65,17 +73,6 @@
               </div>
               <p id="resultCount">0 份歌谱</p>
             </div>
-            <div class="library-actions" aria-label="歌谱操作">
-              <button class="icon-button" id="syncNowButton" type="button" title="立即同步" aria-label="立即同步">
-                <i data-lucide="refresh-cw" aria-hidden="true"></i>
-              </button>
-              <button class="icon-button" id="shareScoresButton" type="button" title="分享歌谱" aria-label="分享歌谱">
-                <i data-lucide="share-2" aria-hidden="true"></i>
-              </button>
-              <button class="icon-button" id="importShareButton" type="button" title="输入同步码" aria-label="输入同步码">
-                <i data-lucide="key-round" aria-hidden="true"></i>
-              </button>
-            </div>
           </div>
 
           <div class="searchbar">
@@ -92,14 +89,6 @@
               <button class="library-filter-button" type="button" data-library-filter="recent">最近打开</button>
               <button class="library-filter-button" type="button" data-library-filter="favorite">我的收藏</button>
             </div>
-            <label class="library-sort">
-              <span class="sr-only">排序方式</span>
-              <select id="scoreSortSelect">
-                <option value="recentOpened">最近打开</option>
-                <option value="recentAdded" selected>最近添加</option>
-                <option value="name">名称排序</option>
-              </select>
-            </label>
           </div>
 
           <div class="score-grid" id="scoreGrid" aria-live="polite"></div>

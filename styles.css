@@ -250,6 +250,23 @@ noscript {
   min-width: 0;
 }
 
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.topbar-action-button {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.topbar-action-button:disabled {
+  opacity: 0.45;
+}
+
 .brand-lockup > div {
   min-width: 0;
 }
@@ -3205,6 +3222,26 @@ button:active,
   gap: 12px;
 }
 
+.topbar-actions {
+  gap: 8px;
+}
+
+.topbar-action-button {
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(37, 99, 235, 0.12);
+  border-radius: 14px;
+  background: rgba(234, 241, 255, 0.92);
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+.topbar-action-button:hover,
+.topbar-action-button:focus-visible {
+  background: var(--accent);
+  color: #ffffff;
+}
+
 .brand-mark {
   position: relative;
   width: 48px;
@@ -3232,6 +3269,9 @@ button:active,
   color: var(--ink);
   font-size: 1.42rem;
   font-weight: 900;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .brand-lockup p,
@@ -3239,6 +3279,12 @@ button:active,
 .status-message,
 .setlist-head p {
   color: var(--muted);
+}
+
+.brand-lockup p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .install-button,
@@ -3276,6 +3322,10 @@ button:active,
 .setlist-head,
 .mine-head {
   margin-bottom: 12px;
+}
+
+#libraryScreen .library-head {
+  display: none;
 }
 
 .library-head h2,
@@ -3337,6 +3387,7 @@ button:active,
 
 .library-filter-bar {
   align-items: center;
+  justify-content: flex-start;
   gap: 10px;
   margin: 0 0 18px;
 }
@@ -3768,6 +3819,12 @@ button:active,
 :root[data-theme="dark"] .viewer-topbar {
   border-color: rgba(39, 52, 73, 0.86);
   background: rgba(17, 24, 39, 0.86);
+}
+
+:root[data-theme="dark"] .topbar-action-button {
+  border-color: rgba(96, 165, 250, 0.2);
+  background: rgba(96, 165, 250, 0.14);
+  color: #bfdbfe;
 }
 
 :root[data-theme="dark"] .searchbar,
