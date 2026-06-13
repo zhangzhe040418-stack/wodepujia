@@ -72,6 +72,7 @@ html {
   touch-action: pan-x pan-y;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  background: var(--app-bg);
 }
 
 * {
@@ -103,6 +104,7 @@ body {
     env(safe-area-inset-left);
   overflow: hidden;
   overscroll-behavior: none;
+  background-color: var(--app-bg);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(244, 247, 246, 0.88)),
     repeating-linear-gradient(
@@ -116,6 +118,18 @@ body {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  height: env(safe-area-inset-top);
+  background: var(--app-bg);
+  pointer-events: none;
 }
 
 :root[data-theme="dark"] body {
@@ -4766,4 +4780,130 @@ button:active,
 
 :root[data-theme="dark"] .viewer-image-frame img {
   filter: none;
+}
+
+/* v100 fixes: folder back row, safe area color, profile/preferences dark consistency */
+body {
+  background-color: var(--app-bg);
+}
+
+#libraryScreen.is-folder-open .library-head {
+  display: flex;
+  min-height: 44px;
+  margin: 0 0 10px;
+  padding: 0 2px;
+}
+
+#libraryScreen.is-folder-open .library-head > div:first-child {
+  width: 100%;
+}
+
+#libraryScreen.is-folder-open .library-title-row {
+  min-height: 44px;
+  gap: 10px;
+}
+
+#libraryScreen.is-folder-open .folder-back-button {
+  margin-left: 0;
+  border: 1px solid rgba(37, 99, 235, 0.12);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+#libraryScreen.is-folder-open #libraryTitle {
+  overflow: hidden;
+  font-size: 1.06rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#libraryScreen.is-folder-open #resultCount {
+  display: none;
+}
+
+:root[data-theme="dark"] #libraryScreen.is-folder-open .folder-back-button {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(110, 168, 255, 0.13);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .profile-screen,
+:root[data-theme="dark"] .preferences-screen {
+  background-color: var(--app-bg);
+  background-image:
+    radial-gradient(circle at 18% -8%, rgba(125, 211, 199, 0.05), transparent 32%),
+    linear-gradient(180deg, #151513 0%, #11110f 62%, #141412 100%);
+}
+
+:root[data-theme="dark"] .profile-page,
+:root[data-theme="dark"] .preferences-page {
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(34, 35, 39, 0.96), rgba(27, 28, 31, 0.98));
+  color: var(--ink);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme="dark"] .profile-field,
+:root[data-theme="dark"] .preference-section {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .profile-page-head,
+:root[data-theme="dark"] .profile-state {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .profile-segmented,
+:root[data-theme="dark"] .preference-choice-button,
+:root[data-theme="dark"] .profile-contact-row,
+:root[data-theme="dark"] .profile-birthday-button,
+:root[data-theme="dark"] .field input,
+:root[data-theme="dark"] .field select,
+:root[data-theme="dark"] .field textarea {
+  border-color: var(--line);
+  background: rgba(20, 21, 23, 0.92);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .profile-segment-button {
+  background: transparent;
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .profile-segment-button:hover,
+:root[data-theme="dark"] .profile-segment-button:focus-visible {
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .profile-segment-button.is-active {
+  background: rgba(110, 168, 255, 0.18);
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .preference-section h3 {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .preference-choice-button {
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .preference-choice-button.is-active {
+  border-color: rgba(110, 168, 255, 0.28);
+  background: rgba(110, 168, 255, 0.13);
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .preference-choice-icon,
+:root[data-theme="dark"] .mine-strip-icon {
+  background: rgba(110, 168, 255, 0.13);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .profile-link-button {
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--accent-strong);
 }

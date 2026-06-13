@@ -1972,7 +1972,7 @@ function writeThemePreference(mode) {
 function applyThemePreference(mode) {
   const nextMode = mode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
   document.documentElement.dataset.theme = nextMode;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextMode === THEME_DARK ? "#11110f" : "#2563eb");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextMode === THEME_DARK ? "#11110f" : "#f7f5ef");
 }
 
 function openPreferencesScreen() {
@@ -7505,6 +7505,7 @@ function renderScores() {
   updateLibraryFilterUi();
   elements.libraryTitle.textContent = currentFolder?.name || "谱夹";
   elements.folderBackButton.hidden = !inFolder;
+  elements.libraryScreen.classList.toggle("is-folder-open", inFolder);
   elements.librarySummary.textContent = inFolder
     ? `${currentFolder.name} · ${visibleScores.length} 份歌谱`
     : `${state.folders.length} 个文件夹 · ${visibleScores.length} 份歌谱`;
