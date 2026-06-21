@@ -1,10 +1,22 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 5;
+const DB_VERSION = 8;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
 const SETLIST_STORE_NAME = "setlists";
 const SETLIST_ITEM_STORE_NAME = "setlist_items";
+const TRASH_STORE_NAME = "trash";
+const SYNC_OUTBOX_STORE_NAME = "sync_outbox";
+const BACKUP_FORMAT = "my-score-folder-backup";
+const BACKUP_VERSION = 1;
+// 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
+const APP_BUILD = "v147";
+// outbox 任务状态与重试策略
+const OUTBOX_STATUS_PENDING = "pending";
+const OUTBOX_STATUS_FAILED = "failed";
+const OUTBOX_MAX_ATTEMPTS = 6;
+// 指数退避（毫秒），超出长度用最后一个值。
+const OUTBOX_BACKOFF_MS = [0, 5000, 15000, 60000, 300000, 900000];
 const SYNC_STATUS_LOCAL = "local";
 const SYNC_STATUS_PENDING = "pending";
 const SYNC_STATUS_SYNCED = "synced";
@@ -25,6 +37,8 @@ const VIEWER_DOUBLE_TAP_DELAY = 320;
 const IMAGE_MAX_EDGE = 1600;
 const IMAGE_WEBP_QUALITY = 0.7;
 const IMAGE_JPEG_QUALITY = 0.76;
+const THUMBNAIL_MAX_EDGE = 420;
+const THUMBNAIL_QUALITY = 0.6;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
 const CLOUDBASE_SDK_CDN = "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js";
 const STORAGE_UPLOAD_VERSION = 3;
@@ -37,6 +51,19 @@ const VIEWER_MODE_LANDSCAPE = "landscape";
 const THEME_STORAGE_KEY = "my-score-folder-theme";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
+const THEME_CHROME_COLORS = {
+  [THEME_LIGHT]: "#fffdf8",
+  [THEME_DARK]: "#11110f",
+};
+// 系统栏（theme-color）颜色：与顶栏背景一致（浅色为 #fffdf8），避免状态栏区域显出米黄色。
+const THEME_BAR_COLORS = {
+  [THEME_LIGHT]: "#fffdf8",
+  [THEME_DARK]: "#11110f",
+};
+const THEME_APPLE_STATUS_STYLES = {
+  [THEME_LIGHT]: "default",
+  [THEME_DARK]: "default",
+};
 const LIBRARY_FILTER_ALL = "all";
 const LIBRARY_FILTER_RECENT = "recent";
 const LIBRARY_FILTER_FAVORITE = "favorite";
@@ -52,6 +79,12 @@ const CLOUD_QUERY_TIMEOUT = 30000;
 const CLOUD_UPLOAD_TIMEOUT = 120000;
 const CLOUD_DOWNLOAD_TIMEOUT = 90000;
 const CLOUD_WRITE_CONCURRENCY = 4;
+// 任何本地 IndexedDB 事务的兜底超时：超过即主动 abort，避免事务永远 pending。
+const IDB_TXN_TIMEOUT = 20000;
+// 操作锁的总超时兜底：任何被锁包裹的操作最多占用这么久，超时后释放锁并报错，避免“点了没反应”。
+const OPERATION_LOCK_TIMEOUT = 180000;
+// App 打开恢复 session 后，延迟这么久再做重型全量同步，避免一开就卡在网络/SDK 上。
+const STARTUP_SYNC_DELAY = 6000;
 const SHARE_SYNC_WAIT_TIMEOUT = 1200;
 const SHARE_UPLOAD_CONCURRENCY = 3;
 const SCORE_UPLOAD_CONCURRENCY = 3;
@@ -80,8 +113,12 @@ const state = {
   setlists: [],
   setlistItems: [],
   pendingPages: [],
+  pendingFilesProcessing: false,
   scoreUrls: new Map(),
   pendingUrls: new Map(),
+  pageThumbUrls: new Map(),
+  pageThumbRequests: new Map(),
+  thumbObserver: null,
   pageTempUrls: new Map(),
   pageTempUrlRequests: new Map(),
   pageDownloads: new Set(),
@@ -89,6 +126,16 @@ const state = {
   pageHydrationTimer: 0,
   pageHydrationRunning: false,
   pageHydrationQueued: false,
+  outboxProcessing: false,
+  outboxTimer: 0,
+  outboxCounts: { pending: 0, failed: 0 },
+  outboxLastError: "",
+  // 用户正在进行的本地写操作计数：>0 时暂停后台 sync/outbox，避免与用户操作抢事务。
+  userWriteActive: 0,
+  // 后台同步（拉取/全量）最近一次失败原因：用于在“我的”同步面板里显示，而不是静默 console.warn。
+  backgroundSyncError: "",
+  // 云端是否已就绪可用；SDK 调用超时后会被标记 unhealthy 并清空，下次同步重新初始化。
+  cloudUnhealthy: false,
   viewerPageIndicatorFrame: 0,
   viewerPerformanceMode: false,
   wakeLockSentinel: null,
@@ -124,7 +171,11 @@ const state = {
   fabDrag: null,
   fabSuppressClick: false,
   appTouchY: 0,
+  appReady: false,
   deleteDialogResolve: null,
+  bulkDeleteSelectedIds: new Set(),
+  bulkDeleteViewScores: [],
+  bulkDeleting: false,
   verifyDialogResolve: null,
   scoreActionId: "",
   pageManagerScoreId: "",
@@ -153,11 +204,89 @@ const state = {
 };
 
 const elements = {};
+const operationLocks = new Set();
+
+// 返回手势：不依赖浏览器历史（iOS 的历史手势会缓存/预览页面，导致右滑“撞回”查看器）。
+// 改为自行识别“从屏幕左边缘向右滑”的手势，仅在有返回键的界面（文件夹 / 查看器）里当返回键用；
+// 根层（谱夹/歌单/我的，无返回键）不做任何事。左滑一律忽略。
+const EDGE_BACK_START_ZONE = 32; // 触摸需从距左边缘这么多 px 内开始才算“边缘返回”
+const EDGE_BACK_MIN_DX = 56; // 水平向右至少滑动这么多 px 才触发
+const EDGE_BACK_MAX_ANGLE_RATIO = 0.7; // 纵向位移不超过横向的这个比例，确保是横向滑动
+let edgeBackTracking = null;
+
+// 执行“返回上一级”——等价于点击当前界面的返回键。
+function triggerEdgeBack() {
+  if (elements.viewerDialog?.open) {
+    // 演出模式吞掉返回，避免误退出。
+    if (state.viewerPerformanceMode) {
+      return;
+    }
+    closeViewerUI();
+    return;
+  }
+  if (state.currentFolderId) {
+    openRootFolder();
+    return;
+  }
+  // 根层无返回键：不做任何操作。
+}
+
+function handleEdgeBackTouchStart(event) {
+  if (!event.touches || event.touches.length !== 1) {
+    edgeBackTracking = null;
+    return;
+  }
+  const touch = event.touches[0];
+  // 仅当从左边缘附近按下，且当前界面确有返回键时才跟踪。
+  const hasBackTarget = Boolean(elements.viewerDialog?.open) || Boolean(state.currentFolderId);
+  if (hasBackTarget && touch.clientX <= EDGE_BACK_START_ZONE) {
+    edgeBackTracking = { x: touch.clientX, y: touch.clientY };
+  } else {
+    edgeBackTracking = null;
+  }
+}
+
+function handleEdgeBackTouchEnd(event) {
+  if (!edgeBackTracking) {
+    return;
+  }
+  const touch = event.changedTouches && event.changedTouches[0];
+  const start = edgeBackTracking;
+  edgeBackTracking = null;
+  if (!touch) {
+    return;
+  }
+  const dx = touch.clientX - start.x;
+  const dy = Math.abs(touch.clientY - start.y);
+  if (dx >= EDGE_BACK_MIN_DX && dy <= dx * EDGE_BACK_MAX_ANGLE_RATIO) {
+    triggerEdgeBack();
+  }
+}
+
+// PWA 显示模式调试：用于排查 bottom-nav 离屏幕底部距离的问题。
+function logLayoutDebug() {
+  const isStandalone =
+    window.matchMedia?.("(display-mode: standalone)")?.matches ||
+    window.navigator.standalone === true;
+
+  console.log("[layout-debug] isStandalone:", isStandalone);
+  console.log("[layout-debug] innerHeight:", window.innerHeight);
+  console.log("[layout-debug] visualViewport.height:", window.visualViewport?.height);
+  console.log("[layout-debug] safe area bottom should be checked in CSS env");
+
+  if (!isStandalone) {
+    console.warn(
+      "[layout-debug] 当前不是主屏幕 PWA 模式：Safari 浏览器底部工具栏不属于网页区域，bottom-nav 无法贴到手机物理屏幕底部。请将本站“添加到主屏幕”后从主屏图标打开。",
+    );
+  }
+}
 
 document.addEventListener("DOMContentLoaded", async () => {
+  logLayoutDebug();
   applyThemePreference(state.themeMode);
   bindElements();
   bindEvents();
+  setAppReady(false);
   registerServiceWorker();
   renderPending();
   refreshIcons();
@@ -165,17 +294,196 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     state.db = await openDatabase();
     await loadScores();
+    setAppReady(true);
     setStatus("");
     updateAccountUi();
+    refreshOutboxCounts();
     queueCloudConnect();
   } catch (error) {
     console.error(error);
+    setAppReady(true);
     setStatus("本地谱夹读取失败，请确认浏览器允许本地存储。", true);
   }
 });
 
+function setAppReady(ready) {
+  state.appReady = Boolean(ready);
+  document.body?.classList.toggle("app-ready", state.appReady);
+  document.body?.classList.toggle("app-booting", !state.appReady);
+  [
+    elements.addScoreButton,
+    ...(elements.bulkDeleteButtons || []),
+    elements.shareScoresButton,
+    elements.importShareButton,
+    elements.createSetlistButton,
+  ].forEach((button) => {
+    if (button) {
+      button.disabled = !state.appReady;
+    }
+  });
+}
+
+function ensureAppReady(message = "正在读取谱夹，请稍后再试。") {
+  if (state.appReady && state.db) {
+    return true;
+  }
+
+  if (message) {
+    setStatus(message, true);
+  }
+  return false;
+}
+
+function openDialogSafely(dialog) {
+  if (!dialog || dialog.open) {
+    return;
+  }
+
+  try {
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+      return;
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+
+  dialog.setAttribute("open", "");
+}
+
+function closeDialogSafely(dialog) {
+  if (!dialog) {
+    return;
+  }
+
+  try {
+    if (dialog.open && typeof dialog.close === "function") {
+      dialog.close();
+      return;
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+
+  dialog.removeAttribute("open");
+}
+
+function runAfterDialogClose(callback) {
+  window.setTimeout(() => requestAnimationFrame(callback), 0);
+}
+
+async function withOperationLock(name, callback, options = {}) {
+  if (operationLocks.has(name)) {
+    throw new Error("当前操作正在进行，请稍候。");
+  }
+
+  operationLocks.add(name);
+  const timeoutMs = options.timeoutMs || OPERATION_LOCK_TIMEOUT;
+  const timeoutMessage = options.timeoutMessage || "操作耗时过长，已超时，请重试。";
+  try {
+    // 总超时兜底：即使内部某个 await 永不返回，锁也会在超时后释放、并向上抛出可提示的错误，
+    // 确保任何操作锁都不会永久占用、按钮状态可恢复。
+    return await withTimeout(Promise.resolve().then(() => callback()), timeoutMs, timeoutMessage);
+  } finally {
+    operationLocks.delete(name);
+  }
+}
+
+// ===== 调号选择器：第一排升/降，第二排音名 C–B，组合成调号（如 ♯ + E → "#E"）=====
+
+// 解析已有调号文本为 {accidental, note}，兼容旧的自由输入（#/♯/升、b/♭/降、大小写音名）。
+function parseKeySignature(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return { accidental: "", note: "" };
+  }
+  let accidental = "";
+  let rest = raw;
+  if (/^(#|♯|升)/.test(rest)) {
+    accidental = "#";
+    rest = rest.replace(/^(#|♯|升)/, "");
+  } else if (/^(b|♭|降)/i.test(rest)) {
+    accidental = "b";
+    rest = rest.replace(/^(b|♭|降)/i, "");
+  }
+  const noteMatch = rest.match(/[A-Ga-g]/);
+  const note = noteMatch ? noteMatch[0].toUpperCase() : "";
+  // 没有音名时升降无意义，视为未设置。
+  return { accidental: note ? accidental : "", note };
+}
+
+function getKeyPickerInput(picker) {
+  return picker?.parentElement?.querySelector('input[type="hidden"]') || null;
+}
+
+// 把隐藏 input 的值写成 accidental+note（无音名则为空字符串），并实时更新“调号”后的预览反馈。
+function writeKeyPickerValue(picker) {
+  const input = getKeyPickerInput(picker);
+  const accidental = picker.querySelector(".key-chip-accidental.is-active")?.dataset.keyAccidental || "";
+  const note = picker.querySelector("[data-key-note].is-active")?.dataset.keyNote || "";
+  const value = note ? `${accidental}${note}` : "";
+  if (input) {
+    input.value = value;
+  }
+  // 实时反馈：在“调号”标题后显示当前选中的字符；为空时由 CSS 显示提示文案。
+  const preview = picker.parentElement?.querySelector("[data-key-preview]");
+  if (preview) {
+    preview.textContent = value;
+  }
+}
+
+// 按给定值设置选中态并同步隐藏 input（用于编辑回显、新增/重置清空）。
+function applyKeyPickerValue(picker, value) {
+  if (!picker) {
+    return;
+  }
+  const { accidental, note } = parseKeySignature(value);
+  picker.querySelectorAll(".key-chip").forEach((chip) => {
+    const isActive = chip.dataset.keyAccidental
+      ? Boolean(accidental) && chip.dataset.keyAccidental === accidental
+      : chip.dataset.keyNote === note && Boolean(note);
+    chip.classList.toggle("is-active", isActive);
+    chip.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+  writeKeyPickerValue(picker);
+}
+
+// 绑定点选交互：升/降互斥可取消，音名单选可取消，每次点击后重算隐藏 input 的值。
+function setupKeyPicker(picker) {
+  if (!picker || picker.dataset.bound === "1") {
+    return;
+  }
+  picker.dataset.bound = "1";
+  picker.addEventListener("click", (event) => {
+    const chip = event.target.closest(".key-chip");
+    if (!chip || !picker.contains(chip)) {
+      return;
+    }
+    // 清除按钮：一键清空升降与音名。
+    if (chip.dataset.keyClear !== undefined) {
+      applyKeyPickerValue(picker, "");
+      return;
+    }
+    const group = chip.dataset.keyAccidental ? ".key-chip-accidental" : "[data-key-note]";
+    const wasActive = chip.classList.contains("is-active");
+    picker.querySelectorAll(group).forEach((sibling) => {
+      sibling.classList.remove("is-active");
+      sibling.setAttribute("aria-pressed", "false");
+    });
+    if (!wasActive) {
+      chip.classList.add("is-active");
+      chip.setAttribute("aria-pressed", "true");
+    }
+    writeKeyPickerValue(picker);
+  });
+}
+
 function bindElements() {
   elements.appShell = document.querySelector(".app-shell");
+  const versionTag = document.querySelector("#appVersionTag");
+  if (versionTag) {
+    versionTag.textContent = `版本 ${APP_BUILD}`;
+  }
   elements.topbar = document.querySelector(".topbar");
   elements.appTitle = document.querySelector("#appTitle");
   elements.librarySummary = document.querySelector("#librarySummary");
@@ -188,15 +496,37 @@ function bindElements() {
   elements.bottomNav = document.querySelector(".bottom-nav");
   elements.myProfileButton = document.querySelector("#myProfileButton");
   elements.preferencesButton = document.querySelector("#preferencesButton");
+  elements.usageGuideButton = document.querySelector("#usageGuideButton");
+  elements.usageGuideScreen = document.querySelector("#usageGuideScreen");
+  elements.closeUsageGuideButton = document.querySelector("#closeUsageGuideButton");
   elements.myAuthState = document.querySelector("#myAuthState");
   elements.myAuthButton = document.querySelector("#myAuthButton");
+  elements.syncOutboxPanel = document.querySelector("#syncOutboxPanel");
+  elements.syncOutboxState = document.querySelector("#syncOutboxState");
+  elements.retryOutboxButton = document.querySelector("#retryOutboxButton");
   elements.myAuthButtonText = document.querySelector("#myAuthButtonText");
   elements.preferencesScreen = document.querySelector("#preferencesScreen");
   elements.closePreferencesButton = document.querySelector("#closePreferencesButton");
   elements.viewerModeButtons = Array.from(document.querySelectorAll("[data-viewer-mode]"));
   elements.themeModeButtons = Array.from(document.querySelectorAll("[data-theme-mode]"));
+  elements.recycleBinButton = document.querySelector("#recycleBinButton");
+  elements.recycleBinScreen = document.querySelector("#recycleBinScreen");
+  elements.closeRecycleBinButton = document.querySelector("#closeRecycleBinButton");
+  elements.emptyRecycleBinButton = document.querySelector("#emptyRecycleBinButton");
+  elements.recycleBinState = document.querySelector("#recycleBinState");
+  elements.recycleBinList = document.querySelector("#recycleBinList");
+  elements.backupButton = document.querySelector("#backupButton");
+  elements.backupScreen = document.querySelector("#backupScreen");
+  elements.closeBackupButton = document.querySelector("#closeBackupButton");
+  elements.exportBackupButton = document.querySelector("#exportBackupButton");
+  elements.importBackupButton = document.querySelector("#importBackupButton");
+  elements.importBackupInput = document.querySelector("#importBackupInput");
+  elements.backupStatus = document.querySelector("#backupStatus");
   elements.libraryTitle = document.querySelector("#libraryTitle");
   elements.folderBackButton = document.querySelector("#folderBackButton");
+  elements.bulkDeleteButtons = Array.from(document.querySelectorAll(".bulk-delete-trigger"));
+  elements.topbarBulkDeleteButton = document.querySelector("#topbarBulkDeleteButton");
+  elements.libraryBulkDeleteButton = document.querySelector("#libraryBulkDeleteButton");
   elements.uploadScreen = document.querySelector("#uploadScreen");
   elements.resultCount = document.querySelector("#resultCount");
   elements.scoreGrid = document.querySelector("#scoreGrid");
@@ -345,6 +675,7 @@ function bindElements() {
   elements.scoreEditFolderLabel = document.querySelector("#scoreEditFolderLabel");
   elements.scoreEditFolderOptions = document.querySelector("#scoreEditFolderOptions");
   elements.scoreEditKey = document.querySelector("#scoreEditKey");
+  elements.scoreEditKeyPicker = document.querySelector("#scoreEditKeyPicker");
   elements.scoreEditNotes = document.querySelector("#scoreEditNotes");
   elements.closeScoreEditButton = document.querySelector("#closeScoreEditButton");
   elements.cancelScoreEditButton = document.querySelector("#cancelScoreEditButton");
@@ -359,6 +690,7 @@ function bindElements() {
   elements.scoreFolderLabel = document.querySelector("#scoreFolderLabel");
   elements.scoreFolderOptions = document.querySelector("#scoreFolderOptions");
   elements.scoreKey = document.querySelector("#scoreKey");
+  elements.scoreKeyPicker = document.querySelector("#scoreKeyPicker");
   elements.scoreNotes = document.querySelector("#scoreNotes");
   elements.cameraButton = document.querySelector("#cameraButton");
   elements.galleryButton = document.querySelector("#galleryButton");
@@ -375,6 +707,13 @@ function bindElements() {
   elements.deleteDialogMessage = document.querySelector("#deleteDialogMessage");
   elements.cancelDeleteButton = document.querySelector("#cancelDeleteButton");
   elements.confirmDeleteButton = document.querySelector("#confirmDeleteButton");
+  elements.bulkDeleteDialog = document.querySelector("#bulkDeleteDialog");
+  elements.bulkDeleteList = document.querySelector("#bulkDeleteList");
+  elements.bulkDeleteState = document.querySelector("#bulkDeleteState");
+  elements.bulkDeleteSelectAll = document.querySelector("#bulkDeleteSelectAll");
+  elements.closeBulkDeleteButton = document.querySelector("#closeBulkDeleteButton");
+  elements.cancelBulkDeleteButton = document.querySelector("#cancelBulkDeleteButton");
+  elements.confirmBulkDeleteButton = document.querySelector("#confirmBulkDeleteButton");
   elements.viewerDialog = document.querySelector("#viewerDialog");
   elements.viewerTitle = document.querySelector("#viewerTitle");
   elements.viewerKeySignature = document.querySelector("#viewerKeySignature");
@@ -389,6 +728,8 @@ function bindElements() {
 function bindEvents() {
   elements.appShell.addEventListener("touchstart", handleAppTouchStart, { passive: true });
   elements.appShell.addEventListener("touchmove", handleAppTouchMove, { passive: false });
+  setupKeyPicker(elements.scoreKeyPicker);
+  setupKeyPicker(elements.scoreEditKeyPicker);
   elements.cameraButton.addEventListener("click", () => openFilePicker(elements.cameraInput));
   elements.galleryButton.addEventListener("click", () => openFilePicker(elements.galleryInput));
   elements.fileButton.addEventListener("click", () => openFilePicker(elements.fileInput));
@@ -399,6 +740,7 @@ function bindEvents() {
 
   elements.scoreName.addEventListener("input", updateSaveState);
   elements.searchInput.addEventListener("input", renderScores);
+  elements.bulkDeleteButtons.forEach((button) => button.addEventListener("click", openBulkDeleteDialog));
   elements.libraryFilterButtons?.forEach((button) => {
     button.addEventListener("click", () => setLibraryFilter(button.dataset.libraryFilter));
   });
@@ -426,7 +768,34 @@ function bindEvents() {
   elements.myProfileButton.addEventListener("click", openProfileDialog);
   elements.myAuthButton.addEventListener("click", openAuthDialog);
   elements.preferencesButton.addEventListener("click", openPreferencesScreen);
+  elements.usageGuideButton?.addEventListener("click", openUsageGuideScreen);
+  elements.closeUsageGuideButton?.addEventListener("click", closeUsageGuideScreen);
   elements.closePreferencesButton?.addEventListener("click", closePreferencesScreen);
+  elements.retryOutboxButton?.addEventListener("click", async () => {
+    elements.retryOutboxButton.disabled = true;
+    if (elements.syncOutboxState) {
+      elements.syncOutboxState.textContent = "正在重试同步…";
+    }
+    try {
+      await retryFailedOutboxTasks();
+    } catch (error) {
+      console.warn(error);
+    } finally {
+      elements.retryOutboxButton.disabled = false;
+      refreshOutboxCounts();
+    }
+  });
+  elements.recycleBinButton?.addEventListener("click", openRecycleBinScreen);
+  elements.closeRecycleBinButton?.addEventListener("click", closeRecycleBinScreen);
+  elements.emptyRecycleBinButton?.addEventListener("click", emptyRecycleBin);
+  elements.backupButton?.addEventListener("click", openBackupScreen);
+  elements.closeBackupButton?.addEventListener("click", closeBackupScreen);
+  elements.exportBackupButton?.addEventListener("click", handleExportBackup);
+  elements.importBackupButton?.addEventListener("click", () => openFilePicker(elements.importBackupInput));
+  elements.importBackupInput?.addEventListener("change", (event) => {
+    event.stopPropagation();
+    handleImportBackup(elements.importBackupInput.files);
+  });
   elements.viewerModeButtons?.forEach((button) => {
     button.addEventListener("click", () => setViewerModePreference(button.dataset.viewerMode));
   });
@@ -553,7 +922,7 @@ function bindEvents() {
   elements.folderActionDeleteButton?.addEventListener("click", () => {
     const folderId = state.folderActionId;
     closeFolderActionDialog();
-    deleteFolder(folderId);
+    runAfterDialogClose(() => deleteFolder(folderId));
   });
   elements.folderActionDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -583,7 +952,7 @@ function bindEvents() {
   elements.scoreActionDeleteButton?.addEventListener("click", () => {
     const scoreId = state.scoreActionId;
     closeScoreActionDialog();
-    deleteScore(scoreId);
+    runAfterDialogClose(() => deleteScore(scoreId));
   });
   elements.scoreActionDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -656,9 +1025,9 @@ function bindEvents() {
     if (state.viewerPerformanceMode) {
       return;
     }
-    closeViewer();
+    closeViewerUI();
   });
-  elements.viewerBackButton.addEventListener("click", closeViewer);
+  elements.viewerBackButton.addEventListener("click", closeViewerUI);
   elements.viewerPerformanceButton?.addEventListener("click", toggleViewerPerformanceMode);
   elements.viewerFavoriteButton?.addEventListener("click", toggleCurrentViewerFavorite);
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
@@ -672,6 +1041,20 @@ function bindEvents() {
       closeDeleteDialog(false);
     }
   });
+  elements.closeBulkDeleteButton?.addEventListener("click", closeBulkDeleteDialog);
+  elements.cancelBulkDeleteButton?.addEventListener("click", closeBulkDeleteDialog);
+  elements.bulkDeleteDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeBulkDeleteDialog();
+  });
+  elements.bulkDeleteDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.bulkDeleteDialog) {
+      closeBulkDeleteDialog();
+    }
+  });
+  elements.bulkDeleteSelectAll?.addEventListener("change", handleBulkDeleteSelectAllChange);
+  elements.bulkDeleteList?.addEventListener("change", handleBulkDeleteSelectionChange);
+  elements.confirmBulkDeleteButton?.addEventListener("click", confirmBulkDelete);
 
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("dragstart", handleDragStart);
@@ -681,35 +1064,9 @@ function bindEvents() {
     window.setTimeout(clampFabIntoBounds, 250);
   });
   document.addEventListener("visibilitychange", handleWakeLockVisibilityChange);
-  window.addEventListener("popstate", (event) => {
-    if (state.viewerHistoryActive) {
-      if (state.viewerPerformanceMode) {
-        const historyState = state.currentViewerSetlistId
-          ? { setlistViewer: state.currentViewerSetlistId }
-          : { viewer: state.currentViewerScoreId };
-        window.history.pushState(historyState, "");
-        return;
-      }
-      closeViewer({ fromHistory: true });
-      return;
-    }
-
-    const folderId = event.state?.folder;
-    if (folderId && state.folders.some((folder) => folder.id === folderId)) {
-      if (state.currentFolderId !== folderId) {
-        state.currentFolderId = folderId;
-        elements.searchInput.value = "";
-        renderScores();
-        elements.appShell.scrollTo({ top: 0 });
-      }
-      state.folderHistoryActive = true;
-      return;
-    }
-
-    if (state.currentFolderId) {
-      openRootFolder({ fromHistory: true });
-    }
-  });
+  // 自定义“边缘返回”手势（替代不可靠的浏览器历史手势）。capture 阶段记录，passive 观察，不打断内容滚动。
+  document.addEventListener("touchstart", handleEdgeBackTouchStart, { passive: true, capture: true });
+  document.addEventListener("touchend", handleEdgeBackTouchEnd, { passive: true, capture: true });
   ["gesturestart", "gesturechange", "gestureend"].forEach((eventName) => {
     document.addEventListener(eventName, preventBrowserZoom, { passive: false });
   });
@@ -759,6 +1116,10 @@ function handleAppTouchMove(event) {
     return;
   }
 
+  if (event.target instanceof Element && event.target.closest(".profile-screen:not([hidden])")) {
+    return;
+  }
+
   const scroller = elements.appShell;
   const currentY = event.touches[0].clientY;
   const deltaY = currentY - state.appTouchY;
@@ -775,6 +1136,10 @@ function handleAddButtonClick(event) {
     event?.preventDefault();
     event?.stopPropagation();
     state.fabSuppressClick = false;
+    return;
+  }
+
+  if (!ensureAppReady()) {
     return;
   }
 
@@ -952,6 +1317,9 @@ function switchMainTab(tab) {
   elements.myScreen.hidden = !isMine;
   elements.uploadScreen.hidden = true;
   elements.addScoreButton.hidden = !isLibrary;
+  elements.bulkDeleteButtons?.forEach((button) => {
+    button.hidden = !isLibrary;
+  });
   document.body.classList.toggle("mine-tab-open", isMine);
   document.body.classList.toggle("setlists-tab-open", isSetlists);
   updateMainNav();
@@ -1046,21 +1414,13 @@ function openFolderActionDialog(folderId) {
 
   state.folderActionId = folderId;
   elements.folderActionTitle.textContent = `《${folder.name}》`;
-  if (typeof elements.folderActionDialog.showModal === "function") {
-    elements.folderActionDialog.showModal();
-  } else {
-    elements.folderActionDialog.setAttribute("open", "");
-  }
+  openDialogSafely(elements.folderActionDialog);
   refreshIcons();
 }
 
 function closeFolderActionDialog() {
   state.folderActionId = "";
-  if (elements.folderActionDialog.open) {
-    elements.folderActionDialog.close();
-  } else {
-    elements.folderActionDialog.removeAttribute("open");
-  }
+  closeDialogSafely(elements.folderActionDialog);
 }
 
 function openScoreActionDialog(scoreId) {
@@ -1071,21 +1431,13 @@ function openScoreActionDialog(scoreId) {
 
   state.scoreActionId = scoreId;
   elements.scoreActionTitle.textContent = `《${score.name}》`;
-  if (typeof elements.scoreActionDialog.showModal === "function") {
-    elements.scoreActionDialog.showModal();
-  } else {
-    elements.scoreActionDialog.setAttribute("open", "");
-  }
+  openDialogSafely(elements.scoreActionDialog);
   refreshIcons();
 }
 
 function closeScoreActionDialog() {
   state.scoreActionId = "";
-  if (elements.scoreActionDialog.open) {
-    elements.scoreActionDialog.close();
-  } else {
-    elements.scoreActionDialog.removeAttribute("open");
-  }
+  closeDialogSafely(elements.scoreActionDialog);
 }
 
 function openScoreEditDialog(scoreId, options = {}) {
@@ -1101,7 +1453,7 @@ function openScoreEditDialog(scoreId, options = {}) {
   elements.scoreEditTitle.textContent = isMoveMode ? "移动到文件夹" : "编辑歌谱信息";
   elements.scoreEditSaveText.textContent = isMoveMode ? "移动" : "保存";
   elements.scoreEditName.value = score.name || "";
-  elements.scoreEditKey.value = score.keySignature || "";
+  applyKeyPickerValue(elements.scoreEditKeyPicker, score.keySignature || "");
   elements.scoreEditNotes.value = score.notes || "";
   setScoreEditStatus(isMoveMode ? "请选择要移动到的文件夹。" : "可修改名称、所属文件夹、调号和备注。");
 
@@ -1342,6 +1694,7 @@ async function connectCloud() {
     state.cloudAuth = state.cloudApp.auth({ persistence: config.persistence || "local" });
     state.cloudDb = state.cloudApp.database();
     state.cloudReady = true;
+    state.cloudUnhealthy = false;
 
     if (!state.cloudAuthListenerBound && typeof state.cloudAuth.onLoginStateChanged === "function") {
       state.cloudAuthListenerBound = true;
@@ -1357,6 +1710,8 @@ async function connectCloud() {
         await loadScores();
         if (state.session) {
           queueAccountBackgroundSync(state.session.user.id);
+          // 登录就绪后处理积压的同步发件箱（之前离线/失败的推送会在此重试）。
+          kickOutbox(1500);
         }
       });
     }
@@ -1972,7 +2327,22 @@ function writeThemePreference(mode) {
 function applyThemePreference(mode) {
   const nextMode = mode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
   document.documentElement.dataset.theme = nextMode;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextMode === THEME_DARK ? "#11110f" : "#f7f5ef");
+  updateThemeChrome(nextMode);
+}
+
+function updateThemeChrome(mode) {
+  const nextMode = mode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+  const color = THEME_CHROME_COLORS[nextMode];
+  const barColor = THEME_BAR_COLORS[nextMode];
+  const statusStyle = THEME_APPLE_STATUS_STYLES[nextMode];
+  document.documentElement.style.setProperty("--safe-area-bg", color);
+  document.documentElement.style.backgroundColor = color;
+  document.body?.style.setProperty("background-color", color);
+  // theme-color 决定安卓系统状态栏/导航栏底色：用白色，使底部系统栏与应用底部导航一致。
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", barColor);
+  document
+    .querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')
+    ?.setAttribute("content", statusStyle);
 }
 
 function openPreferencesScreen() {
@@ -1985,6 +2355,280 @@ function openPreferencesScreen() {
 function closePreferencesScreen() {
   elements.preferencesScreen.hidden = true;
   document.body.classList.remove("preferences-screen-open");
+}
+
+function openUsageGuideScreen() {
+  elements.usageGuideScreen.hidden = false;
+  document.body.classList.add("usage-screen-open");
+  refreshIcons();
+}
+
+function closeUsageGuideScreen() {
+  elements.usageGuideScreen.hidden = true;
+  document.body.classList.remove("usage-screen-open");
+}
+
+// ===== 回收站界面 =====
+
+async function openRecycleBinScreen() {
+  if (!ensureAppReady()) {
+    return;
+  }
+  elements.recycleBinScreen.hidden = false;
+  document.body.classList.add("recycle-bin-screen-open");
+  refreshIcons();
+  await renderRecycleBin();
+}
+
+function closeRecycleBinScreen() {
+  elements.recycleBinScreen.hidden = true;
+  document.body.classList.remove("recycle-bin-screen-open");
+  if (elements.recycleBinList) {
+    elements.recycleBinList.querySelectorAll("img[data-thumb-url]").forEach((image) => {
+      URL.revokeObjectURL(image.dataset.thumbUrl);
+    });
+    elements.recycleBinList.replaceChildren();
+  }
+}
+
+async function renderRecycleBin() {
+  if (!elements.recycleBinList) {
+    return;
+  }
+  let entries = [];
+  try {
+    entries = await getAllTrashEntries();
+  } catch (error) {
+    console.warn(error);
+  }
+  entries.sort((a, b) => new Date(b.trashedAt || 0) - new Date(a.trashedAt || 0));
+
+  elements.recycleBinList.querySelectorAll("img[data-thumb-url]").forEach((image) => {
+    URL.revokeObjectURL(image.dataset.thumbUrl);
+  });
+  elements.recycleBinList.replaceChildren();
+
+  if (elements.emptyRecycleBinButton) {
+    elements.emptyRecycleBinButton.disabled = entries.length === 0;
+  }
+
+  if (!entries.length) {
+    elements.recycleBinState.textContent = "回收站是空的。";
+    const empty = document.createElement("p");
+    empty.className = "recycle-bin-empty";
+    empty.textContent = "删除歌谱后会出现在这里，可恢复或彻底删除。";
+    elements.recycleBinList.append(empty);
+    return;
+  }
+
+  elements.recycleBinState.textContent = `回收站共有 ${entries.length} 份歌谱。`;
+  entries.forEach((entry) => elements.recycleBinList.append(createRecycleBinRow(entry)));
+  refreshIcons();
+}
+
+function createRecycleBinRow(entry) {
+  const row = document.createElement("article");
+  row.className = "recycle-bin-row";
+
+  const thumb = document.createElement("div");
+  thumb.className = "recycle-bin-thumb";
+  const firstPage = (entry.pages || [])[0];
+  if (firstPage?.blob && firstPage.blob.size > 0) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    createThumbnailBlob(firstPage.blob)
+      .then((thumbBlob) => {
+        const source = thumbBlob || firstPage.blob;
+        const url = URL.createObjectURL(source);
+        image.dataset.thumbUrl = url;
+        image.src = url;
+      })
+      .catch(() => {});
+    thumb.append(image);
+  } else {
+    thumb.append(createIcon("music-2"));
+  }
+
+  const body = document.createElement("div");
+  body.className = "recycle-bin-body";
+  const title = document.createElement("h3");
+  title.textContent = entry.name || "未命名歌谱";
+  const meta = document.createElement("p");
+  meta.textContent = [
+    `${entry.pageCount || (entry.pages || []).length} 页`,
+    entry.folderName ? `文件夹：${entry.folderName}` : "",
+    formatTrashedTime(entry.trashedAt),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  body.append(title, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "recycle-bin-actions";
+  const restoreButton = document.createElement("button");
+  restoreButton.type = "button";
+  restoreButton.className = "recycle-restore-button";
+  restoreButton.append(createIcon("undo-2"), document.createTextNode("恢复"));
+  restoreButton.addEventListener("click", () => handleRestoreTrashEntry(entry.id, restoreButton));
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "recycle-delete-button";
+  deleteButton.append(createIcon("trash-2"), document.createTextNode("彻底删除"));
+  deleteButton.addEventListener("click", () => handlePermanentDeleteTrashEntry(entry, deleteButton));
+  actions.append(restoreButton, deleteButton);
+
+  row.append(thumb, body, actions);
+  return row;
+}
+
+function formatTrashedTime(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return `删除于 ${date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}`;
+}
+
+async function handleRestoreTrashEntry(id, button) {
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const restored = await restoreScoreFromTrash(id);
+    if (restored) {
+      // 从数据库权威重载后再渲染，确保恢复的歌谱立即出现（不依赖内存插入/渲染队列）。
+      await loadScores();
+      renderScores();
+      renderSetlists();
+      setStatus("已恢复歌谱到谱夹。");
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus(getStorageErrorMessage(error, "恢复"), true);
+    if (button) {
+      button.disabled = false;
+    }
+  }
+  await renderRecycleBin();
+}
+
+async function handlePermanentDeleteTrashEntry(entry, button) {
+  const confirmed = await requestDeleteConfirmation({
+    title: "彻底删除？",
+    message: `《${entry.name || "未命名歌谱"}》将从回收站彻底删除，无法恢复。`,
+  });
+  if (!confirmed) {
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    await deleteTrashEntry(entry.id);
+  } catch (error) {
+    console.warn(error);
+  }
+  await renderRecycleBin();
+}
+
+async function emptyRecycleBin() {
+  let entries = [];
+  try {
+    entries = await getAllTrashEntries();
+  } catch (error) {
+    console.warn(error);
+  }
+  if (!entries.length) {
+    return;
+  }
+  const confirmed = await requestDeleteConfirmation({
+    title: "清空回收站？",
+    message: `回收站里的 ${entries.length} 份歌谱将被彻底删除，无法恢复。`,
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await clearTrashStore();
+    setStatus("已清空回收站。");
+  } catch (error) {
+    console.warn(error);
+  }
+  await renderRecycleBin();
+}
+
+// ===== 备份与导入界面 =====
+
+function openBackupScreen() {
+  if (!ensureAppReady()) {
+    return;
+  }
+  setBackupStatus("");
+  elements.backupScreen.hidden = false;
+  document.body.classList.add("backup-screen-open");
+  refreshIcons();
+}
+
+function closeBackupScreen() {
+  elements.backupScreen.hidden = true;
+  document.body.classList.remove("backup-screen-open");
+}
+
+function setBackupStatus(message, isError = false) {
+  if (!elements.backupStatus) {
+    return;
+  }
+  elements.backupStatus.textContent = message || "";
+  elements.backupStatus.hidden = !message;
+  elements.backupStatus.classList.toggle("is-error", Boolean(isError));
+}
+
+async function handleExportBackup() {
+  if (!ensureAppReady()) {
+    return;
+  }
+  elements.exportBackupButton.disabled = true;
+  setBackupStatus("正在导出备份...");
+  try {
+    const result = await exportFullBackup();
+    setBackupStatus(`已导出备份：${result.scores} 份歌谱、${result.folders} 个文件夹、${result.setlists} 个歌单。`);
+  } catch (error) {
+    console.error(error);
+    setBackupStatus(getErrorMessage(error) || "导出失败，请稍后重试。", true);
+  } finally {
+    elements.exportBackupButton.disabled = false;
+  }
+}
+
+async function handleImportBackup(fileList) {
+  const file = Array.from(fileList || [])[0];
+  elements.importBackupInput.value = "";
+  if (!file || !ensureAppReady()) {
+    return;
+  }
+  elements.importBackupButton.disabled = true;
+  setBackupStatus("正在导入备份，请稍候...");
+  try {
+    const result = await importFullBackup(file);
+    const parts = [`已导入 ${result.importedScores} 份歌谱`];
+    if (result.importedSetlists) {
+      parts.push(`${result.importedSetlists} 个歌单`);
+    }
+    if (result.skippedScores) {
+      parts.push(`跳过 ${result.skippedScores} 份同名歌谱`);
+    }
+    setBackupStatus(`${parts.join("，")}。`);
+  } catch (error) {
+    console.error(error);
+    setBackupStatus(getErrorMessage(error) || "导入失败，请确认备份文件是否完整。", true);
+  } finally {
+    elements.importBackupButton.disabled = false;
+  }
 }
 
 function renderPreferencesScreen() {
@@ -2731,21 +3375,6 @@ function getErrorMessage(error) {
   return error.message || error.msg || error.error_description || error.code || "未知错误";
 }
 
-function getStorageSaveErrorMessage(error) {
-  const message = getErrorMessage(error);
-  const errorName = String(error?.name || "");
-
-  if (/quota|storage|not enough|exceeded/i.test(`${errorName} ${message}`)) {
-    return "保存失败：手机或浏览器的本地存储空间不足，请删除一些旧歌谱或清理浏览器空间后再试。";
-  }
-
-  if (/transaction|abort|indexeddb|database/i.test(`${errorName} ${message}`)) {
-    return "保存失败：本地谱夹数据库写入中断，请重新打开 App 后再试。";
-  }
-
-  return message ? `保存失败：${message}` : "保存失败，请稍后再试。";
-}
-
 function isEmailAddress(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
@@ -2901,7 +3530,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=82");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=142");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3285,6 +3914,9 @@ function openDatabase() {
       if (!scoreStore.indexNames.contains("syncStatus")) {
         scoreStore.createIndex("syncStatus", "syncStatus", { unique: false });
       }
+      if (!scoreStore.indexNames.contains("deletedAt")) {
+        scoreStore.createIndex("deletedAt", "deletedAt", { unique: false });
+      }
       if (request.oldVersion < 4) {
         migrateScoreMetadataFields(scoreStore);
       }
@@ -3295,6 +3927,7 @@ function openDatabase() {
         folderStore.createIndex("updatedAt", "updatedAt", { unique: false });
         folderStore.createIndex("userId", "userId", { unique: false });
         folderStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        folderStore.createIndex("deletedAt", "deletedAt", { unique: false });
       } else {
         const folderStore = request.transaction.objectStore(FOLDER_STORE_NAME);
         if (!folderStore.indexNames.contains("userId")) {
@@ -3303,6 +3936,9 @@ function openDatabase() {
         if (!folderStore.indexNames.contains("syncStatus")) {
           folderStore.createIndex("syncStatus", "syncStatus", { unique: false });
         }
+        if (!folderStore.indexNames.contains("deletedAt")) {
+          folderStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        }
       }
 
       if (!db.objectStoreNames.contains(PAGE_STORE_NAME)) {
@@ -3310,6 +3946,21 @@ function openDatabase() {
         pageStore.createIndex("scoreId", "scoreId", { unique: false });
         pageStore.createIndex("userId", "userId", { unique: false });
         pageStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        pageStore.createIndex("deletedAt", "deletedAt", { unique: false });
+      } else {
+        const pageStore = request.transaction.objectStore(PAGE_STORE_NAME);
+        if (!pageStore.indexNames.contains("scoreId")) {
+          pageStore.createIndex("scoreId", "scoreId", { unique: false });
+        }
+        if (!pageStore.indexNames.contains("userId")) {
+          pageStore.createIndex("userId", "userId", { unique: false });
+        }
+        if (!pageStore.indexNames.contains("syncStatus")) {
+          pageStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        }
+        if (!pageStore.indexNames.contains("deletedAt")) {
+          pageStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        }
       }
 
       if (!db.objectStoreNames.contains(SETLIST_STORE_NAME)) {
@@ -3318,6 +3969,7 @@ function openDatabase() {
         setlistStore.createIndex("date", "date", { unique: false });
         setlistStore.createIndex("updatedAt", "updatedAt", { unique: false });
         setlistStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        setlistStore.createIndex("deletedAt", "deletedAt", { unique: false });
       } else {
         const setlistStore = request.transaction.objectStore(SETLIST_STORE_NAME);
         if (!setlistStore.indexNames.contains("userId")) {
@@ -3329,6 +3981,9 @@ function openDatabase() {
         if (!setlistStore.indexNames.contains("syncStatus")) {
           setlistStore.createIndex("syncStatus", "syncStatus", { unique: false });
         }
+        if (!setlistStore.indexNames.contains("deletedAt")) {
+          setlistStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        }
       }
 
       if (!db.objectStoreNames.contains(SETLIST_ITEM_STORE_NAME)) {
@@ -3337,6 +3992,7 @@ function openDatabase() {
         setlistItemStore.createIndex("scoreId", "scoreId", { unique: false });
         setlistItemStore.createIndex("userId", "userId", { unique: false });
         setlistItemStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        setlistItemStore.createIndex("deletedAt", "deletedAt", { unique: false });
       } else {
         const setlistItemStore = request.transaction.objectStore(SETLIST_ITEM_STORE_NAME);
         if (!setlistItemStore.indexNames.contains("setlistId")) {
@@ -3351,11 +4007,282 @@ function openDatabase() {
         if (!setlistItemStore.indexNames.contains("syncStatus")) {
           setlistItemStore.createIndex("syncStatus", "syncStatus", { unique: false });
         }
+        if (!setlistItemStore.indexNames.contains("deletedAt")) {
+          setlistItemStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        }
+      }
+
+      // 回收站快照存储（本地，不参与云端同步）：保存被删除歌谱的完整副本以便恢复。
+      if (!db.objectStoreNames.contains(TRASH_STORE_NAME)) {
+        const trashStore = db.createObjectStore(TRASH_STORE_NAME, { keyPath: "id" });
+        trashStore.createIndex("trashedAt", "trashedAt", { unique: false });
+      }
+
+      // 同步发件箱（sync_outbox）：把每个待推送到云端的操作显式入队，便于观测与重试。
+      if (!db.objectStoreNames.contains(SYNC_OUTBOX_STORE_NAME)) {
+        const outboxStore = db.createObjectStore(SYNC_OUTBOX_STORE_NAME, { keyPath: "id" });
+        outboxStore.createIndex("status", "status", { unique: false });
+        outboxStore.createIndex("nextAttemptAt", "nextAttemptAt", { unique: false });
+        outboxStore.createIndex("dedupeKey", "dedupeKey", { unique: false });
       }
     };
 
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+  });
+}
+
+// 关闭并重新打开本地数据库连接。某些浏览器（尤其 iOS / iPad Safari）在事务卡死时，
+// 旧连接会阻塞之后所有事务，导致“删除没反应、保存卡住”。重连可让后续操作恢复正常。
+let reopenDatabasePromise = null;
+function reopenDatabase() {
+  if (reopenDatabasePromise) {
+    return reopenDatabasePromise;
+  }
+  reopenDatabasePromise = (async () => {
+    try {
+      state.db?.close();
+    } catch (error) {
+      console.warn("关闭数据库连接失败", error);
+    }
+    state.db = await openDatabase();
+    return state.db;
+  })();
+  reopenDatabasePromise.finally(() => {
+    reopenDatabasePromise = null;
+  });
+  return reopenDatabasePromise;
+}
+
+// 当本地写入超时/被中断时，连接可能已卡死，重连数据库以便用户重试时能成功。
+async function recoverDatabaseIfWedged(error) {
+  const combined = `${error?.name || ""} ${getErrorMessage(error)}`;
+  if (!/TimeoutError|AbortError|abort|timeout|超时|中断/i.test(combined)) {
+    return;
+  }
+  try {
+    await reopenDatabase();
+  } catch (reopenError) {
+    console.warn("重连数据库失败", reopenError);
+  }
+}
+
+// ===== 统一的本地数据层封装：超时兜底 + 串行写队列，确保任何本地操作都不会永远 pending =====
+
+// 统一的 IndexedDB 事务封装：
+// - 支持 timeoutMs / timeoutMessage；超时后主动 abort 事务；
+// - oncomplete / onerror / onabort 都会 settle（resolve 或 reject），绝不悬挂；
+// - 出现超时/中断时调用 recoverDatabaseIfWedged 重连，确保用户重试可恢复。
+// executor(stores, tx) 同步发起读写操作；如需返回读结果，可让 executor 返回一个对象，
+// 并在各 request.onsuccess 里写入该对象的字段，事务 oncomplete 时该对象即为最终结果。
+function runIdbTransaction(storeNames, mode, executor, options = {}) {
+  const timeoutMs = options.timeoutMs || IDB_TXN_TIMEOUT;
+  const timeoutMessage = options.timeoutMessage || "本地数据库操作超时，请重试。";
+  return new Promise((resolve, reject) => {
+    if (!state.db) {
+      reject(new Error("本地数据库尚未就绪，请稍后重试。"));
+      return;
+    }
+    let settled = false;
+    let timer = 0;
+    let transaction;
+    let resultValue;
+
+    const settle = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      callback();
+    };
+    const fail = (error) => {
+      // 超时/中断后连接可能卡死，重连数据库（内部已按错误类型判断，且去重）。
+      recoverDatabaseIfWedged(error);
+      reject(error);
+    };
+
+    try {
+      transaction = state.db.transaction(storeNames, mode);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+
+    timer = window.setTimeout(() => {
+      try {
+        transaction.abort();
+      } catch (abortError) {
+        console.warn(abortError);
+      }
+      settle(() => fail(createNamedError("TimeoutError", timeoutMessage)));
+    }, timeoutMs);
+
+    transaction.oncomplete = () => settle(() => resolve(resultValue));
+    transaction.onerror = () =>
+      settle(() => fail(transaction.error || createNamedError("AbortError", timeoutMessage)));
+    transaction.onabort = () =>
+      settle(() => fail(transaction.error || createNamedError("AbortError", timeoutMessage)));
+
+    try {
+      const stores = Array.isArray(storeNames)
+        ? storeNames.map((name) => transaction.objectStore(name))
+        : transaction.objectStore(storeNames);
+      resultValue = executor(stores, transaction);
+    } catch (error) {
+      try {
+        transaction.abort();
+      } catch (abortError) {
+        console.warn(abortError);
+      }
+      settle(() => fail(error));
+    }
+  });
+}
+
+// 全局本地写队列：所有写 IndexedDB 的用户操作和后台同步写入都串行进入此队列，
+// 避免 iOS Safari / PWA 下并发事务相互阻塞而卡死。每个任务自身带超时（见 runIdbTransaction），
+// 因此队列不会被某个任务永久占用。
+let localWriteChain = Promise.resolve();
+function enqueueLocalWrite(label, task) {
+  const run = localWriteChain.then(() => task());
+  // 无论成败都让链继续，避免一次失败后整条队列卡住。
+  localWriteChain = run.then(
+    () => {},
+    (error) => {
+      console.warn(`本地写入失败（${label}）`, error);
+    },
+  );
+  return run;
+}
+
+// 标记“用户正在进行本地写操作”，用于让后台 sync/outbox 让路（见 isUserWriteActive）。
+function beginUserWrite() {
+  state.userWriteActive += 1;
+}
+function endUserWrite() {
+  state.userWriteActive = Math.max(0, state.userWriteActive - 1);
+  // 用户操作结束后，若有积压的同步任务，空闲时再推进。
+  if (!state.userWriteActive) {
+    kickOutbox(1500);
+  }
+}
+function isUserWriteActive() {
+  return state.userWriteActive > 0;
+}
+
+// CloudBase SDK 调用超时/网络异常后，标记 cloud 为 unhealthy 并清空 SDK 状态，
+// 下一次同步会重新 initializeCloud，避免一直沿用已卡死的 SDK 句柄。
+function markCloudUnhealthy(error) {
+  const combined = `${error?.name || ""} ${getErrorMessage(error)}`;
+  if (!/TimeoutError|timeout|超时|AbortError|abort|网络|network|Failed to fetch/i.test(combined)) {
+    return;
+  }
+  console.warn("CloudBase 调用异常，重置云端连接状态。", error);
+  state.cloudUnhealthy = true;
+  state.cloudReady = false;
+  state.cloudApp = null;
+  state.cloudAuth = null;
+  state.cloudDb = null;
+  state.cloudInitializing = null;
+  state.cloudAuthListenerBound = false;
+}
+
+// 云端 SDK 调用统一包裹：超时即抛错并把 cloud 标记为 unhealthy。
+async function cloudGuard(promise, timeoutMs, message) {
+  try {
+    return await withTimeout(promise, timeoutMs, message);
+  } catch (error) {
+    markCloudUnhealthy(error);
+    throw error;
+  }
+}
+
+// 在只读事务中按索引读取一组主键（用于“先 readonly 读 keys，再 readwrite 删除”的安全删除模式）。
+function readKeysByIndex(storeName, indexName, value) {
+  return new Promise((resolve, reject) => {
+    let transaction;
+    let keys = [];
+    try {
+      transaction = state.db.transaction(storeName, "readonly");
+      const request = transaction.objectStore(storeName).index(indexName).getAllKeys(value);
+      request.onsuccess = () => {
+        keys = request.result || [];
+      };
+      request.onerror = () => reject(request.error);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = () => resolve(keys);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+// 在只读事务中读取指定歌谱的所有页记录（先读后写，避免在 getAll 回调里写入而卡死事务）。
+function readPagesForScoreIds(scoreIds) {
+  const idSet = new Set((scoreIds || []).map(String));
+  if (!idSet.size) {
+    return Promise.resolve([]);
+  }
+  return new Promise((resolve, reject) => {
+    const result = [];
+    let pending = idSet.size;
+    let transaction;
+    try {
+      transaction = state.db.transaction(PAGE_STORE_NAME, "readonly");
+      const index = transaction.objectStore(PAGE_STORE_NAME).index("scoreId");
+      idSet.forEach((scoreId) => {
+        const request = index.getAll(scoreId);
+        request.onsuccess = () => {
+          (request.result || []).forEach((page) => result.push(page));
+          pending -= 1;
+          if (pending === 0) {
+            resolve(result);
+          }
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+// 在只读事务中读取关联到指定歌谱的歌单项记录。
+function readSetlistItemsForScoreIds(scoreIds) {
+  const idSet = new Set((scoreIds || []).map(String));
+  if (!idSet.size) {
+    return Promise.resolve([]);
+  }
+  return new Promise((resolve, reject) => {
+    const result = [];
+    let pending = idSet.size;
+    let transaction;
+    try {
+      transaction = state.db.transaction(SETLIST_ITEM_STORE_NAME, "readonly");
+      const index = transaction.objectStore(SETLIST_ITEM_STORE_NAME).index("scoreId");
+      idSet.forEach((scoreId) => {
+        const request = index.getAll(scoreId);
+        request.onsuccess = () => {
+          (request.result || []).forEach((item) => result.push(item));
+          pending -= 1;
+          if (pending === 0) {
+            resolve(result);
+          }
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
   });
 }
 
@@ -3536,6 +4463,712 @@ function toScoreRecord(score) {
   return record;
 }
 
+function createNamedError(name, message) {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+function getStorageErrorMessage(error, action = "操作") {
+  const errorName = String(error?.name || "");
+  const message = getErrorMessage(error);
+  const combined = `${errorName} ${message}`;
+
+  if (/QuotaExceededError|quota|not enough|exceeded|storage/i.test(combined)) {
+    return "本地存储空间不足，请删除部分歌谱或清理浏览器空间后再试。";
+  }
+  if (/DataCloneError/i.test(combined)) {
+    return "图片数据格式异常，请重新选择图片。";
+  }
+  if (/TransactionInactiveError/i.test(combined)) {
+    return "本地数据库写入中断，请刷新后再试。";
+  }
+  if (/InvalidStateError/i.test(combined)) {
+    return "本地数据库状态异常，请刷新后再试。";
+  }
+  if (/TimeoutError|timeout|超时/i.test(combined)) {
+    return message && /超时/.test(message) ? message : `${action}超时，图片较多或较大时请减少单次添加数量后重试。`;
+  }
+  if (/AbortError|abort/i.test(combined)) {
+    return "本地数据库操作被中断，请重试。";
+  }
+
+  return `${action}失败，请刷新后重试。`;
+}
+
+function logStorageOperationError(error, action, context = {}) {
+  console.error("Storage operation failed", {
+    action,
+    errorName: error?.name || "",
+    errorMessage: error?.message || getErrorMessage(error),
+    scoreIds: context.scoreIds || [],
+    pagesLength: Number(context.pagesLength) || 0,
+    totalBlobSize: Number(context.totalBlobSize) || 0,
+    isLoggedIn: Boolean(state.session),
+    cloudReady: Boolean(state.cloudReady),
+    appReady: Boolean(state.appReady),
+  });
+}
+
+function normalizePageBlob(page) {
+  const source = page?.blob;
+  if (!(source instanceof Blob) || source.size <= 0) {
+    throw createNamedError("DataCloneError", "图片处理失败，请重新选择图片。");
+  }
+
+  const type = source.type || page.type || "image/jpeg";
+  // 仅在类型需要修正时才重建 Blob，避免对大图做整块内存复制。
+  const blob = source.type === type ? source : new Blob([source], { type });
+  if (!(blob instanceof Blob) || blob.size <= 0) {
+    throw createNamedError("DataCloneError", "图片处理失败，请重新选择图片。");
+  }
+
+  return {
+    ...page,
+    blob,
+    type,
+    size: blob.size,
+  };
+}
+
+function getPagesTotalBlobSize(pages) {
+  return (pages || []).reduce((total, page) => total + (Number(page?.blob?.size || page?.size) || 0), 0);
+}
+
+async function assertStorageSpaceAvailable(totalBlobSize) {
+  if (!totalBlobSize || !navigator.storage?.estimate) {
+    return;
+  }
+
+  try {
+    const estimate = await navigator.storage.estimate();
+    const quota = Number(estimate.quota) || 0;
+    const usage = Number(estimate.usage) || 0;
+    const remaining = quota - usage;
+    if (quota > 0 && remaining > 0 && remaining < totalBlobSize * 1.2) {
+      throw createNamedError("QuotaExceededError", "本地存储空间不足。");
+    }
+  } catch (error) {
+    if (error?.name === "QuotaExceededError") {
+      throw error;
+    }
+    console.warn(error);
+  }
+}
+
+function waitForTransaction(transaction, timeoutMs, timeoutMessage) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      try {
+        transaction.abort();
+      } catch (error) {
+        console.warn(error);
+      }
+      reject(createNamedError("TimeoutError", timeoutMessage));
+    }, timeoutMs);
+
+    const finish = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      callback();
+    };
+
+    transaction.oncomplete = () => finish(resolve);
+    transaction.onerror = () => finish(() => reject(transaction.error || createNamedError("AbortError", "本地数据库操作失败。")));
+    transaction.onabort = () => finish(() => reject(transaction.error || createNamedError("AbortError", "本地数据库操作被中断。")));
+  });
+}
+
+async function saveScoreLocalAtomic(score, pages, options = {}) {
+  const requireBlobs = options.requireBlobs !== false;
+  const preparedScore = normalizeLocalScoreRecord(score);
+  const preparedPages = pages.map((page, index) => {
+    const normalizedPage = normalizeLocalPageRecord({
+      ...page,
+      scoreId: preparedScore.id,
+      pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+      syncStatus: page.syncStatus || preparedScore.syncStatus || SYNC_STATUS_LOCAL,
+    });
+    if (requireBlobs || normalizedPage.blob) {
+      return normalizePageBlob(normalizedPage);
+    }
+    return normalizedPage;
+  });
+
+  // 逐页写入：每页一个独立的小事务，而不是把多张大图塞进一个巨型事务。
+  // iOS Safari 的 IndexedDB 在单事务存多个大 Blob 时容易卡死/超时，分开写更可靠，
+  // 也能给出“正在保存第 N 页”的进度，并在失败时精确清理。
+  const writtenPageIds = [];
+  try {
+    for (let index = 0; index < preparedPages.length; index += 1) {
+      const page = preparedPages[index];
+      options.onProgress?.(index + 1, preparedPages.length);
+      await putStoreRecord(
+        PAGE_STORE_NAME,
+        page,
+        getBlobWriteTimeout(page.blob?.size || page.size),
+        `第 ${index + 1} 页图片保存较慢，请重试，或减小图片体积 / 减少单次添加数量。`,
+      );
+      writtenPageIds.push(page.id);
+      await nextFrame();
+    }
+    // 元数据最后写入，作为“提交点”：歌谱记录写成功，这份歌谱才算存在。
+    await putStoreRecord(STORE_NAME, toScoreRecord(preparedScore), LOCAL_SAVE_TIMEOUT);
+  } catch (error) {
+    // 失败清理：删除本次已写入的页，避免留下孤立页；新歌谱记录尚未写入故不会出现在列表中。
+    await cleanupPartialScoreSave(preparedScore.id, writtenPageIds);
+    throw error;
+  }
+  return { score: preparedScore, pages: preparedPages };
+}
+
+// 按 Blob 大小给出写入超时：小图给基础时长，大图按每 MB 递增，避免大图在慢设备上被误判为超时。
+function getBlobWriteTimeout(byteSize) {
+  const sizeMb = (Number(byteSize) || 0) / (1024 * 1024);
+  return Math.max(PAGE_SAVE_TIMEOUT, Math.ceil(sizeMb) * 10000 + 5000);
+}
+
+// 清理一次未完成的保存：删除已写入的页与（可能尚未写入的）歌谱记录，尽力而为、不抛错。
+function cleanupPartialScoreSave(scoreId, pageIds) {
+  if (!scoreId && !(pageIds && pageIds.length)) {
+    return Promise.resolve();
+  }
+  // 清理尽力而为：失败也不抛错，避免影响主流程。
+  return enqueueLocalWrite("cleanupPartialScoreSave", () =>
+    runIdbTransaction(
+      [STORE_NAME, PAGE_STORE_NAME],
+      "readwrite",
+      ([scoreStore, pageStore]) => {
+        scoreStore.delete(scoreId);
+        (pageIds || []).forEach((id) => pageStore.delete(id));
+      },
+      { timeoutMessage: "清理未完成的保存超时。" },
+    ),
+  ).catch((error) => {
+    console.warn("清理未完成的保存失败", error);
+  });
+}
+
+async function deleteScoresLocalAtomic(scoreIds, options = {}) {
+  const ids = Array.from(new Set((scoreIds || []).filter(Boolean).map(String)));
+  if (!ids.length) {
+    return;
+  }
+
+  const deletedAt = options.deletedAt || new Date().toISOString();
+  const providedScores = new Map((options.scores || []).map((score) => [String(score.id), score]));
+
+  // 阶段一：先在只读事务中读出受影响的页与歌单项，await 完成后再写。
+  // 旧实现在 readwrite 事务的 getAll().onsuccess 回调里发起写入，这种模式在
+  // iOS / iPad Safari 上容易让事务卡死（永不 oncomplete），从而拖垮后续的保存。
+  const [pageRecords, itemRecords] = await withTimeout(
+    Promise.all([readPagesForScoreIds(ids), readSetlistItemsForScoreIds(ids)]),
+    Math.max(LOCAL_SAVE_TIMEOUT, ids.length * 4000 + 5000),
+    "读取本地数据超时，请稍后重试。",
+  );
+  const pagesByScore = new Map();
+  pageRecords.forEach((page) => {
+    const key = String(page.scoreId);
+    const list = pagesByScore.get(key) || [];
+    list.push(page);
+    pagesByScore.set(key, list);
+  });
+  const itemsByScore = new Map();
+  itemRecords.forEach((item) => {
+    const key = String(item.scoreId);
+    const list = itemsByScore.get(key) || [];
+    list.push(item);
+    itemsByScore.set(key, list);
+  });
+
+  // 阶段二：单个读写事务，所有写操作同步发起（不依赖异步回调），完成更可靠。
+  // 通过 runIdbTransaction 获得统一超时/abort/重连兜底，并经本地写队列串行执行。
+  // 软删除会重写带图片的页记录，超时按歌谱数量放大，避免大批量删除被误判为中断。
+  const deleteTimeout = Math.max(LOCAL_SAVE_TIMEOUT, ids.length * 4000 + 5000);
+  return enqueueLocalWrite("deleteScoresLocalAtomic", () =>
+    runIdbTransaction(
+      [STORE_NAME, PAGE_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      "readwrite",
+      ([scoreStore, pageStore, setlistItemStore]) => {
+        ids.forEach((scoreId) => {
+          const score = providedScores.get(scoreId) || state.scores.find((item) => item.id === scoreId) || null;
+          const forceSoft = Boolean(options.forceSoft);
+          const forceHard = Boolean(options.forceHard);
+          const keepTombstone = forceSoft || (!forceHard && shouldKeepDeleteTombstone(score));
+          const userId = score?.userId || state.session?.user?.id || null;
+          const pages = pagesByScore.get(scoreId) || [];
+          const items = itemsByScore.get(scoreId) || [];
+
+          if (keepTombstone && score) {
+            scoreStore.put({
+              ...toScoreRecord(score),
+              userId,
+              deletedAt,
+              updatedAt: deletedAt,
+              syncStatus: SYNC_STATUS_PENDING,
+            });
+            pages.forEach((page) => {
+              pageStore.put({
+                ...page,
+                userId: page.userId || userId,
+                deletedAt,
+                updatedAt: deletedAt,
+                syncStatus: SYNC_STATUS_PENDING,
+              });
+            });
+            items.forEach((item) => {
+              setlistItemStore.put({
+                ...item,
+                userId: item.userId || userId,
+                deletedAt,
+                updatedAt: deletedAt,
+                syncStatus: SYNC_STATUS_PENDING,
+              });
+            });
+          } else {
+            scoreStore.delete(scoreId);
+            pages.forEach((page) => pageStore.delete(page.id));
+            items.forEach((item) => setlistItemStore.delete(item.id));
+          }
+        });
+      },
+      { timeoutMs: deleteTimeout, timeoutMessage: "本地删除超时，请减少单次删除数量后重试。" },
+    ),
+  );
+}
+
+function softDeleteScoresLocalAtomic(scores, deletedAt) {
+  return deleteScoresLocalAtomic(
+    (scores || []).map((score) => score.id),
+    { scores, deletedAt, forceSoft: true },
+  );
+}
+
+function hardDeleteScoresLocalAtomic(scoreIds) {
+  return deleteScoresLocalAtomic(scoreIds, { forceHard: true });
+}
+
+// ===== 回收站（本地快照，不参与云端同步）=====
+
+function getAllTrashEntries() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(TRASH_STORE_NAME, "readonly");
+    const request = transaction.objectStore(TRASH_STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getTrashEntry(id) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(TRASH_STORE_NAME, "readonly");
+    const request = transaction.objectStore(TRASH_STORE_NAME).get(String(id));
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function putTrashEntry(entry) {
+  return putStoreRecord(TRASH_STORE_NAME, entry, LOCAL_SAVE_TIMEOUT, "回收站写入超时，请重试。");
+}
+
+function deleteTrashEntry(id) {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(TRASH_STORE_NAME, "readwrite");
+    transaction.objectStore(TRASH_STORE_NAME).delete(String(id));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+function clearTrashStore() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(TRASH_STORE_NAME, "readwrite");
+    transaction.objectStore(TRASH_STORE_NAME).clear();
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+// 删除前把歌谱（含图片 blob）快照存入回收站，便于后续恢复。
+async function snapshotScoresToTrash(scores) {
+  const targets = (scores || []).filter(Boolean);
+  if (!targets.length) {
+    return;
+  }
+  const ids = targets.map((score) => score.id);
+  const pageRecords = await readPagesForScoreIds(ids);
+  const pagesByScore = new Map();
+  pageRecords.forEach((page) => {
+    const key = String(page.scoreId);
+    const list = pagesByScore.get(key) || [];
+    list.push(page);
+    pagesByScore.set(key, list);
+  });
+  const trashedAt = new Date().toISOString();
+  for (const score of targets) {
+    const folder = score.folderId ? state.folders.find((item) => item.id === score.folderId) : null;
+    const pages = (pagesByScore.get(String(score.id)) || (score.pages || []))
+      .slice()
+      .sort((a, b) => a.pageIndex - b.pageIndex);
+    const entry = {
+      id: String(score.id),
+      trashedAt,
+      name: score.name || "未命名歌谱",
+      keySignature: score.keySignature || "",
+      folderName: folder?.name || "",
+      pageCount: pages.length,
+      score: toScoreRecord(score),
+      pages: pages.map((page) => ({ ...page })),
+    };
+    try {
+      await putTrashEntry(entry);
+    } catch (error) {
+      console.warn("写入回收站失败", error);
+    }
+  }
+}
+
+// 从回收站恢复：作为全新的本地歌谱重新写入（新 id），与云端旧墓碑解耦。
+async function restoreScoreFromTrash(id) {
+  const entry = await getTrashEntry(id);
+  if (!entry) {
+    return false;
+  }
+  const now = new Date().toISOString();
+  const userId = state.session?.user?.id || null;
+  const folderExists = entry.score?.folderId && state.folders.some((item) => item.id === entry.score.folderId);
+  const newScore = {
+    ...entry.score,
+    id: createId(),
+    userId,
+    folderId: folderExists ? entry.score.folderId : null,
+    deletedAt: null,
+    createdAt: now,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  };
+  const newPages = (entry.pages || []).map((page, index) => ({
+    ...page,
+    id: createId(),
+    scoreId: newScore.id,
+    userId,
+    pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+    storagePath: null,
+    storageSyncedAt: null,
+    storageUploadVersion: 0,
+    deletedAt: null,
+    createdAt: now,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  }));
+
+  const saved = await saveScoreLocalAtomic(newScore, newPages, { requireBlobs: false });
+  insertSavedScoreInMemory(saved.score, saved.pages);
+  await deleteTrashEntry(id);
+  if (userId || state.session) {
+    queueScoreCloudUpload(newScore.id);
+  }
+  return true;
+}
+
+// ===== 完整备份 / 导入（单个 JSON 文件，图片以 base64 内嵌）=====
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve({ data: comma >= 0 ? result.slice(comma + 1) : result, type: blob.type || "" });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function base64ToBlob(base64, type) {
+  const binary = atob(base64 || "");
+  const length = binary.length;
+  const bytes = new Uint8Array(length);
+  for (let index = 0; index < length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: type || "application/octet-stream" });
+}
+
+function triggerFileDownload(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function exportFullBackup() {
+  const [scoreRecords, pageRecords, folderRecords, setlistRecords, setlistItemRecords] = await Promise.all([
+    getAllScores(),
+    getAllScorePages(),
+    getAllFolders(),
+    getAllSetlists(),
+    getAllSetlistItems(),
+  ]);
+
+  const activeScores = scoreRecords.filter((score) => !score.deletedAt);
+  const scoreIdSet = new Set(activeScores.map((score) => String(score.id)));
+  const activeFolders = folderRecords.filter((folder) => !folder.deletedAt);
+  const activeSetlists = setlistRecords.filter((setlist) => !setlist.deletedAt);
+  const setlistIdSet = new Set(activeSetlists.map((setlist) => String(setlist.id)));
+  const activeItems = setlistItemRecords.filter(
+    (item) => !item.deletedAt && setlistIdSet.has(String(item.setlistId)) && scoreIdSet.has(String(item.scoreId)),
+  );
+  const activePages = pageRecords.filter((page) => !page.deletedAt && scoreIdSet.has(String(page.scoreId)));
+
+  const encodedPages = [];
+  for (const page of activePages) {
+    let blobData = null;
+    let blobType = page.type || "";
+    if (page.blob && page.blob.size > 0) {
+      try {
+        const encoded = await blobToBase64(page.blob);
+        blobData = encoded.data;
+        blobType = encoded.type || blobType;
+      } catch (error) {
+        console.warn("图片编码失败，已跳过该页图片数据。", error);
+      }
+    }
+    const { blob, ...rest } = page;
+    encodedPages.push({ ...rest, blobData, blobType });
+  }
+
+  const backup = {
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    folders: activeFolders.map(({ blob, ...rest }) => rest),
+    scores: activeScores.map(({ blob, pages, ...rest }) => rest),
+    pages: encodedPages,
+    setlists: activeSetlists,
+    setlistItems: activeItems,
+  };
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  triggerFileDownload(`我的谱夹备份-${stamp}.json`, new Blob([JSON.stringify(backup)], { type: "application/json" }));
+  return { scores: activeScores.length, folders: activeFolders.length, setlists: activeSetlists.length };
+}
+
+async function importFullBackup(file) {
+  const text = await file.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (error) {
+    throw new Error("备份文件解析失败，请确认选择了正确的备份文件。");
+  }
+  if (!data || data.format !== BACKUP_FORMAT || !Array.isArray(data.scores)) {
+    throw new Error("这不是有效的“我的谱夹”备份文件。");
+  }
+
+  const userId = state.session?.user?.id || null;
+  const now = new Date().toISOString();
+  const syncStatus = userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL;
+
+  // 文件夹按名称去重，已存在则复用。
+  const folderByName = new Map(state.folders.map((folder) => [normalizeText(folder.name), folder.id]));
+  const folderIdMap = new Map();
+  for (const folder of data.folders || []) {
+    const key = normalizeText(folder.name);
+    if (folderByName.has(key)) {
+      folderIdMap.set(String(folder.id), folderByName.get(key));
+      continue;
+    }
+    const newId = createId();
+    const { blob, ...rest } = folder;
+    await putStoreRecord(FOLDER_STORE_NAME, {
+      ...rest,
+      id: newId,
+      userId,
+      deletedAt: null,
+      createdAt: folder.createdAt || now,
+      updatedAt: now,
+      syncStatus,
+    });
+    folderIdMap.set(String(folder.id), newId);
+    folderByName.set(key, newId);
+  }
+
+  const pagesByScore = new Map();
+  (data.pages || []).forEach((page) => {
+    const key = String(page.scoreId);
+    const list = pagesByScore.get(key) || [];
+    list.push(page);
+    pagesByScore.set(key, list);
+  });
+
+  // 歌谱按名称去重：同名（未删除）则跳过，避免重复导入。
+  const existingScoreByName = new Map(
+    state.scores.filter((score) => !score.deletedAt).map((score) => [normalizeText(score.name || score.normalizedName), score.id]),
+  );
+  const scoreIdMap = new Map();
+  let importedScores = 0;
+  let skippedScores = 0;
+
+  for (const score of data.scores) {
+    if (score.deletedAt) {
+      continue;
+    }
+    const nameKey = normalizeText(score.name || score.normalizedName);
+    if (existingScoreByName.has(nameKey)) {
+      scoreIdMap.set(String(score.id), existingScoreByName.get(nameKey));
+      skippedScores += 1;
+      continue;
+    }
+
+    const newScoreId = createId();
+    const folderId = score.folderId && folderIdMap.has(String(score.folderId)) ? folderIdMap.get(String(score.folderId)) : null;
+    const { blob, pages, ...scoreRest } = score;
+    const newScore = {
+      ...scoreRest,
+      id: newScoreId,
+      userId,
+      folderId,
+      deletedAt: null,
+      createdAt: score.createdAt || now,
+      updatedAt: now,
+      syncStatus,
+    };
+    const sourcePages = (pagesByScore.get(String(score.id)) || []).slice().sort((a, b) => a.pageIndex - b.pageIndex);
+    const newPages = sourcePages.map((page, index) => {
+      const restoredBlob = page.blobData ? base64ToBlob(page.blobData, page.blobType || page.type) : null;
+      const { blobData, blobType, blob: ignoredBlob, ...pageRest } = page;
+      return {
+        ...pageRest,
+        id: createId(),
+        scoreId: newScoreId,
+        userId,
+        pageIndex: index,
+        blob: restoredBlob,
+        type: restoredBlob ? restoredBlob.type : page.type,
+        size: restoredBlob ? restoredBlob.size : page.size,
+        storagePath: null,
+        storageSyncedAt: null,
+        storageUploadVersion: 0,
+        deletedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        syncStatus,
+      };
+    });
+
+    try {
+      await saveScoreLocalAtomic(newScore, newPages, { requireBlobs: false });
+      scoreIdMap.set(String(score.id), newScoreId);
+      existingScoreByName.set(nameKey, newScoreId);
+      importedScores += 1;
+      if (userId || state.session) {
+        queueScoreCloudUpload(newScoreId);
+      }
+    } catch (error) {
+      console.warn(`导入《${score.name || "未命名"}》失败`, error);
+    }
+  }
+
+  // 歌单（按名称+日期去重），歌单项按映射后的歌谱/歌单 id 重建。
+  let importedSetlists = 0;
+  const setlistIdMap = new Map();
+  const existingSetlistKeys = new Set(state.setlists.map((setlist) => `${normalizeText(setlist.name)}|${setlist.date || ""}`));
+  for (const setlist of data.setlists || []) {
+    if (setlist.deletedAt) {
+      continue;
+    }
+    const key = `${normalizeText(setlist.name)}|${setlist.date || ""}`;
+    if (existingSetlistKeys.has(key)) {
+      continue;
+    }
+    const newId = createId();
+    await putStoreRecord(SETLIST_STORE_NAME, {
+      ...setlist,
+      id: newId,
+      userId,
+      deletedAt: null,
+      createdAt: setlist.createdAt || now,
+      updatedAt: now,
+      syncStatus,
+    });
+    setlistIdMap.set(String(setlist.id), newId);
+    existingSetlistKeys.add(key);
+    importedSetlists += 1;
+  }
+  for (const item of data.setlistItems || []) {
+    const newSetlistId = setlistIdMap.get(String(item.setlistId));
+    const newScoreId = scoreIdMap.get(String(item.scoreId));
+    if (!newSetlistId || !newScoreId) {
+      continue;
+    }
+    await putStoreRecord(SETLIST_ITEM_STORE_NAME, {
+      ...item,
+      id: createId(),
+      setlistId: newSetlistId,
+      scoreId: newScoreId,
+      userId,
+      deletedAt: null,
+      createdAt: item.createdAt || now,
+      updatedAt: now,
+      syncStatus,
+    });
+  }
+
+  await loadScores();
+  renderScores();
+  renderSetlists();
+  if (userId && state.cloudReady) {
+    queueSync();
+  }
+  return { importedScores, skippedScores, importedSetlists };
+}
+
+function cleanupSetlistItemsForDeletedScores(scoreIds) {
+  const ids = Array.from(new Set((scoreIds || []).filter(Boolean).map(String)));
+  if (!ids.length) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let transaction;
+    try {
+      transaction = state.db.transaction(SETLIST_ITEM_STORE_NAME, "readwrite");
+      const itemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
+      const scoreIndex = itemStore.index("scoreId");
+      ids.forEach((scoreId) => {
+        const request = scoreIndex.getAll(scoreId);
+        request.onsuccess = () => {
+          (request.result || []).forEach((item) => itemStore.delete(item.id));
+        };
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
 function getAllScores() {
   return new Promise((resolve, reject) => {
     const transaction = state.db.transaction(STORE_NAME, "readonly");
@@ -3582,37 +5215,16 @@ function getAllSetlistItems() {
 }
 
 function putStoreRecord(storeName, record, timeoutMs = LOCAL_SAVE_TIMEOUT, timeoutMessage = "本地数据库写入超时，请重新打开 App 后再试。") {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const transaction = state.db.transaction(storeName, "readwrite");
-    const request = transaction.objectStore(storeName).put(record);
-    const timer = window.setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      try {
-        transaction.abort();
-      } catch (error) {
-        console.warn(error);
-      }
-      reject(new Error(timeoutMessage));
-    }, timeoutMs);
-
-    const finish = (callback) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      window.clearTimeout(timer);
-      callback();
-    };
-
-    request.onerror = () => finish(() => reject(request.error || transaction.error));
-    transaction.oncomplete = () => finish(resolve);
-    transaction.onerror = () => finish(() => reject(transaction.error || request.error));
-    transaction.onabort = () => finish(() => reject(transaction.error || request.error || new Error("本地数据库写入中断。")));
-  });
+  return enqueueLocalWrite(`put:${storeName}`, () =>
+    runIdbTransaction(
+      storeName,
+      "readwrite",
+      (store) => {
+        store.put(record);
+      },
+      { timeoutMs, timeoutMessage },
+    ),
+  );
 }
 
 function putScore(score) {
@@ -3625,24 +5237,8 @@ async function putScoreWithPages(score, pages, options = {}) {
     scoreId: score.id,
     pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
   }));
-
-  try {
-    for (const [index, page] of preparedPages.entries()) {
-      options.onProgress?.(index + 1, preparedPages.length);
-      await putStoreRecord(
-        PAGE_STORE_NAME,
-        page,
-        PAGE_SAVE_TIMEOUT,
-        `第 ${index + 1} 页图片保存超时，请减少单次添加页数后重试。`,
-      );
-      await nextFrame();
-    }
-
-    await putStoreRecord(STORE_NAME, toScoreRecord(score), LOCAL_SAVE_TIMEOUT);
-  } catch (error) {
-    deleteScoreRecord(score.id).catch((cleanupError) => console.warn(cleanupError));
-    throw error;
-  }
+  const requireBlobs = options.requireBlobs ?? preparedPages.every((page) => page.blob || !page.storagePath);
+  await saveScoreLocalAtomic(score, preparedPages, { requireBlobs, onProgress: options.onProgress });
 }
 
 function putScorePage(page) {
@@ -3650,185 +5246,183 @@ function putScorePage(page) {
 }
 
 function putScorePageChanges(score, activePages, deletedPages = []) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-
-    scoreStore.put(toScoreRecord(score));
-    [...activePages, ...deletedPages].forEach((page) => pageStore.put(page));
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+  return enqueueLocalWrite("putScorePageChanges", () =>
+    runIdbTransaction(
+      [STORE_NAME, PAGE_STORE_NAME],
+      "readwrite",
+      ([scoreStore, pageStore]) => {
+        scoreStore.put(toScoreRecord(score));
+        [...activePages, ...deletedPages].forEach((page) => pageStore.put(page));
+      },
+      { timeoutMessage: "页面保存超时，请重试。" },
+    ),
+  );
 }
 
 function putFolder(folder) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction(FOLDER_STORE_NAME, "readwrite");
-    const request = transaction.objectStore(FOLDER_STORE_NAME).put(folder);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+  return enqueueLocalWrite("putFolder", () =>
+    runIdbTransaction(
+      FOLDER_STORE_NAME,
+      "readwrite",
+      (folderStore) => {
+        folderStore.put(folder);
+      },
+      { timeoutMessage: "文件夹保存超时，请重试。" },
+    ),
+  );
 }
 
 function putSetlistWithItems(setlist, items, deletedItems = []) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME], "readwrite");
-    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
-    const itemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
-
-    setlistStore.put(setlist);
-    [...items, ...deletedItems].forEach((item) => itemStore.put(item));
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+  return enqueueLocalWrite("putSetlistWithItems", () =>
+    runIdbTransaction(
+      [SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      "readwrite",
+      ([setlistStore, itemStore]) => {
+        setlistStore.put(setlist);
+        [...items, ...deletedItems].forEach((item) => itemStore.put(item));
+      },
+      { timeoutMessage: "歌单保存超时，请重试。" },
+    ),
+  );
 }
 
-function deleteSetlistRecord(setlistId) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME], "readwrite");
-    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
-    const itemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
-    const itemIndex = itemStore.index("setlistId");
-    const itemRequest = itemIndex.getAllKeys(setlistId);
-
-    setlistStore.delete(setlistId);
-    itemRequest.onsuccess = () => {
-      itemRequest.result.forEach((key) => itemStore.delete(key));
-    };
-    itemRequest.onerror = () => reject(itemRequest.error);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+// 先在只读事务中读出歌单项的 keys，再单独发起读写删除（不在 readwrite 的 getAllKeys 回调里删除，
+// 该旧模式在 iOS Safari 上易让事务卡死）。
+async function deleteSetlistRecord(setlistId) {
+  const itemKeys = await readKeysByIndex(SETLIST_ITEM_STORE_NAME, "setlistId", setlistId);
+  return enqueueLocalWrite("deleteSetlistRecord", () =>
+    runIdbTransaction(
+      [SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      "readwrite",
+      ([setlistStore, itemStore]) => {
+        setlistStore.delete(setlistId);
+        itemKeys.forEach((key) => itemStore.delete(key));
+      },
+      { timeoutMessage: "删除歌单超时，请重试。" },
+    ),
+  );
 }
 
-function deleteScoreRecord(id) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-    const pageIndex = pageStore.index("scoreId");
-    const scoreRequest = scoreStore.delete(id);
-    const pageRequest = pageIndex.getAllKeys(id);
-
-    pageRequest.onsuccess = () => {
-      pageRequest.result.forEach((key) => pageStore.delete(key));
-    };
-    scoreRequest.onerror = () => reject(scoreRequest.error);
-    pageRequest.onerror = () => reject(pageRequest.error);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  });
+async function deleteScoreRecord(id) {
+  // 先 readonly 读页 keys，再单独 readwrite 删除（避免在写事务回调里 getAllKeys 删除卡死）。
+  const pageKeys = await readKeysByIndex(PAGE_STORE_NAME, "scoreId", id);
+  return enqueueLocalWrite("deleteScoreRecord", () =>
+    runIdbTransaction(
+      [STORE_NAME, PAGE_STORE_NAME],
+      "readwrite",
+      ([scoreStore, pageStore]) => {
+        scoreStore.delete(id);
+        pageKeys.forEach((key) => pageStore.delete(key));
+      },
+      { timeoutMessage: "删除歌谱超时，请重试。" },
+    ),
+  );
 }
 
-function deleteFolderRecord(folderId, scoreIds) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-    const pageIndex = pageStore.index("scoreId");
-
-    folderStore.delete(folderId);
-    scoreIds.filter(Boolean).forEach((scoreId) => {
-      scoreStore.delete(scoreId);
-      const pageRequest = pageIndex.getAllKeys(scoreId);
-      pageRequest.onsuccess = () => {
-        pageRequest.result.forEach((key) => pageStore.delete(key));
-      };
-      pageRequest.onerror = () => reject(pageRequest.error);
-    });
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+async function deleteFolderRecord(folderId, scoreIds) {
+  const ids = (scoreIds || []).filter(Boolean).map(String);
+  // 先 readonly 读出每个歌谱对应的页 keys，再单独 readwrite 删除，避免在写事务回调里 getAllKeys 删页卡死。
+  const pageKeyGroups = await Promise.all(ids.map((scoreId) => readKeysByIndex(PAGE_STORE_NAME, "scoreId", scoreId)));
+  const pageKeys = pageKeyGroups.flat();
+  return enqueueLocalWrite("deleteFolderRecord", () =>
+    runIdbTransaction(
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME],
+      "readwrite",
+      ([folderStore, scoreStore, pageStore]) => {
+        folderStore.delete(folderId);
+        ids.forEach((scoreId) => scoreStore.delete(scoreId));
+        pageKeys.forEach((key) => pageStore.delete(key));
+      },
+      {
+        timeoutMs: Math.max(IDB_TXN_TIMEOUT, ids.length * 3000 + 5000),
+        timeoutMessage: "删除文件夹超时，请重试。",
+      },
+    ),
+  );
 }
 
 function markScoreDeletedRecord(score, deletedAt) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-    const userId = score.userId || state.session?.user?.id || null;
-    const pages = score.pages || state.scorePages.filter((page) => page.scoreId === score.id);
-
-    scoreStore.put({
-      ...toScoreRecord(score),
-      userId,
-      deletedAt,
-      updatedAt: deletedAt,
-      syncStatus: SYNC_STATUS_PENDING,
-    });
-    pages.forEach((page) => {
-      pageStore.put({
-        ...page,
-        userId: page.userId || userId,
-        deletedAt,
-        updatedAt: deletedAt,
-        syncStatus: SYNC_STATUS_PENDING,
-      });
-    });
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
-}
-
-function markFolderDeletedRecord(folder, folderScores, deletedAt) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction([FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME], "readwrite");
-    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-    const userId = folder.userId || state.session?.user?.id || null;
-
-    folderStore.put({
-      ...folder,
-      userId,
-      deletedAt,
-      updatedAt: deletedAt,
-      syncStatus: SYNC_STATUS_PENDING,
-    });
-    folderScores.forEach((score) => {
-      const scoreUserId = score.userId || userId;
-      scoreStore.put({
-        ...toScoreRecord(score),
-        userId: scoreUserId,
-        deletedAt,
-        updatedAt: deletedAt,
-        syncStatus: SYNC_STATUS_PENDING,
-      });
-      (score.pages || []).forEach((page) => {
-        pageStore.put({
-          ...page,
-          userId: page.userId || scoreUserId,
+  const userId = score.userId || state.session?.user?.id || null;
+  const pages = score.pages || state.scorePages.filter((page) => page.scoreId === score.id);
+  return enqueueLocalWrite("markScoreDeletedRecord", () =>
+    runIdbTransaction(
+      [STORE_NAME, PAGE_STORE_NAME],
+      "readwrite",
+      ([scoreStore, pageStore]) => {
+        scoreStore.put({
+          ...toScoreRecord(score),
+          userId,
           deletedAt,
           updatedAt: deletedAt,
           syncStatus: SYNC_STATUS_PENDING,
         });
-      });
-    });
+        pages.forEach((page) => {
+          pageStore.put({
+            ...page,
+            userId: page.userId || userId,
+            deletedAt,
+            updatedAt: deletedAt,
+            syncStatus: SYNC_STATUS_PENDING,
+          });
+        });
+      },
+      { timeoutMessage: "删除歌谱超时，请重试。" },
+    ),
+  );
+}
 
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+function markFolderDeletedRecord(folder, folderScores, deletedAt) {
+  const userId = folder.userId || state.session?.user?.id || null;
+  return enqueueLocalWrite("markFolderDeletedRecord", () =>
+    runIdbTransaction(
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME],
+      "readwrite",
+      ([folderStore, scoreStore, pageStore]) => {
+        folderStore.put({
+          ...folder,
+          userId,
+          deletedAt,
+          updatedAt: deletedAt,
+          syncStatus: SYNC_STATUS_PENDING,
+        });
+        folderScores.forEach((score) => {
+          const scoreUserId = score.userId || userId;
+          scoreStore.put({
+            ...toScoreRecord(score),
+            userId: scoreUserId,
+            deletedAt,
+            updatedAt: deletedAt,
+            syncStatus: SYNC_STATUS_PENDING,
+          });
+          (score.pages || []).forEach((page) => {
+            pageStore.put({
+              ...page,
+              userId: page.userId || scoreUserId,
+              deletedAt,
+              updatedAt: deletedAt,
+              syncStatus: SYNC_STATUS_PENDING,
+            });
+          });
+        });
+      },
+      {
+        timeoutMs: Math.max(IDB_TXN_TIMEOUT, (folderScores?.length || 0) * 3000 + 5000),
+        timeoutMessage: "删除文件夹超时，请重试。",
+      },
+    ),
+  );
 }
 
 function shouldKeepDeleteTombstone(record) {
+  // 已登录时一律保留删除墓碑：本地添加的歌谱可能 userId 为空，但其实已上传到云端。
+  // 若直接硬删本地记录而不留墓碑，删除护栏拦不住它，下次同步会把云端那份又拉回来，
+  // 表现为“删不掉”。保留墓碑即可同步删除云端，并在本地挡住回拉。
   return Boolean(record?.userId || state.session?.user?.id);
 }
 
 async function addPendingFiles(fileList) {
   const files = Array.from(fileList || []);
-  const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+  const imageFiles = files.filter(isImageFile);
 
   if (!imageFiles.length) {
     setStatus("请选择图片文件。", true);
@@ -3836,6 +5430,9 @@ async function addPendingFiles(fileList) {
   }
 
   setStatus(`正在压缩 1 / ${imageFiles.length} 张图片...`);
+
+  state.pendingFilesProcessing = true;
+  updateSaveState();
 
   for (const [index, file] of imageFiles.entries()) {
     await nextFrame();
@@ -3873,6 +5470,8 @@ async function addPendingFiles(fileList) {
     }
   }
 
+  state.pendingFilesProcessing = false;
+
   if (imageFiles.length !== files.length) {
     setStatus(`已压缩 ${imageFiles.length} 张图片，并跳过非图片文件。`, true);
   } else {
@@ -3881,6 +5480,19 @@ async function addPendingFiles(fileList) {
 
   renderPending();
   updateSaveState();
+}
+
+function isImageFile(file) {
+  if (!file) {
+    return false;
+  }
+
+  const type = String(file.type || "").toLowerCase();
+  if (type.startsWith("image/")) {
+    return true;
+  }
+
+  return /\.(jpe?g|png|webp|gif|heic|heif|bmp|tiff?)$/i.test(String(file.name || ""));
 }
 
 async function compressImageFile(file) {
@@ -4029,83 +5641,132 @@ function renderPending() {
 async function saveScore(event) {
   event.preventDefault();
 
-  const name = elements.scoreName.value.trim();
-  if (!name || !state.pendingPages.length) {
-    updateSaveState();
-    return;
-  }
-  if (hasDuplicateScoreName(name)) {
-    setStatus("已存在同名歌谱", true);
-    elements.scoreName.focus();
-    updateSaveState();
+  if (!ensureAppReady()) {
     return;
   }
 
-  const now = new Date().toISOString();
-  const userId = state.session?.user?.id || null;
-  const folderId = elements.scoreFolder ? elements.scoreFolder.value || null : state.currentFolderId || null;
-  const score = {
-    id: createId(),
-    userId,
-    name,
-    normalizedName: normalizeText(name),
-    folderId,
-    tags: [],
-    keySignature: elements.scoreKey?.value.trim() || "",
-    usage: "",
-    notes: elements.scoreNotes?.value.trim() || "",
-    favorite: false,
-    lastOpenedAt: null,
-    createdAt: now,
-    updatedAt: now,
-    deletedAt: null,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-  };
-  const pages = state.pendingPages.map((page, index) => ({
-    id: page.id,
-    scoreId: score.id,
-    userId,
-    pageIndex: index,
-    name: page.name,
-    type: page.type,
-    size: page.size,
-    blob: page.blob,
-    storagePath: null,
-    createdAt: now,
-    updatedAt: now,
-    deletedAt: null,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-  }));
-
-  elements.saveButton.disabled = true;
-  setStatus("正在保存...");
-
-  try {
-    await withTimeout(
-      putScoreWithPages(score, pages, {
-        onProgress: (current, total) => {
-          setStatus(total > 1 ? `正在保存图片 ${current} / ${total}...` : "正在保存图片...");
-        },
-      }),
-      Math.max(LOCAL_SAVE_TIMEOUT, pages.length * PAGE_SAVE_TIMEOUT + 5000),
-      "本地保存超时，请先减少单次添加的图片数量，或检查手机剩余空间后重试。",
-    );
-    insertSavedScoreInMemory(score, pages);
-    resetForm(false);
-    elements.searchInput.value = "";
-    closeAddScreen();
-    renderScores();
-    if (userId && state.cloudReady) {
-      queueScoreCloudUpload(score.id, `已保存《${name}》，正在直传云端。`);
-    } else {
-      setStatus(`已保存《${name}》。`);
+  await withOperationLock("saveScore", async () => {
+    const name = elements.scoreName.value.trim();
+    if (!name || !state.pendingPages.length) {
+      updateSaveState();
+      return;
     }
-  } catch (error) {
-    console.error(error);
-    setStatus(getStorageSaveErrorMessage(error), true);
-  } finally {
+    if (hasDuplicateScoreName(name)) {
+      setStatus("已存在同名歌谱", true);
+      elements.scoreName.focus();
+      updateSaveState();
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const userId = state.session?.user?.id || null;
+    const folderId = elements.scoreFolder ? elements.scoreFolder.value || null : state.currentFolderId || null;
+    const score = {
+      id: createId(),
+      userId,
+      name,
+      normalizedName: normalizeText(name),
+      folderId,
+      tags: [],
+      keySignature: elements.scoreKey?.value.trim() || "",
+      usage: "",
+      notes: elements.scoreNotes?.value.trim() || "",
+      favorite: false,
+      lastOpenedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+    };
+
+    let pages = [];
+    let totalBlobSize = 0;
+
+    try {
+      pages = state.pendingPages.map((page, index) =>
+        normalizePageBlob({
+          id: page.id || createId(),
+          scoreId: score.id,
+          userId,
+          pageIndex: index,
+          name: page.name || `第 ${index + 1} 页`,
+          type: page.type || page.blob?.type || "image/jpeg",
+          size: page.size || page.blob?.size || 0,
+          blob: page.blob,
+          storagePath: null,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+        }),
+      );
+      totalBlobSize = getPagesTotalBlobSize(pages);
+      if (!pages.length) {
+        throw createNamedError("DataCloneError", "图片处理失败，请重新选择图片。");
+      }
+      await assertStorageSpaceAvailable(totalBlobSize);
+    } catch (error) {
+      logStorageOperationError(error, "保存", {
+        scoreIds: [score.id],
+        pagesLength: pages.length || state.pendingPages.length,
+        totalBlobSize,
+      });
+      setStatus(getStorageErrorMessage(error, "保存"), true);
+      updateSaveState();
+      return;
+    }
+
+    elements.saveButton.disabled = true;
+    setStatus(totalBlobSize > 80 * 1024 * 1024 ? "图片较大，正在保存到本机..." : "正在保存到本机...");
+
+    beginUserWrite();
+    try {
+      const saved = await saveScoreLocalAtomic(score, pages, {
+        onProgress: (current, total) => {
+          if (total > 1) {
+            setStatus(`正在保存到本机（第 ${current} / ${total} 页）...`);
+          }
+        },
+      });
+      insertSavedScoreInMemory(saved.score, saved.pages);
+      resetForm(false);
+      elements.searchInput.value = "";
+      closeAddScreen();
+
+      let rendered = true;
+      try {
+        renderScores();
+      } catch (renderError) {
+        rendered = false;
+        console.error(renderError);
+        setStatus("数据已保存，但页面刷新失败，请手动刷新。", true);
+      }
+
+      if (userId) {
+        if (rendered) {
+          setStatus(`已保存《${name}》到本机，正在后台同步。`);
+        }
+        queueScoreCloudUpload(score.id);
+      } else if (rendered) {
+        setStatus(`已保存《${name}》。`);
+      }
+    } catch (error) {
+      logStorageOperationError(error, "保存", {
+        scoreIds: [score.id],
+        pagesLength: pages.length,
+        totalBlobSize,
+      });
+      // 保存超时/中断时连接可能已卡死，重连数据库，保证再次保存能成功。
+      await recoverDatabaseIfWedged(error);
+      setStatus(getStorageErrorMessage(error, "保存"), true);
+    } finally {
+      endUserWrite();
+      updateSaveState();
+    }
+  }, { timeoutMessage: "保存耗时过长，已超时，请重试。" }).catch((error) => {
+    setStatus(error.message || getStorageErrorMessage(error, "保存"), true);
     updateSaveState();
-  }
+  });
 }
 
 function insertSavedScoreInMemory(score, pages) {
@@ -4175,20 +5836,23 @@ async function saveScoreEdit(event) {
   elements.saveScoreEditButton.disabled = true;
   setScoreEditStatus(isMoveMode ? "正在移动..." : "正在保存...");
 
+  beginUserWrite();
   try {
+    // 本地优先：本地写成功即给用户成功反馈，云端仅入 outbox 后台处理。
     await putScore(updatedScore);
     closeScoreEditDialog();
     await loadScores();
-    if (userId && state.cloudReady) {
-      queueScoreCloudUpload(updatedScore.id, isMoveMode ? `《${updatedScore.name}》已移动，正在同步云端。` : `《${updatedScore.name}》信息已保存，正在同步云端。`);
-    } else {
-      setStatus(isMoveMode ? `《${updatedScore.name}》已移动。` : `《${updatedScore.name}》信息已保存。`);
+    setStatus(isMoveMode ? `《${updatedScore.name}》已移动。` : `《${updatedScore.name}》信息已保存。`);
+    // 只要存在 userId/session 就入队 outbox；cloudReady 只决定是否立刻 kick（见 queueScoreCloudUpload / kickOutbox）。
+    if (userId || state.session) {
+      queueScoreCloudUpload(updatedScore.id);
     }
   } catch (error) {
     console.error(error);
     setScoreEditStatus(getErrorMessage(error) || "保存失败，请稍后再试。", true);
   } finally {
     elements.saveScoreEditButton.disabled = false;
+    endUserWrite();
   }
 }
 
@@ -4520,9 +6184,15 @@ function queueManagedPageSave(updatedScore, pagesToSave, deletedPages, userId, s
   state.pageManagerSaveChain = state.pageManagerSaveChain
     .catch(() => {})
     .then(async () => {
-      await putScorePageChanges(updatedScore, pagesToSave, deletedPages);
-      if (userId && state.cloudReady) {
-        queueSync();
+      beginUserWrite();
+      try {
+        await putScorePageChanges(updatedScore, pagesToSave, deletedPages);
+      } finally {
+        endUserWrite();
+      }
+      // 页面管理保存：只要有 userId/session 就入队 outbox（不因 cloudReady=false 跳过）。
+      if (userId || state.session) {
+        queueScoreCloudUpload(scoreId);
       }
     });
 
@@ -4710,6 +6380,7 @@ async function createFolder(event) {
 
   elements.saveFolderButton.disabled = true;
 
+  beginUserWrite();
   try {
     await putFolder(folder);
     elements.searchInput.value = "";
@@ -4721,12 +6392,17 @@ async function createFolder(event) {
     } else {
       openFolder(folder.id);
     }
-    if (userId && state.cloudReady) {
+    // 只要存在 userId/session 就入队 outbox（不因 cloudReady=false 跳过）。
+    if (userId || state.session) {
       queueFolderCloudUpload(folder.id);
     }
   } catch (error) {
     console.error(error);
+    await recoverDatabaseIfWedged(error);
+    setStatus(getErrorMessage(error) || "保存文件夹失败，请稍后再试。", true);
+  } finally {
     elements.saveFolderButton.disabled = false;
+    endUserWrite();
   }
 }
 
@@ -4798,44 +6474,57 @@ function queueAccountBackgroundSync(userId, message = "") {
   }
 
   window.clearTimeout(state.accountSyncTimer);
-  state.accountSyncTimer = window.setTimeout(async () => {
+  const run = async () => {
     state.accountSyncTimer = 0;
     if (!state.session || state.session.user.id !== userId) {
+      return;
+    }
+    // 用户正在保存/删除/编辑时不抢资源，稍后再试。
+    if (isUserWriteActive()) {
+      state.accountSyncTimer = window.setTimeout(run, 2500);
       return;
     }
 
     try {
       await claimLocalRecordsForUser(userId);
       await syncNow();
+      setBackgroundSyncError("");
     } catch (error) {
-      console.error(error);
-      setStatus(error.message || "后台同步失败，请稍后点刷新重试。", true);
+      // 后台同步失败不再静默：记录到同步面板，并保留一次轻提示。
+      console.warn("后台同步失败", error);
+      setBackgroundSyncError(getErrorMessage(error) || "后台同步失败，请稍后重试。");
     }
-  }, 100);
+  };
+  // 刚打开/登录后不立刻做重型全量同步，延迟到空闲再执行，避免一开 App 就卡在网络/SDK 上。
+  state.accountSyncTimer = window.setTimeout(run, STARTUP_SYNC_DELAY);
+}
+
+// 记录后台同步问题原因并刷新“我的”同步面板（失败可见，而非静默 console.warn）。
+function setBackgroundSyncError(message) {
+  state.backgroundSyncError = message || "";
+  updateOutboxIndicator();
 }
 
 function putCloudReadyRecords(folders, scores, pages, setlists = [], setlistItems = []) {
-  return new Promise((resolve, reject) => {
-    const transaction = state.db.transaction(
+  const total = folders.length + scores.length + pages.length + setlists.length + setlistItems.length;
+  // 后台同步写入：同样串行进入本地写队列，避免与用户操作并发抢事务。
+  return enqueueLocalWrite("putCloudReadyRecords", () =>
+    runIdbTransaction(
       [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
       "readwrite",
-    );
-    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
-    const setlistItemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
-
-    folders.forEach((folder) => folderStore.put(folder));
-    scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
-    pages.forEach((page) => pageStore.put(page));
-    setlists.forEach((setlist) => setlistStore.put(setlist));
-    setlistItems.forEach((item) => setlistItemStore.put(item));
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+      ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore]) => {
+        folders.forEach((folder) => folderStore.put(folder));
+        scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
+        pages.forEach((page) => pageStore.put(page));
+        setlists.forEach((setlist) => setlistStore.put(setlist));
+        setlistItems.forEach((item) => setlistItemStore.put(item));
+      },
+      {
+        timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, total * 1500 + 5000),
+        timeoutMessage: "本地写入云端数据超时，请稍后重试同步。",
+      },
+    ),
+  );
 }
 
 function queueSync() {
@@ -4850,17 +6539,13 @@ function queueScoreCloudUpload(scoreId, message = "") {
   if (message) {
     setStatus(message);
   }
-
-  if (!state.cloudReady || !state.session || !scoreId) {
+  if (!scoreId || !state.session) {
     return;
   }
-
-  window.setTimeout(() => {
-    startScoreCloudUpload(scoreId).catch((error) => {
-      console.error(error);
-      setStatus(error.message || "歌谱云端上传失败，请稍后点刷新重试。", true);
-    });
-  }, 1800);
+  // 入队到发件箱（持久、可观测、可重试），由处理器统一推送。
+  enqueueOutboxTask("score.upsert", { entityId: scoreId })
+    .then(() => kickOutbox(1200))
+    .catch((error) => console.warn(error));
 }
 
 function startScoreCloudUpload(scoreId) {
@@ -4880,17 +6565,395 @@ function startScoreCloudUpload(scoreId) {
   return task;
 }
 
-function queueFolderCloudUpload(folderId) {
-  if (!state.cloudReady || !state.session || !folderId || state.folderUploads.has(folderId)) {
+// ===== 同步发件箱（sync_outbox）：显式入队 + 退避重试 + 可观测 =====
+
+function getAllOutboxTasks() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.db.transaction(SYNC_OUTBOX_STORE_NAME, "readonly");
+    const request = transaction.objectStore(SYNC_OUTBOX_STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function putOutboxTask(task) {
+  return putStoreRecord(SYNC_OUTBOX_STORE_NAME, task, LOCAL_SAVE_TIMEOUT, "同步队列写入超时。");
+}
+
+function removeOutboxTask(id) {
+  return enqueueLocalWrite("removeOutboxTask", () =>
+    runIdbTransaction(
+      SYNC_OUTBOX_STORE_NAME,
+      "readwrite",
+      (store) => {
+        store.delete(String(id));
+      },
+      { timeoutMessage: "同步队列写入超时。" },
+    ),
+  );
+}
+
+function outboxBackoff(attempts) {
+  const index = Math.min(Math.max(attempts, 1), OUTBOX_BACKOFF_MS.length) - 1;
+  return OUTBOX_BACKOFF_MS[index];
+}
+
+// 入队一个待推送操作。相同 dedupeKey 的待处理任务会被合并（覆盖 payload、重置重试）。
+async function enqueueOutboxTask(type, options = {}) {
+  if (!state.db) {
+    return;
+  }
+  const entityId = options.entityId ? String(options.entityId) : "";
+  const dedupeKey = options.dedupeKey || `${type}:${entityId}`;
+  const now = new Date().toISOString();
+
+  let existingTasks = [];
+  try {
+    existingTasks = await getAllOutboxTasks();
+  } catch (error) {
+    console.warn(error);
+  }
+
+  // 删除某实体时，使其之前的 upsert 任务作废（先删后传没有意义）。
+  if (options.supersedeUpsert && entityId) {
+    const stale = existingTasks.filter((task) => task.entityId === entityId && task.type !== type && task.type.endsWith(".upsert"));
+    for (const task of stale) {
+      try {
+        await removeOutboxTask(task.id);
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+  }
+
+  const existing = existingTasks.find((task) => task.dedupeKey === dedupeKey);
+  const record = {
+    id: existing?.id || createId(),
+    type,
+    entityType: options.entityType || type.split(".")[0] || "",
+    entityId,
+    dedupeKey,
+    payload: options.payload ?? existing?.payload ?? null,
+    status: OUTBOX_STATUS_PENDING,
+    retryCount: 0,
+    lastError: "",
+    createdAt: existing?.createdAt || now,
+    nextAttemptAt: Date.now(),
+    updatedAt: now,
+  };
+  try {
+    await putOutboxTask(record);
+  } catch (error) {
+    console.warn("入队同步任务失败", error);
+  }
+  refreshOutboxCounts();
+}
+
+// 启动一次发件箱处理（带去抖）。
+function kickOutbox(delay = 600) {
+  if (!state.session) {
+    refreshOutboxCounts();
+    return;
+  }
+  window.clearTimeout(state.outboxTimer);
+  state.outboxTimer = window.setTimeout(() => {
+    state.outboxTimer = 0;
+    // 用户正在写入时让路，稍后再推进后台同步。
+    if (isUserWriteActive()) {
+      kickOutbox(2000);
+      return;
+    }
+    processSyncOutbox({ ensureConnection: true }).catch((error) => console.warn(error));
+  }, delay);
+}
+
+// 安排下一次重试（取最近一个未到期任务的时间）。
+function scheduleOutboxRetry(tasks) {
+  const pending = (tasks || []).filter((task) => task.status === OUTBOX_STATUS_PENDING);
+  if (!pending.length) {
+    return;
+  }
+  const now = Date.now();
+  const next = Math.min(...pending.map((task) => task.nextAttemptAt || now));
+  const delay = Math.max(1000, next - now);
+  window.clearTimeout(state.outboxTimer);
+  state.outboxTimer = window.setTimeout(() => {
+    state.outboxTimer = 0;
+    processSyncOutbox().catch((error) => console.warn(error));
+  }, delay);
+}
+
+// 更新“我的”页里的同步队列状态面板（可观测：待同步 / 失败数量 + 重试入口）。
+function updateOutboxIndicator() {
+  if (!elements.syncOutboxPanel) {
+    return;
+  }
+  const pending = state.outboxCounts?.pending || 0;
+  const failed = state.outboxCounts?.failed || 0;
+  const backgroundError = state.backgroundSyncError || "";
+
+  if (!state.session) {
+    elements.syncOutboxPanel.hidden = true;
+    return;
+  }
+  // 没有待同步/失败任务，但后台全量同步出过错时，也要把问题显示出来（不静默）。
+  if (!pending && !failed && !backgroundError) {
+    elements.syncOutboxPanel.hidden = true;
     return;
   }
 
-  window.setTimeout(() => {
-    uploadFolderToCloud(folderId).catch((error) => {
-      console.error(error);
-      setStatus(error.message || "文件夹云端保存失败，请稍后点刷新重试。", true);
-    });
-  }, 0);
+  elements.syncOutboxPanel.hidden = false;
+  elements.syncOutboxPanel.classList.toggle("has-failed", failed > 0 || Boolean(backgroundError));
+  const parts = [];
+  if (pending) {
+    parts.push(`待同步 ${pending} 项`);
+  }
+  if (failed) {
+    parts.push(`同步失败 ${failed} 项`);
+  }
+  if (elements.syncOutboxState) {
+    let text = "";
+    if (parts.length) {
+      text = `${parts.join("，")}${state.outboxProcessing ? "（正在同步…）" : ""}`;
+      const detail = state.outboxLastError || backgroundError;
+      if (!state.outboxProcessing && detail) {
+        text += `：${detail}`;
+      }
+    } else if (backgroundError) {
+      // 仅有后台同步问题（无具体任务）时，直接显示原因并提供重试。
+      text = `云端同步暂时失败：${backgroundError}`;
+    }
+    elements.syncOutboxState.textContent = text;
+  }
+  if (elements.retryOutboxButton) {
+    elements.retryOutboxButton.hidden = !failed && !pending && !backgroundError;
+  }
+}
+
+async function refreshOutboxCounts() {
+  if (!state.db) {
+    return;
+  }
+  try {
+    applyOutboxCounts(await getAllOutboxTasks());
+  } catch (error) {
+    console.warn(error);
+    updateOutboxIndicator();
+  }
+}
+
+// 处理发件箱：依次执行到期任务，成功即出队，失败按退避重试，超过上限标记 failed。
+async function processSyncOutbox(options = {}) {
+  if (!state.db || state.outboxProcessing) {
+    return;
+  }
+  // 用户正在保存/删除/编辑时，暂停后台 outbox 处理，等空闲再来（除非强制重试）。
+  if (isUserWriteActive() && !options.force) {
+    kickOutbox(2000);
+    return;
+  }
+  // 必要时先确保云端连接与会话（会话常从本地快速恢复，但云连接可能尚未就绪）。
+  if ((!state.cloudReady || !state.session) && options.ensureConnection) {
+    try {
+      if (!state.cloudReady) {
+        await initializeCloud();
+      }
+      if (state.cloudReady && !state.session) {
+        await restoreCloudSession();
+      }
+    } catch (error) {
+      console.warn("确保云端连接失败", error);
+    }
+  }
+  if (!state.cloudReady || !state.session) {
+    updateOutboxIndicator();
+    return;
+  }
+  state.outboxProcessing = true;
+  try {
+    let tasks = [];
+    try {
+      tasks = await getAllOutboxTasks();
+    } catch (error) {
+      console.warn(error);
+      return;
+    }
+    tasks.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const now = Date.now();
+
+    for (const task of tasks) {
+      if (!options.force) {
+        if (task.status === OUTBOX_STATUS_FAILED) {
+          continue;
+        }
+        if ((task.nextAttemptAt || 0) > now) {
+          continue;
+        }
+      }
+      try {
+        await dispatchOutboxTask(task);
+        await removeOutboxTask(task.id);
+      } catch (error) {
+        const attempts = (task.retryCount || 0) + 1;
+        const failedPermanently = attempts >= OUTBOX_MAX_ATTEMPTS;
+        try {
+          await putOutboxTask({
+            ...task,
+            retryCount: attempts,
+            status: failedPermanently ? OUTBOX_STATUS_FAILED : OUTBOX_STATUS_PENDING,
+            lastError: getErrorMessage(error) || String(error),
+            nextAttemptAt: Date.now() + outboxBackoff(attempts),
+            updatedAt: new Date().toISOString(),
+          });
+        } catch (writeError) {
+          console.warn(writeError);
+        }
+      }
+    }
+  } finally {
+    state.outboxProcessing = false;
+    let remaining = [];
+    try {
+      remaining = await getAllOutboxTasks();
+    } catch (error) {
+      console.warn(error);
+    }
+    applyOutboxCounts(remaining);
+    scheduleOutboxRetry(remaining);
+  }
+}
+
+// 根据任务列表更新计数与最近的失败原因，并刷新面板。
+function applyOutboxCounts(tasks) {
+  const list = tasks || [];
+  state.outboxCounts = {
+    pending: list.filter((task) => task.status === OUTBOX_STATUS_PENDING).length,
+    failed: list.filter((task) => task.status === OUTBOX_STATUS_FAILED).length,
+  };
+  const withError = list.find((task) => task.lastError);
+  state.outboxLastError = withError?.lastError || "";
+  updateOutboxIndicator();
+}
+
+// 把失败任务重新置为待处理并立即重试（供“立即重试”按钮使用）。
+async function retryFailedOutboxTasks() {
+  if (!state.db) {
+    return;
+  }
+  let tasks = [];
+  try {
+    tasks = await getAllOutboxTasks();
+  } catch (error) {
+    console.warn(error);
+  }
+  for (const task of tasks) {
+    if (task.status === OUTBOX_STATUS_FAILED || (task.nextAttemptAt || 0) > Date.now()) {
+      try {
+        await putOutboxTask({ ...task, status: OUTBOX_STATUS_PENDING, nextAttemptAt: Date.now(), updatedAt: new Date().toISOString() });
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+  }
+  await processSyncOutbox({ force: true, ensureConnection: true });
+
+  // 同时重试后台全量同步（清除“云端同步暂时失败”的提示）。
+  if (state.session) {
+    try {
+      if (!state.cloudReady) {
+        await initializeCloud();
+      }
+      await syncNow();
+      setBackgroundSyncError("");
+    } catch (error) {
+      setBackgroundSyncError(getErrorMessage(error) || "云端同步失败，请稍后重试。");
+    }
+  }
+}
+
+// 把任务类型分发到对应的云端操作。
+async function dispatchOutboxTask(task) {
+  switch (task.type) {
+    case "score.upsert":
+      await uploadScoreToCloud(task.entityId);
+      return;
+    case "score.delete": {
+      const score = task.payload?.score;
+      if (!score) {
+        return;
+      }
+      await deleteCloudScore(score, task.payload.deletedAt);
+      return;
+    }
+    case "folder.upsert":
+      await uploadFolderToCloud(task.entityId);
+      return;
+    case "folder.delete": {
+      const folder = task.payload?.folder;
+      if (!folder) {
+        return;
+      }
+      await deleteCloudFolder(folder, task.payload.folderScores || [], task.payload.deletedAt);
+      return;
+    }
+    case "setlist.upsert":
+      await uploadSetlistToCloud(task.entityId);
+      return;
+    default:
+      console.warn("未知的同步任务类型", task.type);
+  }
+}
+
+// 上传单个歌单及其曲目到云端。本地记录若带 deletedAt（软删除），同一次上传即把墓碑推送到云端，
+// 因此新建 / 编辑 / 删除共用此任务。歌单记录已被硬删除（本地不存在）则无需操作。
+async function uploadSetlistToCloud(setlistId) {
+  if (!state.cloudReady || !state.session || !setlistId) {
+    return;
+  }
+  const userId = state.session.user.id;
+  const [allSetlists, allItems] = await Promise.all([getAllSetlists(), getAllSetlistItems()]);
+  const setlist = allSetlists.find((item) => String(item.id) === String(setlistId));
+  if (!setlist) {
+    return;
+  }
+  const setlistRecord = { ...normalizeLocalSetlistRecord(setlist), userId };
+  const itemRecords = allItems
+    .filter((item) => String(item.setlistId) === String(setlistId))
+    .map((item) => ({ ...normalizeLocalSetlistItemRecord(item), userId: item.userId || userId }));
+
+  // 集合缺失时 upsertOptionalCloud 返回 false（无法重试解决），视为完成，不抛错。
+  const setlistOk = await upsertOptionalCloud(CLOUD_TABLES.setlists, [toCloudSetlist(setlistRecord)]);
+  if (!setlistOk) {
+    return;
+  }
+  if (itemRecords.length) {
+    await upsertOptionalCloud(CLOUD_TABLES.setlistItems, itemRecords.map(toCloudSetlistItem));
+  }
+  await markLocalSynced(
+    [],
+    [],
+    [],
+    [{ ...setlistRecord, syncStatus: SYNC_STATUS_SYNCED }],
+    itemRecords.map((item) => ({ ...item, syncStatus: SYNC_STATUS_SYNCED })),
+  );
+}
+
+function queueSetlistCloudSync(setlistId) {
+  if (!setlistId || !state.session) {
+    return;
+  }
+  enqueueOutboxTask("setlist.upsert", { entityId: setlistId })
+    .then(() => kickOutbox(0))
+    .catch((error) => console.warn(error));
+}
+
+function queueFolderCloudUpload(folderId) {
+  if (!folderId || !state.session) {
+    return;
+  }
+  enqueueOutboxTask("folder.upsert", { entityId: folderId })
+    .then(() => kickOutbox(0))
+    .catch((error) => console.warn(error));
 }
 
 async function uploadFolderToCloud(folderId) {
@@ -5090,8 +7153,12 @@ async function syncNow(options = {}) {
       setStatus("同步完成。");
     }
   } catch (error) {
-    console.error(error);
-    setStatus(error.message || "同步失败，请检查网络和 CloudBase 配置。", true);
+    if (options.manual) {
+      console.error(error);
+      setStatus(error.message || "同步失败，请检查网络和 CloudBase 配置。", true);
+    } else {
+      console.warn("Background sync failed.", error);
+    }
     if (options.throwOnError) {
       throw error;
     }
@@ -5152,34 +7219,31 @@ async function purgeCloudDeletedLocalRecords(folderIds, scoreIds, setlistIds = [
     return;
   }
 
-  await new Promise((resolve, reject) => {
-    const transaction = state.db.transaction(
+  // 先 readonly 读出所有受影响歌谱的页 keys，再单独 readwrite 删除，避免旧的 getAllKeys-in-readwrite 卡死。
+  const scoreIdList = [...scoreIdSet];
+  const pageKeyGroups = await Promise.all(
+    scoreIdList.map((scoreId) => readKeysByIndex(PAGE_STORE_NAME, "scoreId", scoreId)),
+  );
+  const pageKeys = pageKeyGroups.flat();
+  const total = folderIdSet.size + setlistIdSet.size + setlistItemIdSet.size + scoreIdSet.size + pageKeys.length;
+
+  await enqueueLocalWrite("purgeCloudDeletedLocalRecords", () =>
+    runIdbTransaction(
       [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
       "readwrite",
-    );
-    const folderStore = transaction.objectStore(FOLDER_STORE_NAME);
-    const scoreStore = transaction.objectStore(STORE_NAME);
-    const pageStore = transaction.objectStore(PAGE_STORE_NAME);
-    const setlistStore = transaction.objectStore(SETLIST_STORE_NAME);
-    const setlistItemStore = transaction.objectStore(SETLIST_ITEM_STORE_NAME);
-    const pageIndex = pageStore.index("scoreId");
-
-    folderIdSet.forEach((folderId) => folderStore.delete(folderId));
-    setlistIdSet.forEach((setlistId) => setlistStore.delete(setlistId));
-    setlistItemIdSet.forEach((itemId) => setlistItemStore.delete(itemId));
-    scoreIdSet.forEach((scoreId) => {
-      scoreStore.delete(scoreId);
-      const pageRequest = pageIndex.getAllKeys(scoreId);
-      pageRequest.onsuccess = () => {
-        pageRequest.result.forEach((key) => pageStore.delete(key));
-      };
-      pageRequest.onerror = () => reject(pageRequest.error);
-    });
-
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+      ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore]) => {
+        folderIdSet.forEach((folderId) => folderStore.delete(folderId));
+        setlistIdSet.forEach((setlistId) => setlistStore.delete(setlistId));
+        setlistItemIdSet.forEach((itemId) => setlistItemStore.delete(itemId));
+        scoreIdSet.forEach((scoreId) => scoreStore.delete(scoreId));
+        pageKeys.forEach((key) => pageStore.delete(key));
+      },
+      {
+        timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, total * 1500 + 5000),
+        timeoutMessage: "清理云端已删除记录超时，请稍后重试同步。",
+      },
+    ),
+  );
 }
 
 async function getSyncableLocalRecords(userId) {
@@ -5300,6 +7364,7 @@ function needsCloudMetadataSync(record) {
 async function pullCloudChanges(options = {}) {
   const downloadImages = Boolean(options.downloadImages);
   const userId = state.session.user.id;
+  const deletionGuards = await getLocalDeletionGuards(userId);
   const [folderRows, scoreRows, pageRows, setlistRows, setlistItemRows] = await Promise.all([
     queryCloudRows(CLOUD_TABLES.folders, { user_id: userId }),
     queryCloudRows(CLOUD_TABLES.scores, { user_id: userId }),
@@ -5311,11 +7376,39 @@ async function pullCloudChanges(options = {}) {
       orderBy: [["position", "asc"]],
     }),
   ]);
-  const folders = folderRows.filter(isCloudRowActive);
-  const scores = scoreRows.filter(isCloudRowActive);
-  const pages = pageRows.filter(isCloudRowActive);
-  const setlists = setlistRows.filter(isCloudRowActive);
-  const setlistItems = setlistItemRows.filter(isCloudRowActive);
+  const folders = folderRows
+    .filter(isCloudRowActive)
+    .filter((row) => !deletionGuards.folderIds.has(String(row.id)));
+  const scores = scoreRows
+    .filter(isCloudRowActive)
+    .filter(
+      (row) =>
+        !deletionGuards.scoreIds.has(String(row.id)) &&
+        !deletionGuards.folderIds.has(String(row.folder_id || "")),
+    );
+  const activeScoreIds = new Set(scores.map((row) => String(row.id)));
+  const pages = pageRows
+    .filter(isCloudRowActive)
+    .filter(
+      (row) =>
+        activeScoreIds.has(String(row.score_id)) &&
+        !deletionGuards.pageIds.has(String(row.id)) &&
+        !deletionGuards.scoreIds.has(String(row.score_id || "")),
+    );
+  const setlists = setlistRows
+    .filter(isCloudRowActive)
+    .filter((row) => !deletionGuards.setlistIds.has(String(row.id)));
+  const activeSetlistIds = new Set(setlists.map((row) => String(row.id)));
+  const setlistItems = setlistItemRows
+    .filter(isCloudRowActive)
+    .filter(
+      (row) =>
+        activeSetlistIds.has(String(row.setlist_id)) &&
+        activeScoreIds.has(String(row.score_id)) &&
+        !deletionGuards.setlistItemIds.has(String(row.id)) &&
+        !deletionGuards.setlistIds.has(String(row.setlist_id || "")) &&
+        !deletionGuards.scoreIds.has(String(row.score_id || "")),
+    );
 
   const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
   const cloudPages = [];
@@ -5371,6 +7464,66 @@ function markLocalSynced(folders, scores, pages, setlists = [], setlistItems = [
   return putCloudReadyRecords(folders, scores, pages, setlists, setlistItems);
 }
 
+async function getLocalDeletionGuards(userId) {
+  const [folderRecords, scoreRecords, pageRecords, setlistRecords, setlistItemRecords] = await Promise.all([
+    getAllFolders(),
+    getAllScores(),
+    getAllScorePages(),
+    getAllSetlists(),
+    getAllSetlistItems(),
+  ]);
+  const ownerMatches = (record) => !record.userId || record.userId === userId;
+  const folderIds = new Set(
+    folderRecords
+      .map(normalizeLocalFolderRecord)
+      .filter((folder) => folder.deletedAt && ownerMatches(folder))
+      .map((folder) => String(folder.id)),
+  );
+  const scoreIds = new Set(
+    scoreRecords
+      .map(normalizeLocalScoreRecord)
+      .filter((score) => score.deletedAt && ownerMatches(score))
+      .map((score) => String(score.id)),
+  );
+  const pageIds = new Set(
+    pageRecords
+      .map(normalizeLocalPageRecord)
+      .filter((page) => page.deletedAt && ownerMatches(page))
+      .map((page) => String(page.id)),
+  );
+  const setlistIds = new Set(
+    setlistRecords
+      .map(normalizeLocalSetlistRecord)
+      .filter((setlist) => setlist.deletedAt && ownerMatches(setlist))
+      .map((setlist) => String(setlist.id)),
+  );
+  const setlistItemIds = new Set(
+    setlistItemRecords
+      .map(normalizeLocalSetlistItemRecord)
+      .filter((item) => item.deletedAt && ownerMatches(item))
+      .map((item) => String(item.id)),
+  );
+
+  scoreRecords
+    .map(normalizeLocalScoreRecord)
+    .filter((score) => folderIds.has(String(score.folderId || "")) && ownerMatches(score))
+    .forEach((score) => scoreIds.add(String(score.id)));
+  pageRecords
+    .map(normalizeLocalPageRecord)
+    .filter((page) => scoreIds.has(String(page.scoreId || "")) && ownerMatches(page))
+    .forEach((page) => pageIds.add(String(page.id)));
+  setlistItemRecords
+    .map(normalizeLocalSetlistItemRecord)
+    .filter(
+      (item) =>
+        ownerMatches(item) &&
+        (setlistIds.has(String(item.setlistId || "")) || scoreIds.has(String(item.scoreId || ""))),
+    )
+    .forEach((item) => setlistItemIds.add(String(item.id)));
+
+  return { folderIds, scoreIds, pageIds, setlistIds, setlistItemIds };
+}
+
 function isCloudRowActive(row) {
   return !row?.deleted_at;
 }
@@ -5379,7 +7532,7 @@ async function upsertCloud(table, rows) {
   const collection = state.cloudDb.collection(table);
   await runWithConcurrency(rows, CLOUD_WRITE_CONCURRENCY, async (row) => {
     const { _id, ...document } = row;
-    const result = await withTimeout(
+    const result = await cloudGuard(
       collection.doc(String(row.id)).set(document),
       CLOUD_QUERY_TIMEOUT,
       "云端数据保存超时，请检查网络后重试。",
@@ -5418,7 +7571,7 @@ async function queryCloudRows(collectionName, where, options = {}) {
       query = query.orderBy(field, direction || "asc");
     });
 
-    const result = await withTimeout(
+    const result = await cloudGuard(
       query.skip(offset).limit(pageSize).get(),
       CLOUD_QUERY_TIMEOUT,
       "云端数据读取超时，请检查网络后重试。",
@@ -5470,7 +7623,7 @@ async function queryCloudRowsByIds(collectionName, field, values, where = {}, op
 async function deleteCloudRowsByIds(collectionName, ids) {
   const collection = state.cloudDb.collection(collectionName);
   for (const id of ids.filter(Boolean)) {
-    const result = await withTimeout(
+    const result = await cloudGuard(
       collection.doc(String(id)).remove(),
       CLOUD_QUERY_TIMEOUT,
       "云端数据删除超时，请检查网络后重试。",
@@ -5527,7 +7680,7 @@ async function uploadCloudFile(cloudPath, blob, fileName = "score-page.jpg") {
 
   if (typeof state.cloudApp.uploadFile === "function") {
     try {
-      const result = await withTimeout(
+      const result = await cloudGuard(
         state.cloudApp.uploadFile({
           cloudPath,
           filePath: file,
@@ -5577,7 +7730,7 @@ function toUploadFile(blob, fileName) {
 
 async function uploadCloudFileWithSignedUrl(cloudPath, file) {
   const contentType = file.type || "application/octet-stream";
-  const metadataResult = await withTimeout(
+  const metadataResult = await cloudGuard(
     state.cloudApp.getUploadMetadata({
       cloudPath,
       method: "put",
@@ -5646,7 +7799,7 @@ async function getCloudFileTempUrls(fileIDs) {
     return new Map();
   }
 
-  const result = await withTimeout(
+  const result = await cloudGuard(
     state.cloudApp.getTempFileURL({
       fileList: targets,
     }),
@@ -5736,7 +7889,7 @@ async function deleteCloudFiles(fileIDs) {
     return;
   }
 
-  const result = await withTimeout(
+  const result = await cloudGuard(
     state.cloudApp.deleteFile({
       fileList: targets,
     }),
@@ -7342,10 +9495,12 @@ function createShareCodeValue() {
 
 function resetForm(showMessage = true) {
   elements.scoreForm.reset();
+  applyKeyPickerValue(elements.scoreKeyPicker, "");
   populateScoreFolders(state.currentFolderId || "");
   closeScoreFolderPicker();
   clearPendingUrls();
   state.pendingPages = [];
+  state.pendingFilesProcessing = false;
   renderPending();
   updateSaveState();
   if (showMessage) {
@@ -7354,7 +9509,11 @@ function resetForm(showMessage = true) {
 }
 
 function updateSaveState() {
-  elements.saveButton.disabled = !elements.scoreName.value.trim() || !state.pendingPages.length;
+  elements.saveButton.disabled =
+    operationLocks.has("saveScore") ||
+    state.pendingFilesProcessing ||
+    !elements.scoreName.value.trim() ||
+    !state.pendingPages.length;
 }
 
 function hasDuplicateScoreName(name, excludeScoreId = "") {
@@ -7404,6 +9563,10 @@ function getScoreSort() {
     : SCORE_SORT_RECENT_ADDED;
 }
 
+function getEffectiveLibrarySort(filter = getLibraryFilter()) {
+  return filter === LIBRARY_FILTER_RECENT ? SCORE_SORT_RECENT_OPENED : getScoreSort();
+}
+
 function setScoreSort(sortMode) {
   const nextSort = [SCORE_SORT_RECENT_OPENED, SCORE_SORT_RECENT_ADDED, SCORE_SORT_NAME].includes(sortMode)
     ? sortMode
@@ -7419,7 +9582,7 @@ function setScoreSort(sortMode) {
 
 function updateLibraryFilterUi() {
   const activeFilter = getLibraryFilter();
-  const sortMode = getScoreSort();
+  const sortMode = getEffectiveLibrarySort(activeFilter);
   elements.libraryFilterButtons?.forEach((button) => {
     const selected = button.dataset.libraryFilter === activeFilter;
     button.classList.toggle("is-active", selected);
@@ -7480,17 +9643,19 @@ function renderScores() {
     return;
   }
 
+  const activeScores = state.scores.filter((score) => !score.deletedAt);
+  const activeFolders = state.folders.filter((folder) => !folder.deletedAt);
   const query = elements.searchInput.value.trim();
   const normalizedQuery = normalizeText(query);
   const currentFolder = getCurrentFolder();
   const inFolder = Boolean(currentFolder);
   const currentFolderId = inFolder ? currentFolder.id : null;
   const activeFilter = getLibraryFilter();
-  const sortMode = getScoreSort();
-  const visibleScores = state.scores.filter((score) => (score.folderId || null) === currentFolderId);
-  const visibleFolders = inFolder ? [] : state.folders;
+  const sortMode = getEffectiveLibrarySort(activeFilter);
+  const visibleScores = activeScores.filter((score) => (score.folderId || null) === currentFolderId);
+  const visibleFolders = inFolder ? [] : activeFolders;
   const globalScoreSearch = !inFolder && (Boolean(normalizedQuery) || activeFilter !== LIBRARY_FILTER_ALL);
-  const scoreSource = globalScoreSearch ? state.scores : visibleScores;
+  const scoreSource = globalScoreSearch ? activeScores : visibleScores;
   const folderSource = activeFilter === LIBRARY_FILTER_ALL ? visibleFolders : [];
   const filteredScores = sortScoresForLibrary(
     filterScoresByLibraryFilter(scoreSource, activeFilter).filter((score) => scoreMatchesQuery(score, normalizedQuery)),
@@ -7565,7 +9730,7 @@ function getCurrentFolder() {
     return null;
   }
 
-  return state.folders.find((folder) => folder.id === state.currentFolderId) || null;
+  return state.folders.find((folder) => !folder.deletedAt && folder.id === state.currentFolderId) || null;
 }
 
 function openFolder(id) {
@@ -7584,21 +9749,11 @@ function openFolder(id) {
 }
 
 function pushFolderHistory(id) {
-  try {
-    window.history.pushState({ folder: id }, "");
-    state.folderHistoryActive = true;
-  } catch (error) {
-    console.warn(error);
-    state.folderHistoryActive = false;
-  }
+  // 进入文件夹仅标记状态（不再写浏览器历史，返回由边缘手势 / 返回键驱动）。
+  state.folderHistoryActive = true;
 }
 
-function openRootFolder(options = {}) {
-  if (!options.fromHistory && state.currentFolderId && state.folderHistoryActive) {
-    window.history.back();
-    return;
-  }
-
+function openRootFolder() {
   state.currentFolderId = null;
   state.folderHistoryActive = false;
   elements.searchInput.value = "";
@@ -7668,8 +9823,13 @@ function createScoreCard(score) {
     const image = document.createElement("img");
     image.draggable = false;
     image.alt = `《${score.name}》第 1 页`;
-    bindScorePageImage(image, firstPage);
+    bindScoreThumbnailImage(image, firstPage);
     previewButton.append(image);
+  } else {
+    const placeholder = document.createElement("span");
+    placeholder.className = "score-preview-placeholder";
+    placeholder.append(createIcon("music-2"));
+    previewButton.append(placeholder);
   }
   if (score.favorite) {
     const favoriteMark = document.createElement("span");
@@ -8014,38 +10174,53 @@ async function saveSetlist(event) {
   elements.saveSetlistButton.disabled = true;
   setSetlistDialogStatus("正在保存...");
 
+  beginUserWrite();
   try {
     await putSetlistWithItems(setlist, items, deletedItems);
     closeSetlistDialog();
     await loadScores();
     setStatus(`《${setlist.name}》歌单已保存。`);
-    queueSync();
+    // 只要存在 session 就入队 outbox（queueSetlistCloudSync 内已按 session 判断，不依赖 cloudReady）。
+    queueSetlistCloudSync(setlistId);
   } catch (error) {
     console.error(error);
     setSetlistDialogStatus(error.message || "保存歌单失败，请稍后再试。", true);
   } finally {
     elements.saveSetlistButton.disabled = false;
+    endUserWrite();
   }
 }
 
 async function deleteSetlist(id) {
+  if (!ensureAppReady()) {
+    return;
+  }
+
   const setlist = state.setlists.find((item) => item.id === id);
   if (!setlist) {
     return;
   }
 
   const itemCount = getSetlistItems(id).length;
+  const reopenEditorOnCancel = Boolean(elements.setlistDialog?.open);
+  if (reopenEditorOnCancel) {
+    closeSetlistDialog();
+  }
   const confirmed = await requestDeleteConfirmation({
     title: "删除歌单？",
     message: `确定删除《${setlist.name}》歌单吗？其中 ${itemCount} 首歌谱不会被删除。`,
   });
   if (!confirmed) {
+    if (reopenEditorOnCancel && state.setlists.some((item) => item.id === id)) {
+      openSetlistDialog(id);
+    }
     return;
   }
 
   elements.deleteSetlistButton.disabled = true;
   setSetlistDialogStatus("正在删除...");
 
+  beginUserWrite();
   try {
     const deletedAt = new Date().toISOString();
     const userId = setlist.userId || state.session?.user?.id || null;
@@ -8069,22 +10244,25 @@ async function deleteSetlist(id) {
           syncStatus: SYNC_STATUS_PENDING,
         })),
       );
-      queueSync();
+      queueSetlistCloudSync(id);
     } else {
       await deleteSetlistRecord(id);
     }
 
     if (state.currentViewerSetlistId === id && elements.viewerDialog.open) {
-      closeViewer();
+      closeViewerUI();
     }
     closeSetlistDialog();
-    await loadScores();
+    state.setlists = state.setlists.filter((item) => item.id !== id);
+    state.setlistItems = state.setlistItems.filter((item) => item.setlistId !== id);
+    renderSetlists();
     setStatus(`《${setlist.name}》歌单已删除。`);
   } catch (error) {
     console.error(error);
     setSetlistDialogStatus("删除歌单失败，请稍后再试。", true);
   } finally {
     elements.deleteSetlistButton.disabled = false;
+    endUserWrite();
   }
 }
 
@@ -8092,6 +10270,152 @@ function setSetlistDialogStatus(message, isError = false) {
   elements.setlistDialogState.textContent = message || "";
   elements.setlistDialogState.hidden = !message;
   elements.setlistDialogState.classList.toggle("is-error", Boolean(isError));
+}
+
+function getBulkDeleteScoresForCurrentView() {
+  const activeScores = state.scores.filter((score) => !score.deletedAt);
+  const query = elements.searchInput.value.trim();
+  const normalizedQuery = normalizeText(query);
+  const currentFolder = getCurrentFolder();
+  const inFolder = Boolean(currentFolder);
+  const currentFolderId = inFolder ? currentFolder.id : null;
+  const activeFilter = getLibraryFilter();
+  const sortMode = getScoreSort();
+  const visibleScores = activeScores.filter((score) => (score.folderId || null) === currentFolderId);
+  const globalScoreSearch = !inFolder && (Boolean(normalizedQuery) || activeFilter !== LIBRARY_FILTER_ALL);
+  const scoreSource = globalScoreSearch ? activeScores : visibleScores;
+
+  return sortScoresForLibrary(
+    filterScoresByLibraryFilter(scoreSource, activeFilter).filter((score) => scoreMatchesQuery(score, normalizedQuery)),
+    sortMode,
+  );
+}
+
+function openBulkDeleteDialog() {
+  if (!ensureAppReady()) {
+    return;
+  }
+  if (operationLocks.has("deleteScores")) {
+    setStatus("删除正在进行，请稍候。", true);
+    return;
+  }
+
+  const scores = getBulkDeleteScoresForCurrentView();
+  if (!scores.length) {
+    setStatus("当前列表没有可以批量删除的歌谱。", true);
+    return;
+  }
+
+  state.bulkDeleteViewScores = scores;
+  state.bulkDeleteSelectedIds = new Set();
+  state.bulkDeleting = false;
+  renderBulkDeleteList();
+
+  openDialogSafely(elements.bulkDeleteDialog);
+
+  refreshIcons();
+}
+
+function closeBulkDeleteDialog() {
+  if (state.bulkDeleting) {
+    return;
+  }
+
+  state.bulkDeleteSelectedIds.clear();
+  state.bulkDeleteViewScores = [];
+  closeDialogSafely(elements.bulkDeleteDialog);
+}
+
+function renderBulkDeleteList() {
+  elements.bulkDeleteList.replaceChildren();
+  elements.bulkDeleteState.classList.remove("is-error");
+  state.bulkDeleteViewScores.forEach((score) => {
+    const label = document.createElement("label");
+    label.className = "bulk-delete-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = score.id;
+    checkbox.checked = state.bulkDeleteSelectedIds.has(score.id);
+
+    const text = document.createElement("span");
+    text.className = "bulk-delete-row-text";
+    const title = document.createElement("strong");
+    title.textContent = score.name;
+    const detail = document.createElement("small");
+    detail.textContent = [`${score.pages.length} 页`, score.keySignature].filter(Boolean).join(" · ");
+    text.append(title, detail);
+
+    label.append(checkbox, text);
+    elements.bulkDeleteList.append(label);
+  });
+
+  updateBulkDeleteDialogState();
+}
+
+function updateBulkDeleteDialogState() {
+  const total = state.bulkDeleteViewScores.length;
+  const selected = state.bulkDeleteSelectedIds.size;
+  elements.bulkDeleteSelectAll.checked = Boolean(total && selected === total);
+  elements.bulkDeleteSelectAll.indeterminate = Boolean(selected && selected < total);
+  elements.confirmBulkDeleteButton.disabled = state.bulkDeleting || operationLocks.has("deleteScores") || selected === 0;
+  elements.bulkDeleteState.textContent = state.bulkDeleting
+    ? "正在删除所选歌谱..."
+    : selected
+      ? `已选择 ${selected} / ${total} 份歌谱。`
+      : `当前列表共有 ${total} 份歌谱，请选择要删除的歌谱。`;
+}
+
+function handleBulkDeleteSelectAllChange() {
+  if (elements.bulkDeleteSelectAll.checked) {
+    state.bulkDeleteSelectedIds = new Set(state.bulkDeleteViewScores.map((score) => score.id));
+  } else {
+    state.bulkDeleteSelectedIds.clear();
+  }
+  renderBulkDeleteList();
+}
+
+function handleBulkDeleteSelectionChange(event) {
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  if (!input || input.type !== "checkbox") {
+    return;
+  }
+
+  if (input.checked) {
+    state.bulkDeleteSelectedIds.add(input.value);
+  } else {
+    state.bulkDeleteSelectedIds.delete(input.value);
+  }
+  updateBulkDeleteDialogState();
+}
+
+async function confirmBulkDelete() {
+  if (state.bulkDeleting || !ensureAppReady()) {
+    return;
+  }
+
+  const selectedIds = new Set(state.bulkDeleteSelectedIds);
+  const scores = state.bulkDeleteViewScores.filter((score) => selectedIds.has(score.id));
+  if (!scores.length) {
+    updateBulkDeleteDialogState();
+    return;
+  }
+
+  state.bulkDeleting = true;
+  updateBulkDeleteDialogState();
+  const success = await deleteScoresStable(
+    scores.map((score) => score.id),
+    { skipConfirm: true },
+  );
+  state.bulkDeleting = false;
+
+  if (success) {
+    closeBulkDeleteDialog();
+  } else {
+    updateBulkDeleteDialogState();
+    elements.bulkDeleteState.textContent = "批量删除未完成，请根据页面提示重试。";
+    elements.bulkDeleteState.classList.add("is-error");
+  }
 }
 
 function formatSetlistDate(date) {
@@ -8169,10 +10493,7 @@ function openViewer(id) {
 
   document.body.classList.add("viewer-open");
 
-  if (!state.viewerHistoryActive) {
-    window.history.pushState({ viewer: id }, "");
-    state.viewerHistoryActive = true;
-  }
+  state.viewerHistoryActive = true;
 
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ left: 0, top: 0 });
@@ -8212,10 +10533,7 @@ function openSetlistViewer(id) {
 
   document.body.classList.add("viewer-open");
 
-  if (!state.viewerHistoryActive) {
-    window.history.pushState({ setlistViewer: id }, "");
-    state.viewerHistoryActive = true;
-  }
+  state.viewerHistoryActive = true;
 
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ left: 0, top: 0 });
@@ -8223,8 +10541,8 @@ function openSetlistViewer(id) {
   });
 }
 
-function closeViewer(options = {}) {
-  const shouldReturnHistory = state.viewerHistoryActive && !options.fromHistory;
+// 纯 UI 收起查看器（不操作历史；历史后退由 popstate 统一驱动）。
+function closeViewerUI() {
   const shouldRenderLibrary = state.libraryRenderQueued;
   state.viewerHistoryActive = false;
   state.currentViewerScoreId = null;
@@ -8245,10 +10563,6 @@ function closeViewer(options = {}) {
   resetViewerGestureState();
   setViewerZoom(VIEWER_MIN_ZOOM);
 
-  if (shouldReturnHistory) {
-    window.history.back();
-  }
-
   if (shouldRenderLibrary && state.activeTab === "library") {
     renderScores();
   }
@@ -8262,6 +10576,21 @@ function setViewerKeySignature(value) {
   const keySignature = String(value || "").trim();
   elements.viewerKeySignature.textContent = keySignature ? `调号 ${keySignature}` : "";
   elements.viewerKeySignature.hidden = !keySignature;
+}
+
+// 根据当前所在页（在歌单连续查看时可能属于不同歌谱）更新顶部调号显示。
+function updateViewerKeySignatureForIndex(currentIndex) {
+  const pages = state.currentViewerPages;
+  if (!pages || !pages.length) {
+    return;
+  }
+  const page = pages[clamp(Number(currentIndex) || 0, 0, pages.length - 1)];
+  const scoreId = page?.scoreId;
+  if (!scoreId) {
+    return;
+  }
+  const score = state.scores.find((item) => item.id === scoreId);
+  setViewerKeySignature(score?.keySignature || "");
 }
 
 function setViewerFavoriteButton(score) {
@@ -8323,8 +10652,9 @@ async function toggleScoreFavorite(scoreId) {
     syncStatus: (latestScore.userId || state.session?.user?.id) ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   }));
 
-  if (userId && state.cloudReady) {
-    queueSync();
+  // 收藏属于歌谱编辑：只要有 session 就入队 outbox，离线/未连接也会在恢复后同步。
+  if (userId || state.session) {
+    queueScoreCloudUpload(scoreId);
   }
 }
 
@@ -8466,7 +10796,19 @@ function updateViewerPageIndicator() {
     }
   }
 
+  // 滚动到末端时直接判定为最后一页：当最后一页图片较矮时，仅靠上述阈值无法选中它，
+  // 会卡在“倒数第二页”，导致末页页码和调号都显示不出来。
+  const container = elements.viewerPages;
+  const reachedEnd = horizontal
+    ? container.scrollLeft + container.clientWidth >= container.scrollWidth - 2
+    : container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+  if (reachedEnd) {
+    currentIndex = pages.length - 1;
+  }
+
   setViewerPageIndicator(currentIndex + 1, pages.length);
+  updateViewerKeySignatureForIndex(currentIndex);
+  preloadViewerNeighbors(currentIndex);
 }
 
 async function toggleViewerPerformanceMode() {
@@ -8601,51 +10943,144 @@ async function prepareSetlistViewerPages(setlistId) {
   }
 }
 
-async function deleteScore(id) {
-  const score = state.scores.find((item) => item.id === id);
-  if (!score) {
+function removeScoresFromMemory(scores) {
+  const scoreIds = new Set(scores.filter(Boolean).map((score) => score.id));
+  if (!scoreIds.size) {
     return;
   }
 
-  const confirmed = await requestDeleteConfirmation(score);
-  if (!confirmed) {
-    return;
-  }
-
-  try {
-    const deletedAt = new Date().toISOString();
-    let cloudDeleteQueued = false;
-    if (state.cloudReady && state.session && score.userId === state.session.user.id) {
-      try {
-        await deleteCloudScore(score, deletedAt);
-      } catch (error) {
-        cloudDeleteQueued = shouldKeepDeleteTombstone(score);
-        if (!cloudDeleteQueued) {
-          throw error;
-        }
-        console.warn(error);
-      }
-    } else {
-      cloudDeleteQueued = shouldKeepDeleteTombstone(score);
-    }
-
-    if (cloudDeleteQueued) {
-      await markScoreDeletedRecord(score, deletedAt);
-    } else {
-      await deleteScoreRecord(id);
-    }
-    revokeScoreUrls(score);
-    state.scores = state.scores.filter((item) => item.id !== id);
-    closeViewer();
-    renderScores();
-    setStatus(cloudDeleteQueued ? `已删除《${score.name}》，下次刷新时会同步到云端。` : `已删除《${score.name}》。`);
-  } catch (error) {
-    console.error(error);
-    setStatus("删除失败，请稍后再试。", true);
+  scores.forEach(revokeScoreUrls);
+  state.scores = state.scores.filter((score) => !scoreIds.has(score.id));
+  state.scorePages = state.scorePages.filter((page) => !scoreIds.has(page.scoreId));
+  state.setlistItems = state.setlistItems.filter((item) => !scoreIds.has(item.scoreId));
+  if (state.currentViewerScoreId && scoreIds.has(state.currentViewerScoreId)) {
+    closeViewerUI();
   }
 }
 
+function queueDeleteSyncForScores(scores, deletedAt) {
+  const targets = scores.filter((score) => shouldKeepDeleteTombstone(score));
+  if (!targets.length) {
+    return;
+  }
+
+  // 把云端删除入队到发件箱：携带必要的快照（页 id / storagePath 等），因为本地记录此时已被移除。
+  targets.forEach((score) => {
+    const pages = (score.pages && score.pages.length
+      ? score.pages
+      : state.scorePages.filter((page) => page.scoreId === score.id)
+    ).map(({ blob, ...rest }) => rest);
+    enqueueOutboxTask("score.delete", {
+      entityId: score.id,
+      supersedeUpsert: true,
+      payload: { score: { ...toScoreRecord(score), pages }, deletedAt },
+    }).catch((error) => console.warn(error));
+  });
+  kickOutbox(0);
+}
+
+function queueDeleteSyncForFolder(folder, folderScores, deletedAt) {
+  if (!shouldKeepDeleteTombstone(folder)) {
+    return;
+  }
+  const scores = (folderScores || []).map((score) => {
+    const pages = (score.pages && score.pages.length
+      ? score.pages
+      : state.scorePages.filter((page) => page.scoreId === score.id)
+    ).map(({ blob, ...rest }) => rest);
+    return { ...toScoreRecord(score), pages };
+  });
+  enqueueOutboxTask("folder.delete", {
+    entityId: folder.id,
+    payload: { folder: { ...folder }, folderScores: scores, deletedAt },
+  }).catch((error) => console.warn(error));
+  kickOutbox(0);
+}
+
+async function deleteScoresStable(scoreIds, options = {}) {
+  if (!ensureAppReady()) {
+    return false;
+  }
+
+  const ids = Array.from(new Set((scoreIds || []).filter(Boolean).map(String)));
+  const targets = ids
+    .map((id) => state.scores.find((score) => score.id === id))
+    .filter(Boolean);
+
+  if (!targets.length) {
+    return false;
+  }
+
+  // 用户确认放在操作锁之外：等待确认期间不持有锁，避免弹窗未响应时锁被永久占用、
+  // 进而导致之后所有删除“点了没反应”。
+  if (!options.skipConfirm) {
+    const confirmed =
+      targets.length === 1
+        ? await requestDeleteConfirmation(targets[0])
+        : await requestDeleteConfirmation({
+            title: "删除歌谱？",
+            message: `确定删除 ${targets.length} 份歌谱吗？删除后无法恢复。`,
+          });
+    if (!confirmed) {
+      return false;
+    }
+  }
+
+  return withOperationLock("deleteScores", async () => {
+    beginUserWrite();
+    try {
+    const deletedAt = new Date().toISOString();
+    const cloudDeleteQueued = targets.some((score) => shouldKeepDeleteTombstone(score));
+
+    setStatus("正在从本机删除...");
+    // 删除前先把完整副本存入回收站，便于恢复（失败不阻断删除本身）。
+    try {
+      await snapshotScoresToTrash(targets);
+    } catch (snapshotError) {
+      console.warn("写入回收站失败", snapshotError);
+    }
+    await deleteScoresLocalAtomic(ids, { scores: targets, deletedAt });
+    removeScoresFromMemory(targets);
+
+    let rendered = true;
+    try {
+      renderScores();
+      renderSetlists();
+    } catch (renderError) {
+      rendered = false;
+      console.error(renderError);
+      setStatus("数据已删除，但页面刷新失败，请手动刷新。", true);
+    }
+
+    queueDeleteSyncForScores(targets, deletedAt);
+    if (rendered) {
+      setStatus(cloudDeleteQueued ? `已删除 ${targets.length} 份歌谱，稍后同步云端。` : `已删除 ${targets.length} 份歌谱。`);
+    }
+    return true;
+    } finally {
+      endUserWrite();
+    }
+  }, { timeoutMs: Math.max(OPERATION_LOCK_TIMEOUT, ids.length * 5000) }).catch(async (error) => {
+    logStorageOperationError(error, "删除", {
+      scoreIds: ids,
+      pagesLength: state.scorePages.filter((page) => ids.includes(page.scoreId)).length,
+    });
+    // 删除超时/中断时连接可能已卡死，重连数据库，保证用户重试以及后续保存能恢复。
+    await recoverDatabaseIfWedged(error);
+    setStatus(error.message === "当前操作正在进行，请稍候。" ? error.message : getStorageErrorMessage(error, "删除"), true);
+    return false;
+  });
+}
+
+async function deleteScore(id) {
+  await deleteScoresStable([id]);
+}
+
 async function deleteFolder(id) {
+  if (!ensureAppReady()) {
+    return;
+  }
+
   const folder = state.folders.find((item) => item.id === id);
   if (!folder) {
     return;
@@ -8660,21 +11095,18 @@ async function deleteFolder(id) {
     return;
   }
 
+  beginUserWrite();
   try {
     const deletedAt = new Date().toISOString();
-    let cloudDeleteQueued = false;
-    if (state.cloudReady && state.session && folder.userId === state.session.user.id) {
+    const cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
+
+    // 文件夹内的歌谱也先快照到回收站，便于单独恢复。
+    if (folderScores.length) {
       try {
-        await deleteCloudFolder(folder, folderScores, deletedAt);
-      } catch (error) {
-        cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
-        if (!cloudDeleteQueued) {
-          throw error;
-        }
-        console.warn(error);
+        await snapshotScoresToTrash(folderScores);
+      } catch (snapshotError) {
+        console.warn("写入回收站失败", snapshotError);
       }
-    } else {
-      cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
     }
 
     if (cloudDeleteQueued) {
@@ -8690,18 +11122,26 @@ async function deleteFolder(id) {
     state.scores = state.scores.filter((score) => score.folderId !== id);
     const folderScoreIds = new Set(folderScores.map((score) => score.id));
     state.scorePages = state.scorePages.filter((page) => !folderScoreIds.has(page.scoreId));
+    state.setlistItems = state.setlistItems.filter((item) => !folderScoreIds.has(item.scoreId));
     if (state.currentFolderId === id) {
       state.currentFolderId = null;
     }
     renderScores();
+    renderSetlists();
+    if (cloudDeleteQueued) {
+      queueDeleteSyncForFolder(folder, folderScores, deletedAt);
+    }
     setStatus(
       cloudDeleteQueued
-        ? `已删除《${folder.name}》文件夹，下次刷新时会同步到云端。`
+        ? `已删除《${folder.name}》文件夹，正在后台同步到云端。`
         : `已删除《${folder.name}》文件夹。`,
     );
   } catch (error) {
     console.error(error);
-    setStatus("删除文件夹失败，请稍后再试。", true);
+    await recoverDatabaseIfWedged(error);
+    setStatus(getErrorMessage(error) || "删除文件夹失败，请稍后再试。", true);
+  } finally {
+    endUserWrite();
   }
 }
 
@@ -8776,6 +11216,11 @@ async function cleanupCloudFilesAfterDelete(paths, userId) {
 }
 
 function requestDeleteConfirmation(target) {
+  if (state.deleteDialogResolve) {
+    state.deleteDialogResolve(false);
+    state.deleteDialogResolve = null;
+  }
+
   const title = target.title || "删除歌谱？";
   const message = target.message || `确定删除《${target.name}》吗？删除后无法恢复。`;
   if (elements.deleteDialogTitle) {
@@ -8787,22 +11232,18 @@ function requestDeleteConfirmation(target) {
   return new Promise((resolve) => {
     state.deleteDialogResolve = resolve;
 
-    if (typeof elements.deleteDialog.showModal === "function") {
-      elements.deleteDialog.showModal();
-    } else {
-      elements.deleteDialog.setAttribute("open", "");
-    }
+    openDialogSafely(elements.deleteDialog);
 
-    elements.cancelDeleteButton.focus();
+    try {
+      elements.cancelDeleteButton?.focus({ preventScroll: true });
+    } catch (error) {
+      console.warn(error);
+    }
   });
 }
 
 function closeDeleteDialog(confirmed) {
-  if (elements.deleteDialog.open) {
-    elements.deleteDialog.close();
-  } else {
-    elements.deleteDialog.removeAttribute("open");
-  }
+  closeDialogSafely(elements.deleteDialog);
 
   if (state.deleteDialogResolve) {
     state.deleteDialogResolve(confirmed);
@@ -8826,7 +11267,17 @@ function renderViewerPages(score) {
     const image = document.createElement("img");
     image.draggable = false;
     image.decoding = "async";
-    image.loading = "eager";
+    // 首页立即加载，其余页懒加载，避免一次性解码所有大图。未加载前给页面预留高度
+    // （is-page-pending），防止竖向多页布局塌陷、滚动错乱；加载完成即恢复自然高度。
+    if (index === 0) {
+      image.loading = "eager";
+    } else {
+      image.loading = "lazy";
+      figure.classList.add("is-page-pending");
+      const clearPending = () => figure.classList.remove("is-page-pending");
+      image.addEventListener("load", clearPending, { once: true });
+      image.addEventListener("error", clearPending, { once: true });
+    }
     image.alt = `《${score.name}》第 ${index + 1} 页`;
 
     const imageFrame = document.createElement("div");
@@ -8839,7 +11290,28 @@ function renderViewerPages(score) {
   });
   setViewerPageIndicator(1, pages.length || 1);
   scheduleViewerPageIndicatorUpdate();
+  preloadViewerNeighbors(0);
   prioritizeScorePageDisplay(pages);
+}
+
+// 预加载当前页及其相邻页（下一页/上一页）：提前解码，使翻页时立即显示，不必等待懒加载。
+function preloadViewerNeighbors(currentIndex) {
+  const images = elements.viewerPages?.querySelectorAll(".viewer-page img");
+  if (!images || !images.length) {
+    return;
+  }
+  const base = Number(currentIndex) || 0;
+  [base, base + 1, base + 2, base - 1].forEach((index) => {
+    const image = images[index];
+    if (!image) {
+      return;
+    }
+    // 取消懒加载延迟并触发解码，确保相邻页提前就绪。
+    image.loading = "eager";
+    if (typeof image.decode === "function") {
+      image.decode().catch(() => {});
+    }
+  });
 }
 
 function getLatestScorePages(scoreId, fallbackPages = []) {
@@ -9037,6 +11509,145 @@ function bindScorePageImage(image, page, options = {}) {
   if (options.hydrate !== false) {
     scheduleScorePageHydration(page);
   }
+}
+
+// 列表缩略图绑定：列表只显示小缩略图而非整张原图，降低解码和内存开销、滚动更顺。
+// 仅对本地有 blob 的页生成缩略图；云端页仍走原有的临时链接/水合逻辑。
+function bindScoreThumbnailImage(image, page) {
+  if (!image || !page?.id) {
+    return;
+  }
+
+  image.dataset.pageId = page.id;
+  image.dataset.thumb = "1";
+  image.loading = "lazy";
+  image.decoding = "async";
+  bindScoreImageRecovery(image, page.id);
+
+  const thumbUrl = state.pageThumbUrls.get(page.id);
+  if (thumbUrl) {
+    image.src = thumbUrl;
+    image.classList.remove("is-score-placeholder");
+    return;
+  }
+
+  // 先显示占位/已有原图链接，再在卡片进入视口时按需生成缩略图。
+  updateScorePageImageSource(image, page);
+  if (page.blob && page.blob.size > 0) {
+    observeThumbnailTarget(image);
+  } else {
+    scheduleScorePageHydration(page);
+  }
+}
+
+function observeThumbnailTarget(image) {
+  if (!("IntersectionObserver" in window)) {
+    // 不支持时直接生成（少量设备）。
+    const pageId = image.dataset.pageId;
+    const page = getLatestPageRecord(pageId);
+    if (page) {
+      ensureThumbnailUrl(page);
+    }
+    return;
+  }
+
+  if (!state.thumbObserver) {
+    state.thumbObserver = new IntersectionObserver(
+      (entries, observer) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) {
+            return;
+          }
+          observer.unobserve(entry.target);
+          const page = getLatestPageRecord(entry.target.dataset.pageId);
+          if (page) {
+            ensureThumbnailUrl(page);
+          }
+        });
+      },
+      { rootMargin: "200px" },
+    );
+  }
+  state.thumbObserver.observe(image);
+}
+
+async function ensureThumbnailUrl(page) {
+  if (!page?.id || !page.blob || page.blob.size === 0) {
+    return "";
+  }
+  if (state.pageThumbUrls.has(page.id)) {
+    return state.pageThumbUrls.get(page.id);
+  }
+  if (state.pageThumbRequests.has(page.id)) {
+    return state.pageThumbRequests.get(page.id);
+  }
+
+  const request = createThumbnailBlob(page.blob)
+    .then((thumbBlob) => {
+      if (!thumbBlob) {
+        return "";
+      }
+      const url = URL.createObjectURL(thumbBlob);
+      state.pageThumbUrls.set(page.id, url);
+      refreshGridThumbnailImages(page.id, url);
+      return url;
+    })
+    .catch((error) => {
+      console.warn("缩略图生成失败", error);
+      return "";
+    })
+    .finally(() => {
+      state.pageThumbRequests.delete(page.id);
+    });
+  state.pageThumbRequests.set(page.id, request);
+  return request;
+}
+
+async function createThumbnailBlob(blob) {
+  let source = null;
+  try {
+    source = await loadImageSource(blob);
+    const scale = Math.min(1, THUMBNAIL_MAX_EDGE / Math.max(source.width, source.height));
+    const width = Math.max(1, Math.round(source.width * scale));
+    const height = Math.max(1, Math.round(source.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(source.image, 0, 0, width, height);
+    source.close?.();
+    source = null;
+
+    const webp = await canvasToBlob(canvas, "image/webp", THUMBNAIL_QUALITY);
+    if (webp) {
+      return webp;
+    }
+    return await canvasToBlob(canvas, "image/jpeg", THUMBNAIL_QUALITY);
+  } catch (error) {
+    console.warn("缩略图绘制失败", error);
+    return null;
+  } finally {
+    source?.close?.();
+  }
+}
+
+function refreshGridThumbnailImages(pageId, url) {
+  if (!elements.scoreGrid || !url) {
+    return;
+  }
+  elements.scoreGrid.querySelectorAll(`img[data-thumb][data-page-id="${cssEscape(pageId)}"]`).forEach((image) => {
+    image.src = url;
+    image.classList.remove("is-score-placeholder");
+  });
+}
+
+function cssEscape(value) {
+  if (window.CSS && typeof window.CSS.escape === "function") {
+    return window.CSS.escape(value);
+  }
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 function updateScorePageImageSource(image, page) {
@@ -9396,6 +12007,12 @@ function revokeScoreUrlForPage(pageId) {
     URL.revokeObjectURL(url);
     state.scoreUrls.delete(pageId);
   }
+  const thumbUrl = state.pageThumbUrls.get(pageId);
+  if (thumbUrl) {
+    URL.revokeObjectURL(thumbUrl);
+    state.pageThumbUrls.delete(pageId);
+  }
+  state.pageThumbRequests.delete(pageId);
   state.pageTempUrlRequests.delete(pageId);
 }
 
@@ -9415,6 +12032,9 @@ function clearPendingUrls() {
 function revokeAllUrls() {
   state.scoreUrls.forEach((url) => URL.revokeObjectURL(url));
   state.scoreUrls.clear();
+  state.pageThumbUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.pageThumbUrls.clear();
+  state.pageThumbRequests.clear();
   state.pageTempUrls.clear();
   state.pageTempUrlRequests.clear();
   clearPendingUrls();

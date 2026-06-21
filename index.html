@@ -6,34 +6,37 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#f7f5ef" />
+    <meta name="theme-color" content="#fffdf8" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="我的谱夹" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>我的谱夹</title>
-    <link rel="manifest" href="manifest.webmanifest?v=66" />
-    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=47" />
-    <link rel="apple-touch-icon" href="icons/icon-192.png?v=47" />
+    <link rel="manifest" href="manifest.webmanifest?v=70" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=49" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png?v=49" />
     <script>
       try {
         if (localStorage.getItem("my-score-folder-theme") === "dark") {
           document.documentElement.dataset.theme = "dark";
+          document.documentElement.style.setProperty("--safe-area-bg", "#11110f");
+          document.documentElement.style.backgroundColor = "#11110f";
           document.querySelector('meta[name="theme-color"]')?.setAttribute("content", "#11110f");
+          document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", "default");
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=102" />
+    <link rel="stylesheet" href="styles.css?v=147" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=100"></script>
+    <script defer charset="UTF-8" src="app.js?v=147"></script>
   </head>
-  <body>
+  <body class="app-booting">
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-lockup">
           <span class="brand-mark" aria-hidden="true">
-            <img src="icons/icon-192.png?v=47" alt="" />
+            <img src="icons/icon-192.png?v=49" alt="" />
           </span>
           <div>
             <h1 id="appTitle">我的谱夹</h1>
@@ -46,6 +49,9 @@
           </button>
           <button class="icon-button topbar-action-button" id="importShareButton" type="button" title="输入同步码" aria-label="输入同步码">
             <i data-lucide="key-round" aria-hidden="true"></i>
+          </button>
+          <button class="icon-button topbar-action-button topbar-bulk-delete-button bulk-delete-trigger" id="topbarBulkDeleteButton" type="button" title="批量删除歌谱" aria-label="批量删除歌谱">
+            <i data-lucide="trash-2" aria-hidden="true"></i>
           </button>
           <button class="install-button" id="installAppButton" type="button" hidden>
             <i data-lucide="download" aria-hidden="true"></i>
@@ -73,6 +79,10 @@
               </div>
               <p id="resultCount">0 份歌谱</p>
             </div>
+            <button class="library-bulk-delete-button bulk-delete-trigger" id="libraryBulkDeleteButton" type="button" title="批量删除歌谱" aria-label="批量删除歌谱">
+              <i data-lucide="trash-2" aria-hidden="true"></i>
+              <span>批量删除</span>
+            </button>
           </div>
 
           <div class="searchbar">
@@ -132,6 +142,27 @@
               <span>偏好设置</span>
               <i data-lucide="chevron-right" aria-hidden="true"></i>
             </button>
+            <button class="mine-strip-button" id="recycleBinButton" type="button">
+              <span class="mine-strip-icon" aria-hidden="true">
+                <i data-lucide="trash-2"></i>
+              </span>
+              <span>回收站</span>
+              <i data-lucide="chevron-right" aria-hidden="true"></i>
+            </button>
+            <button class="mine-strip-button" id="backupButton" type="button">
+              <span class="mine-strip-icon" aria-hidden="true">
+                <i data-lucide="database-backup"></i>
+              </span>
+              <span>备份与导入</span>
+              <i data-lucide="chevron-right" aria-hidden="true"></i>
+            </button>
+            <button class="mine-strip-button" id="usageGuideButton" type="button">
+              <span class="mine-strip-icon" aria-hidden="true">
+                <i data-lucide="book-open-text"></i>
+              </span>
+              <span>使用说明</span>
+              <i data-lucide="chevron-right" aria-hidden="true"></i>
+            </button>
           </div>
 
           <div class="mine-auth-panel">
@@ -141,6 +172,16 @@
               <span id="myAuthButtonText">登录 / 注册</span>
             </button>
           </div>
+
+          <div class="mine-sync-panel" id="syncOutboxPanel" hidden>
+            <span class="mine-sync-icon" aria-hidden="true">
+              <i data-lucide="refresh-cw"></i>
+            </span>
+            <p class="mine-sync-state" id="syncOutboxState">同步队列已清空。</p>
+            <button class="mine-sync-retry" id="retryOutboxButton" type="button" hidden>立即重试</button>
+          </div>
+
+          <p class="app-version-tag" id="appVersionTag"></p>
         </section>
       </main>
 
@@ -248,6 +289,153 @@
         </div>
       </section>
 
+      <section class="profile-screen usage-screen" id="usageGuideScreen" aria-labelledby="usageGuideTitle" hidden>
+        <div class="profile-page usage-page">
+          <div class="profile-page-head">
+            <button class="icon-button" id="closeUsageGuideButton" type="button" title="返回" aria-label="返回">
+              <i data-lucide="arrow-left" aria-hidden="true"></i>
+            </button>
+            <h2 id="usageGuideTitle">使用说明</h2>
+            <span aria-hidden="true"></span>
+          </div>
+
+          <div class="usage-hero" aria-label="我的谱夹使用引导">
+            <div class="usage-phone-preview" aria-hidden="true">
+              <span class="usage-mini-topbar"></span>
+              <span class="usage-mini-search"></span>
+              <span class="usage-mini-grid">
+                <i></i>
+                <i></i>
+                <i></i>
+              </span>
+              <span class="usage-mini-fab">+</span>
+            </div>
+            <div>
+              <h3>把常用歌谱收进一个随身谱夹</h3>
+              <p>添加、搜索、收藏、歌单和分享都在手机上完成，排练和演出时可以快速打开。</p>
+            </div>
+          </div>
+
+          <div class="usage-guide-list">
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="plus"></i></span>
+              <div>
+                <h3>添加歌谱</h3>
+                <p>在谱夹页点击底部的“添加歌谱”，选择拍照、图库或文件，填写歌谱名后保存。文件夹、调号、备注可以按需要补充。</p>
+                <div class="usage-button-demo" aria-hidden="true"><span>+</span><b>添加歌谱</b></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="search"></i></span>
+              <div>
+                <h3>查找和管理</h3>
+                <p>搜索框可以搜索歌谱名、备注等内容；“最近打开”和“我的收藏”能帮助你快速回到常用歌谱。</p>
+                <div class="usage-filter-demo" aria-hidden="true"><span>全部</span><span>最近打开</span><span>我的收藏</span></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="folder-open"></i></span>
+              <div>
+                <h3>文件夹和更多</h3>
+                <p>用文件夹整理不同课程、乐器或排练项目。歌谱卡片上的“更多”可以编辑信息、移动文件夹、管理页面或删除。</p>
+                <div class="usage-card-demo" aria-hidden="true"><span></span><b>练琴曲目</b><em>12 份歌谱</em></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="music-2"></i></span>
+              <div>
+                <h3>查看歌谱</h3>
+                <p>点击歌谱封面进入查看器。可以双指缩放；偏好设置里可选择上下滑动或左右翻页；演出模式会隐藏多余界面并尽量保持屏幕常亮。</p>
+                <div class="usage-viewer-demo" aria-hidden="true"><span>返回</span><b>2 / 6</b><i>★</i></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="list-music"></i></span>
+              <div>
+                <h3>歌单</h3>
+                <p>在“歌单”页创建排练或演出曲目列表，选择多首歌谱后可以调整顺序，并按歌单顺序连续查看。</p>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="share-2"></i></span>
+              <div>
+                <h3>同步和分享</h3>
+                <p>登录后可跨设备同步。顶部的分享按钮可以选择歌谱生成同步码；其他用户输入同步码即可导入分享内容。</p>
+                <div class="usage-share-demo" aria-hidden="true"><span>分享</span><span>输入同步码</span></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="trash-2"></i></span>
+              <div>
+                <h3>回收站</h3>
+                <p>删除的歌谱不会立刻消失，会先进入“我的”→“回收站”。在那里可以恢复误删的歌谱，确认不再需要时再彻底删除以释放空间。</p>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="database-backup"></i></span>
+              <div>
+                <h3>备份与导入</h3>
+                <p>在“我的”→“备份与导入”里，可以把全部歌谱、文件夹和歌单（含图片）导出为一个备份文件妥善保存；也能选择之前导出的备份文件导入，同名歌谱会自动跳过、不会覆盖现有内容。</p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="profile-screen recycle-bin-screen" id="recycleBinScreen" aria-labelledby="recycleBinTitle" hidden>
+        <div class="profile-page recycle-bin-page">
+          <div class="profile-page-head">
+            <button class="icon-button" id="closeRecycleBinButton" type="button" title="返回" aria-label="返回">
+              <i data-lucide="arrow-left" aria-hidden="true"></i>
+            </button>
+            <h2 id="recycleBinTitle">回收站</h2>
+            <button class="recycle-empty-button" id="emptyRecycleBinButton" type="button">清空</button>
+          </div>
+          <p class="auth-state recycle-bin-state" id="recycleBinState">删除的歌谱会在这里保留，可恢复或彻底删除。</p>
+          <div class="recycle-bin-list" id="recycleBinList" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="profile-screen backup-screen" id="backupScreen" aria-labelledby="backupTitle" hidden>
+        <div class="profile-page backup-page">
+          <div class="profile-page-head">
+            <button class="icon-button" id="closeBackupButton" type="button" title="返回" aria-label="返回">
+              <i data-lucide="arrow-left" aria-hidden="true"></i>
+            </button>
+            <h2 id="backupTitle">备份与导入</h2>
+            <span aria-hidden="true"></span>
+          </div>
+
+          <section class="backup-card">
+            <h3>导出完整备份</h3>
+            <p>把谱夹里的全部歌谱、文件夹和歌单（含图片）导出为一个备份文件，妥善保存可随时恢复。</p>
+            <button class="primary-button backup-action-button" id="exportBackupButton" type="button">
+              <i data-lucide="download" aria-hidden="true"></i>
+              <span>导出备份文件</span>
+            </button>
+          </section>
+
+          <section class="backup-card">
+            <h3>从备份导入</h3>
+            <p>选择之前导出的备份文件，把其中的歌谱导入到当前谱夹。同名歌谱会自动跳过，不会覆盖现有内容。</p>
+            <button class="primary-button backup-action-button" id="importBackupButton" type="button">
+              <i data-lucide="upload" aria-hidden="true"></i>
+              <span>选择备份文件导入</span>
+            </button>
+            <input id="importBackupInput" type="file" accept="application/json,.json" hidden />
+          </section>
+
+          <p class="backup-status" id="backupStatus" role="status" aria-live="polite" hidden></p>
+        </div>
+      </section>
+
       <section class="upload-screen" id="uploadScreen" aria-labelledby="uploadTitle" hidden>
         <form class="upload-tool" id="scoreForm">
           <div class="tool-head">
@@ -278,10 +466,26 @@
               <div class="folder-select-options" id="scoreFolderOptions" role="listbox" hidden></div>
             </div>
           </label>
-          <label class="field upload-meta-field">
-            <span>调号</span>
-            <input id="scoreKey" name="scoreKey" type="text" maxlength="20" autocomplete="off" placeholder="可选，例如 C、G、降B" />
-          </label>
+          <div class="field upload-meta-field">
+            <span class="key-picker-heading">调号<b class="key-picker-preview" data-key-preview data-empty="可选，点下方按钮选择"></b></span>
+            <div class="key-picker" id="scoreKeyPicker" data-key-picker>
+              <div class="key-picker-row key-picker-accidentals" role="group" aria-label="升降">
+                <button type="button" class="key-chip key-chip-accidental" data-key-accidental="#" aria-pressed="false"><span class="key-chip-symbol">♯</span>升</button>
+                <button type="button" class="key-chip key-chip-accidental" data-key-accidental="b" aria-pressed="false"><span class="key-chip-symbol">♭</span>降</button>
+                <button type="button" class="key-chip key-chip-clear" data-key-clear aria-label="清除调号"><i data-lucide="eraser" aria-hidden="true"></i>清除</button>
+              </div>
+              <div class="key-picker-row key-picker-notes" role="group" aria-label="音名">
+                <button type="button" class="key-chip" data-key-note="C" aria-pressed="false">C</button>
+                <button type="button" class="key-chip" data-key-note="D" aria-pressed="false">D</button>
+                <button type="button" class="key-chip" data-key-note="E" aria-pressed="false">E</button>
+                <button type="button" class="key-chip" data-key-note="F" aria-pressed="false">F</button>
+                <button type="button" class="key-chip" data-key-note="G" aria-pressed="false">G</button>
+                <button type="button" class="key-chip" data-key-note="A" aria-pressed="false">A</button>
+                <button type="button" class="key-chip" data-key-note="B" aria-pressed="false">B</button>
+              </div>
+            </div>
+            <input id="scoreKey" name="scoreKey" type="hidden" />
+          </div>
           <label class="field upload-meta-field">
             <span>备注</span>
             <textarea id="scoreNotes" name="scoreNotes" maxlength="200" rows="3" placeholder="可选"></textarea>
@@ -318,7 +522,7 @@
       </section>
 
       <button class="fab-button" id="addScoreButton" type="button" title="添加歌谱" aria-label="添加歌谱">
-        <img class="fab-art" src="assets/add-score-button.png?v=47" alt="" />
+        <img class="fab-art" src="assets/add-score-button.png?v=50" alt="" />
         <span class="fab-fallback">添加歌谱</span>
       </button>
 
@@ -643,10 +847,26 @@
             <div class="folder-select-options" id="scoreEditFolderOptions" role="listbox" hidden></div>
           </div>
         </label>
-        <label class="field score-edit-field score-edit-key-field">
-          <span>调号</span>
-          <input id="scoreEditKey" name="scoreKey" type="text" maxlength="20" autocomplete="off" placeholder="例如 C、G、降B" />
-        </label>
+        <div class="field score-edit-field score-edit-key-field">
+          <span class="key-picker-heading">调号<b class="key-picker-preview" data-key-preview data-empty="点下方按钮选择"></b></span>
+          <div class="key-picker" id="scoreEditKeyPicker" data-key-picker>
+            <div class="key-picker-row key-picker-accidentals" role="group" aria-label="升降">
+              <button type="button" class="key-chip key-chip-accidental" data-key-accidental="#" aria-pressed="false"><span class="key-chip-symbol">♯</span>升</button>
+              <button type="button" class="key-chip key-chip-accidental" data-key-accidental="b" aria-pressed="false"><span class="key-chip-symbol">♭</span>降</button>
+              <button type="button" class="key-chip key-chip-clear" data-key-clear aria-label="清除调号"><i data-lucide="eraser" aria-hidden="true"></i>清除</button>
+            </div>
+            <div class="key-picker-row key-picker-notes" role="group" aria-label="音名">
+              <button type="button" class="key-chip" data-key-note="C" aria-pressed="false">C</button>
+              <button type="button" class="key-chip" data-key-note="D" aria-pressed="false">D</button>
+              <button type="button" class="key-chip" data-key-note="E" aria-pressed="false">E</button>
+              <button type="button" class="key-chip" data-key-note="F" aria-pressed="false">F</button>
+              <button type="button" class="key-chip" data-key-note="G" aria-pressed="false">G</button>
+              <button type="button" class="key-chip" data-key-note="A" aria-pressed="false">A</button>
+              <button type="button" class="key-chip" data-key-note="B" aria-pressed="false">B</button>
+            </div>
+          </div>
+          <input id="scoreEditKey" name="scoreKey" type="hidden" />
+        </div>
         <label class="field score-edit-field score-edit-notes-field">
           <span>备注</span>
           <textarea id="scoreEditNotes" name="scoreNotes" maxlength="200" rows="3" placeholder="可填写备注"></textarea>
@@ -774,6 +994,34 @@
           </div>
         </div>
         <div class="viewer-pages" id="viewerPages"></div>
+      </div>
+    </dialog>
+
+    <dialog class="auth-dialog bulk-delete-dialog" id="bulkDeleteDialog" aria-labelledby="bulkDeleteTitle">
+      <div class="auth-surface bulk-delete-surface">
+        <div class="auth-head">
+          <h2 id="bulkDeleteTitle">批量删除歌谱</h2>
+          <button class="icon-button" id="closeBulkDeleteButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+
+        <p class="auth-state" id="bulkDeleteState">选择要删除的歌谱，删除后会在后台同步到云端。</p>
+
+        <label class="bulk-delete-select-all">
+          <input id="bulkDeleteSelectAll" type="checkbox" />
+          <span>全选当前列表</span>
+        </label>
+
+        <div class="bulk-delete-list" id="bulkDeleteList" aria-live="polite"></div>
+
+        <div class="dialog-pair-actions">
+          <button class="cancel-delete-button" id="cancelBulkDeleteButton" type="button">取消</button>
+          <button class="confirm-delete-button" id="confirmBulkDeleteButton" type="button">
+            <i data-lucide="trash-2" aria-hidden="true"></i>
+            <span>删除所选</span>
+          </button>
+        </div>
       </div>
     </dialog>
 
