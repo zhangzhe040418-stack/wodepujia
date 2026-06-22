@@ -537,6 +537,12 @@ noscript {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  opacity: 1;
+}
+
+/* 占位图（尚未拿到真实封面）显示得淡一些；真实封面保持完全不透明。 */
+.score-preview img.is-score-placeholder {
+  opacity: 0.5;
 }
 
 .score-favorite-mark {
@@ -5455,7 +5461,7 @@ body.app-ready .app-shell {
   min-height: 51px;
   aspect-ratio: auto;
   overflow: visible;
-  background: transparent url("assets/add-score-button.png?v=50") center / contain no-repeat !important;
+  background: transparent url("assets/add-score-button.png?v=51") center / contain no-repeat !important;
   box-shadow: none;
   filter: drop-shadow(0 10px 18px rgba(37, 99, 235, 0.2));
   opacity: 1;
@@ -6541,4 +6547,3 @@ body::before {
   font-size: 0.74rem;
   text-align: center;
 }
-

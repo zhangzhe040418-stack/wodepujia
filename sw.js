@@ -1,16 +1,16 @@
-const CACHE_NAME = "my-score-folder-v164";
+const CACHE_NAME = "my-score-folder-v175";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=147",
-  "./app.js?v=147",
+  "./styles.css?v=159",
+  "./app.js?v=159",
   "./vendor/lucide.min.js?v=47",
   "./cloudbase-config.js?v=47",
-  "./manifest.webmanifest?v=70",
-  "./assets/add-score-button.png?v=50",
-  "./icons/icon-192.png?v=49",
-  "./icons/icon-512.png",
-  "./icons/maskable-512.png",
+  "./manifest.webmanifest?v=71",
+  "./assets/add-score-button.png?v=51",
+  "./icons/icon-192.png?v=50",
+  "./icons/icon-512.png?v=50",
+  "./icons/maskable-512.png?v=50",
 ];
 
 self.addEventListener("install", (event) => {
