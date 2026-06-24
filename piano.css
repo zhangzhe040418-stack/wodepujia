@@ -1,0 +1,253 @@
+/* 钢琴组件样式 —— 自包含、随容器尺寸自适应。所有类名以 piano- 前缀，避免与宿主 app 冲突。 */
+.piano {
+  --piano-bg: #fffdf8;
+  --piano-panel: #ffffff;
+  --piano-border: #e8ddca;
+  --piano-text: #3a342b;
+  --piano-text-soft: #9a8f7c;
+  --piano-accent: #c0894b;
+
+  --white: #fcfbf7;
+  --white-edge: #d8cdb6;
+  --white-active: #f2dfb6;
+  --white-text: #8a7f68;
+  --black-top: #423a30;
+  --black-bottom: #211c16;
+  --black-active: #c0894b;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  gap: clamp(6px, 1.5vmin, 12px);
+  padding: clamp(6px, 1.6vmin, 14px);
+  background: var(--piano-bg);
+  color: var(--piano-text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Segoe UI", Roboto, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.piano *,
+.piano *::before,
+.piano *::after {
+  box-sizing: border-box;
+}
+
+/* 深色主题：宿主在 .piano 或其祖先加 [data-theme="dark"] 即可 */
+.piano[data-theme="dark"],
+[data-theme="dark"] .piano {
+  --piano-bg: #14130f;
+  --piano-panel: #1f1d17;
+  --piano-border: #2f2b22;
+  --piano-text: #f1ead9;
+  --piano-text-soft: #93897a;
+  --piano-accent: #d8b074;
+
+  --white: #efe9dc;
+  --white-edge: #c6bca6;
+  --white-active: #d8b074;
+  --white-text: #5a5240;
+  --black-top: #39332a;
+  --black-bottom: #14110c;
+  --black-active: #d8b074;
+}
+
+/* ---------- 顶栏 ---------- */
+.piano-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+
+.piano-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.piano-note {
+  font-size: clamp(16px, 2.6vmin, 22px);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.piano-freq {
+  font-size: clamp(11px, 1.8vmin, 13px);
+  color: var(--piano-text-soft);
+}
+
+.piano-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.piano-btn {
+  min-width: 40px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--piano-border);
+  border-radius: 11px;
+  background: var(--piano-panel);
+  color: var(--piano-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.08s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.piano-btn:active {
+  transform: scale(0.93);
+  background: var(--white-active);
+  border-color: var(--piano-accent);
+}
+
+.piano-range {
+  min-width: 50px;
+  color: var(--piano-accent);
+}
+
+/* ---------- 音区滑动条（独立一行） ---------- */
+.piano-range-slider-wrap {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 0 2px;
+}
+
+.piano-slider-label {
+  color: var(--piano-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.piano-range-slider {
+  width: 100%;
+  height: 34px;
+  margin: 0;
+  accent-color: var(--piano-accent);
+  touch-action: pan-x;
+  cursor: pointer;
+}
+
+/* ---------- 键盘窗口（固定） ---------- */
+.piano-keys {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 6px 0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--piano-border), color-mix(in srgb, var(--piano-border) 70%, #000 6%));
+  box-shadow: inset 0 2px 7px rgba(0, 0, 0, 0.18);
+  touch-action: none;
+  overflow: hidden;
+}
+
+/* 完整长键盘轨道（只渲染一次，靠 transform 平移） */
+.piano-key-strip {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  --white-key-width: 52px;
+}
+
+/* 白键 */
+.pk-w {
+  position: relative;
+  flex: 0 0 var(--white-key-width, 52px);
+  width: var(--white-key-width, 52px);
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: clamp(6px, 1.6vmin, 12px);
+  border: 1px solid var(--white-edge);
+  border-top: none;
+  border-radius: 0 0 7px 7px;
+  background: linear-gradient(180deg, #ffffff 0%, var(--white) 92%);
+  color: var(--white-text);
+  font-size: clamp(9px, 1.5vmin, 13px);
+  font-weight: 600;
+}
+
+.pk-w + .pk-w {
+  border-left: none;
+}
+
+.pk-w.is-on {
+  background: linear-gradient(180deg, var(--white-active), var(--white-active));
+  color: var(--piano-text);
+}
+
+/* 黑键（绝对定位，left 由 JS 以 px 给出） */
+.pk-b {
+  position: absolute;
+  top: 8px;
+  width: calc(var(--white-key-width, 52px) * 0.62);
+  height: 60%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+  border-radius: 0 0 5px 5px;
+  background: linear-gradient(180deg, var(--black-top) 0%, var(--black-bottom) 100%);
+  color: #e9dcc2;
+  font-size: clamp(8px, 1.2vmin, 11px);
+  font-weight: 600;
+  box-shadow: 0 3px 4px rgba(0, 0, 0, 0.45);
+  z-index: 3;
+}
+
+.pk-b.is-on {
+  background: linear-gradient(180deg, var(--black-active), var(--black-active));
+  color: #211c16;
+}
+
+.pk-label {
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.pk-label.is-off {
+  display: none;
+}
+
+/* 中央 C 标记 */
+.pk-w.is-c4::after {
+  content: "";
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--piano-accent);
+}
+
+/* ---------- 提示 ---------- */
+.piano-hint {
+  flex: 0 0 auto;
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--piano-accent);
+}

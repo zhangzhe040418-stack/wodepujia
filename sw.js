@@ -1,9 +1,11 @@
-const CACHE_NAME = "my-score-folder-v175";
+const CACHE_NAME = "my-score-folder-v210";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=159",
-  "./app.js?v=159",
+  "./styles.css?v=194",
+  "./piano.css?v=194",
+  "./piano.js?v=194",
+  "./app.js?v=194",
   "./vendor/lucide.min.js?v=47",
   "./cloudbase-config.js?v=47",
   "./manifest.webmanifest?v=71",
@@ -17,7 +19,31 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then(async (cache) => {
+        await Promise.allSettled(
+          APP_SHELL.map(async (url) => {
+            try {
+              const response = await fetch(url, { cache: "reload" });
+              if (response && response.ok) {
+                await cache.put(url, response);
+              }
+            } catch (error) {
+              console.warn("[sw] install cache skipped:", url, error);
+            }
+          }),
+        );
+
+        if (!(await cache.match("./index.html"))) {
+          try {
+            const response = await fetch("./index.html", { cache: "reload" });
+            if (response && response.ok) {
+              await cache.put("./index.html", response);
+            }
+          } catch (error) {
+            console.warn("[sw] index fallback cache failed:", error);
+          }
+        }
+      })
       .then(() => self.skipWaiting()),
   );
 });

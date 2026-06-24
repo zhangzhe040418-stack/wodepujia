@@ -1,0 +1,11 @@
+{
+  "appId": "com.wodepujia.app",
+  "appName": "我的谱夹",
+  "webDir": "dist",
+  "server": {
+    "iosScheme": "capacitor"
+  },
+  "ios": {
+    "contentInset": "automatic"
+  }
+}

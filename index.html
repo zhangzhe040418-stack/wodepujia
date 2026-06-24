@@ -26,10 +26,12 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=159" />
+    <link rel="stylesheet" href="styles.css?v=194" />
+    <link rel="stylesheet" href="piano.css?v=194" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="app.js?v=159"></script>
+    <script defer charset="UTF-8" src="piano.js?v=194"></script>
+    <script defer charset="UTF-8" src="app.js?v=194"></script>
   </head>
   <body class="app-booting">
     <div class="app-shell">
@@ -350,6 +352,16 @@
                 <h3>查看歌谱</h3>
                 <p>点击歌谱封面进入查看器。可以双指缩放；偏好设置里可选择上下滑动或左右翻页；演出模式会隐藏多余界面并尽量保持屏幕常亮。</p>
                 <div class="usage-viewer-demo" aria-hidden="true"><span>返回</span><b>2 / 6</b><i>★</i></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="brush"></i></span>
+              <div>
+                <h3>标注歌谱</h3>
+                <p>进入歌谱后点击右上角“更多”，选择“标注”。标注模式下单指或 Apple Pencil 可以书写，双指可以缩放或移动页面；工具栏支持画笔、荧光笔、橡皮、撤销、重做、清空和隐藏标注。标注会自动保存，不会修改原始歌谱图片。</p>
+                <p class="usage-note">iPad 使用 Apple Pencil 时，建议到系统“设置”→“Apple Pencil”中关闭“随手写”，避免系统输入功能抢占笔触。</p>
+                <div class="usage-annotation-demo" aria-hidden="true"><span>画笔</span><span>荧光笔</span><span>橡皮</span><b>完成</b></div>
               </div>
             </section>
 
@@ -975,25 +987,110 @@
     <dialog class="viewer-dialog" id="viewerDialog" aria-label="歌谱图片查看">
       <div class="viewer-surface">
         <div class="viewer-topbar">
-          <div class="viewer-left-controls">
-            <button class="viewer-back-button" id="viewerBackButton" type="button" aria-label="返回">
-              <i data-lucide="chevron-left" aria-hidden="true"></i>
-              <span>返回</span>
-            </button>
-            <button class="viewer-performance-button" id="viewerPerformanceButton" type="button">
-              <i data-lucide="monitor-up" aria-hidden="true"></i>
-              <span id="viewerPerformanceText">演出</span>
-            </button>
-          </div>
+          <button class="viewer-back-button" id="viewerBackButton" type="button" aria-label="返回">
+            <i data-lucide="chevron-left" aria-hidden="true"></i>
+            <span>返回</span>
+          </button>
+          <button class="viewer-performance-button" id="viewerPerformanceButton" type="button">
+            <i data-lucide="monitor-up" aria-hidden="true"></i>
+            <span id="viewerPerformanceText">演出</span>
+          </button>
           <span class="viewer-page-indicator" id="viewerPageIndicator">1 / 1</span>
-          <div class="viewer-right-controls">
-            <span class="viewer-key-signature" id="viewerKeySignature" hidden></span>
-            <button class="viewer-favorite-button" id="viewerFavoriteButton" type="button" title="收藏歌谱" aria-label="收藏歌谱">
-              <i data-lucide="star" aria-hidden="true"></i>
+          <span class="viewer-key-signature" id="viewerKeySignature" hidden></span>
+          <div class="viewer-more">
+            <button class="viewer-more-button" id="viewerMoreButton" type="button" aria-haspopup="true" aria-expanded="false" aria-label="更多">
+              <i data-lucide="ellipsis" aria-hidden="true"></i>
+              <span>更多</span>
             </button>
+            <button class="viewer-more-button annotation-done-top-button" id="annotationDoneButton" type="button">完成</button>
+            <div class="viewer-more-menu" id="viewerMoreMenu" role="menu">
+              <button class="viewer-annotation-button" id="viewerAnnotationButton" type="button" role="menuitem" aria-pressed="false">
+                <i data-lucide="pencil-line" aria-hidden="true"></i>
+                <span>标注</span>
+              </button>
+              <button class="viewer-annotation-button viewer-native-annotation-button" id="viewerNativeAnnotationButton" type="button" role="menuitem" hidden>
+                <i data-lucide="pen-tool" aria-hidden="true"></i>
+                <span>原生标注</span>
+              </button>
+              <button class="viewer-favorite-button" id="viewerFavoriteButton" type="button" role="menuitem" title="收藏歌谱" aria-label="收藏歌谱">
+                <i data-lucide="star" aria-hidden="true"></i>
+                <span>收藏</span>
+              </button>
+              <button class="viewer-annotation-button viewer-piano-button" id="viewerPianoButton" type="button" role="menuitem" aria-pressed="false">
+                <i data-lucide="music-2" aria-hidden="true"></i>
+                <span>钢琴</span>
+              </button>
+              <button class="viewer-annotation-button viewer-metronome-button" id="viewerMetronomeButton" type="button" role="menuitem" aria-pressed="false">
+                <i data-lucide="timer" aria-hidden="true"></i>
+                <span>节拍器</span>
+              </button>
+            </div>
           </div>
         </div>
         <div class="viewer-pages" id="viewerPages"></div>
+        <div class="viewer-piano-panel" id="viewerPianoPanel" hidden>
+          <div class="piano" id="viewerPiano" data-samples="samples/">
+            <div class="piano-bar">
+              <div class="piano-readout">
+                <span class="piano-note" id="viewerPianoNote">—</span>
+                <span class="piano-freq" id="viewerPianoFreq">轻触琴键</span>
+              </div>
+              <div class="piano-tools">
+                <button class="piano-btn" id="viewerPianoDown" type="button" aria-label="向低音区">◀</button>
+                <button class="piano-btn piano-range" id="viewerPianoRange" type="button" aria-label="当前音区">C4</button>
+                <button class="piano-btn" id="viewerPianoUp" type="button" aria-label="向高音区">▶</button>
+                <button class="piano-btn" id="viewerPianoLabel" type="button" aria-label="切换标签">音名</button>
+              </div>
+            </div>
+            <div class="piano-keys" id="viewerPianoKeys" role="application" aria-label="钢琴键盘"></div>
+            <p class="piano-hint" id="viewerPianoHint" hidden></p>
+          </div>
+        </div>
+        <div class="viewer-metronome-panel" id="viewerMetronomePanel" hidden>
+          <div class="metronome">
+            <div class="metronome-main">
+              <button class="metronome-play" id="metronomePlayButton" type="button" aria-label="开始或停止节拍器" aria-pressed="false">
+                <i data-lucide="play" aria-hidden="true"></i>
+              </button>
+              <div class="metronome-tempo">
+                <div class="metronome-bpm-row">
+                  <button class="metronome-step" id="metronomeMinusButton" type="button" aria-label="减速">−</button>
+                  <span class="metronome-bpm" id="metronomeBpmValue">90</span>
+                  <button class="metronome-step" id="metronomePlusButton" type="button" aria-label="加速">＋</button>
+                </div>
+                <span class="metronome-bpm-unit">BPM</span>
+              </div>
+              <div class="metronome-beats" id="metronomeBeats" aria-hidden="true"></div>
+            </div>
+            <input class="metronome-slider" id="metronomeSlider" type="range" min="40" max="240" step="1" value="90" aria-label="节拍速度" />
+            <div class="metronome-meter">
+              <span class="metronome-meter-label">拍子</span>
+              <div class="metronome-meter-options" id="metronomeMeterOptions" role="group" aria-label="拍号">
+                <button class="metronome-meter-button" type="button" data-beats="2">2/4</button>
+                <button class="metronome-meter-button is-active" type="button" data-beats="4">4/4</button>
+                <button class="metronome-meter-button" type="button" data-beats="3">3/4</button>
+                <button class="metronome-meter-button" type="button" data-beats="6">6/8</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="annotationToolbar" class="annotation-toolbar" hidden>
+          <button class="annotation-tool-button is-active" type="button" data-annotation-tool="pen">画笔</button>
+          <button class="annotation-tool-button" type="button" data-annotation-tool="highlighter">荧光笔</button>
+          <button class="annotation-tool-button" type="button" data-annotation-tool="eraser">橡皮</button>
+          <label class="annotation-color-control" aria-label="画笔颜色">
+            <span>颜色</span>
+            <input id="annotationColorInput" type="color" value="#ef4444" />
+          </label>
+          <label class="annotation-size-control" aria-label="画笔粗细">
+            <span>粗细</span>
+            <input id="annotationSizeInput" type="range" min="2" max="18" step="1" value="4" />
+          </label>
+          <button class="annotation-tool-button" id="annotationUndoButton" type="button">撤销</button>
+          <button class="annotation-tool-button" id="annotationRedoButton" type="button">重做</button>
+          <button class="annotation-tool-button danger" id="annotationClearButton" type="button">清空</button>
+          <button class="annotation-tool-button" id="annotationToggleVisibilityButton" type="button">隐藏标注</button>
+        </div>
       </div>
     </dialog>
 

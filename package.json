@@ -1,0 +1,20 @@
+{
+  "name": "wodepujia",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "node server.js",
+    "prepare:dist": "node scripts/prepare-dist.mjs",
+    "cap:sync:ios": "npm run prepare:dist && cap sync ios",
+    "cap:open:ios": "cap open ios",
+    "deploy": "node deploy.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.4.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.4.1",
+    "@capacitor/ios": "8.4.1"
+  }
+}

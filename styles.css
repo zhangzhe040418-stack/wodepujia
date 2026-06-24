@@ -762,7 +762,8 @@ noscript {
   right: calc(18px + env(safe-area-inset-right));
   bottom: 74px;
   bottom: calc(74px + env(safe-area-inset-bottom));
-  z-index: 13;
+  /* 低于 .topbar(z-index:5)，向上滑动时滑到顶部栏下方而不是盖住它。 */
+  z-index: 4;
   min-height: 42px;
   padding: 0 18px;
   box-shadow: 0 14px 28px rgba(15, 118, 110, 0.2);
@@ -998,6 +999,63 @@ noscript {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 选择歌谱：文件夹分组 */
+.setlist-folder-group {
+  display: grid;
+  gap: 6px;
+}
+
+.setlist-folder-header {
+  display: grid;
+  grid-template-columns: 18px 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted, #f4f1ea);
+  color: var(--ink);
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+
+.setlist-folder-header:active {
+  transform: scale(0.995);
+}
+
+.setlist-folder-chevron,
+.setlist-folder-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--brand, #0f766e);
+}
+
+.setlist-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-folder-count {
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.setlist-folder-body {
+  display: grid;
+  gap: 6px;
+  padding-left: 14px;
+}
+
+:root[data-theme="dark"] .setlist-folder-header {
+  background: #25221b;
+  border-color: #3a352b;
+  color: var(--ink);
 }
 
 .setlist-order-row {
@@ -2758,6 +2816,7 @@ body.backup-screen-open .fab-button {
 }
 
 .viewer-surface {
+  position: relative;
   width: 100vw;
   height: 100vh;
   height: 100dvh;
@@ -2765,6 +2824,8 @@ body.backup-screen-open .fab-button {
   background: #ffffff;
   scrollbar-width: none;
   --viewer-topbar-height: calc(48px + env(safe-area-inset-top));
+  --viewer-piano-height: 272px;
+  --viewer-metronome-height: 196px;
 }
 
 .viewer-topbar {
@@ -2776,6 +2837,7 @@ body.backup-screen-open .fab-button {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   min-height: var(--viewer-topbar-height);
   padding: env(safe-area-inset-top) 12px 0;
   border-bottom: 1px solid rgba(224, 232, 229, 0.82);
@@ -2783,6 +2845,125 @@ body.backup-screen-open .fab-button {
   color: var(--ink);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
+}
+
+/* 顶部栏按钮排成一层：返回·演出·页码·调号·更多。 */
+.viewer-more {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+/* “更多”按钮：与顶栏“返回/演出”按钮同款圆角风格，保持一致。 */
+.viewer-more-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 0.92rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.viewer-more-button:hover,
+.viewer-more-button:focus-visible,
+.viewer-more.is-open .viewer-more-button {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.viewer-more-button .lucide,
+.viewer-more-button [data-lucide] {
+  width: 20px;
+  height: 20px;
+}
+
+.annotation-done-top-button {
+  display: none;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.viewer-dialog.is-annotation-mode .viewer-more-button {
+  display: none;
+}
+
+.viewer-dialog.is-annotation-mode .annotation-done-top-button {
+  display: inline-flex;
+}
+
+.viewer-dialog.is-annotation-mode .viewer-more-menu {
+  display: none !important;
+}
+
+/* “更多”弹出菜单：标注 + 收藏。默认隐藏，容器加 .is-open 时显示（不依赖全局 [hidden]）。 */
+.viewer-more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+  padding: 6px;
+  border: 1px solid rgba(224, 232, 229, 0.9);
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 16px 38px rgba(31, 41, 51, 0.2);
+}
+
+.viewer-more.is-open .viewer-more-menu {
+  display: flex;
+}
+
+/* 菜单内的标注/收藏按钮：统一成横向一行的菜单项样式（透明底、悬停高亮）。 */
+.viewer-more-menu .viewer-annotation-button,
+.viewer-more-menu .viewer-favorite-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+.viewer-more-menu .viewer-annotation-button .lucide,
+.viewer-more-menu .viewer-annotation-button [data-lucide],
+.viewer-more-menu .viewer-favorite-button .lucide,
+.viewer-more-menu .viewer-favorite-button [data-lucide] {
+  width: 18px;
+  height: 18px;
+}
+
+.viewer-more-menu .viewer-annotation-button:hover,
+.viewer-more-menu .viewer-annotation-button:focus-visible,
+.viewer-more-menu .viewer-favorite-button:hover,
+.viewer-more-menu .viewer-favorite-button:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+/* 保留各自的“激活”态：标注开启高亮、收藏已收藏显示金色。 */
+.viewer-more-menu .viewer-annotation-button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.viewer-more-menu .viewer-favorite-button.is-active {
+  color: #bd7a00;
 }
 
 .viewer-left-controls,
@@ -2829,13 +3010,12 @@ body.backup-screen-open .fab-button {
 }
 
 .viewer-page-indicator {
-  position: absolute;
-  left: 50%;
+  position: static;
   z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transform: translateX(-50%);
+  flex: 0 0 auto;
   min-width: 46px;
   min-height: 28px;
   padding: 0 8px;
@@ -2904,16 +3084,8 @@ body.backup-screen-open .fab-button {
 }
 
 .viewer-dialog.is-performance-mode .viewer-back-button,
-.viewer-dialog.is-performance-mode .viewer-favorite-button {
+.viewer-dialog.is-performance-mode .viewer-more {
   display: none;
-}
-
-.viewer-dialog.is-performance-mode .viewer-left-controls {
-  flex: 0 0 auto;
-}
-
-.viewer-dialog.is-performance-mode .viewer-right-controls {
-  flex: 1 1 auto;
 }
 
 .viewer-dialog.is-performance-mode .viewer-pages {
@@ -2995,6 +3167,258 @@ body.backup-screen-open .fab-button {
   overflow: auto;
   scroll-snap-type: none;
   touch-action: none;
+}
+
+.viewer-dialog.is-piano-open .viewer-pages {
+  padding-bottom: calc(var(--viewer-piano-height, 210px) + env(safe-area-inset-bottom) + 16px);
+  scroll-padding-bottom: calc(var(--viewer-piano-height, 210px) + env(safe-area-inset-bottom) + 16px);
+}
+
+.viewer-dialog.is-piano-open .viewer-pages.is-horizontal-mode,
+.viewer-dialog.is-piano-open .viewer-pages.viewer-horizontal,
+.viewer-dialog.is-piano-open .viewer-pages {
+  overflow-y: auto;
+}
+
+.viewer-dialog.is-piano-open .viewer-pages.is-horizontal-mode {
+  touch-action: pan-x pan-y;
+}
+
+.viewer-piano-panel {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  box-sizing: border-box;
+  height: var(--viewer-piano-height, 210px);
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid var(--line);
+  background: var(--surface-strong);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.12);
+}
+
+.viewer-piano-panel[hidden] {
+  display: none !important;
+}
+
+.viewer-piano-panel .piano {
+  height: 100%;
+  border-radius: 0;
+}
+
+.viewer-more-menu .viewer-piano-button.is-active,
+.viewer-more-menu .viewer-metronome-button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* ---------- 节拍器面板 ---------- */
+.viewer-dialog.is-metronome-open .viewer-pages {
+  padding-bottom: calc(var(--viewer-metronome-height, 196px) + env(safe-area-inset-bottom) + 16px);
+  scroll-padding-bottom: calc(var(--viewer-metronome-height, 196px) + env(safe-area-inset-bottom) + 16px);
+}
+
+.viewer-dialog.is-metronome-open .viewer-pages.is-horizontal-mode,
+.viewer-dialog.is-metronome-open .viewer-pages {
+  overflow-y: auto;
+}
+
+.viewer-metronome-panel {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  box-sizing: border-box;
+  height: var(--viewer-metronome-height, 196px);
+  padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--surface-strong);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.12);
+}
+
+.viewer-metronome-panel[hidden] {
+  display: none !important;
+}
+
+.metronome {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(560px, 100%);
+  height: 100%;
+  margin: 0 auto;
+  color: var(--ink);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.metronome-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.metronome-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.28);
+  transition: transform 0.08s ease, background 0.15s ease;
+}
+
+.metronome-play:active {
+  transform: scale(0.94);
+}
+
+.metronome-play.is-running {
+  background: var(--danger, #dc2626);
+  box-shadow: 0 8px 18px rgba(220, 38, 38, 0.28);
+}
+
+.metronome-play .lucide,
+.metronome-play [data-lucide] {
+  width: 26px;
+  height: 26px;
+}
+
+.metronome-tempo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 132px;
+}
+
+.metronome-bpm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.metronome-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.metronome-step:active {
+  transform: scale(0.92);
+  background: var(--accent-soft);
+}
+
+.metronome-bpm {
+  min-width: 56px;
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.metronome-bpm-unit {
+  margin-top: 2px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.metronome-beats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+
+.metronome-beat-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--line);
+  transition: transform 0.05s ease, background 0.05s ease;
+}
+
+.metronome-beat-dot.is-accent {
+  background: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.metronome-beat-dot.is-active {
+  background: var(--accent);
+  transform: scale(1.35);
+}
+
+.metronome-beat-dot.is-active.is-accent {
+  background: var(--danger, #dc2626);
+}
+
+.metronome-slider {
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  accent-color: var(--accent);
+  touch-action: pan-x;
+  cursor: pointer;
+}
+
+.metronome-meter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.metronome-meter-label {
+  flex: 0 0 auto;
+  font-size: 0.84rem;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.metronome-meter-options {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 auto;
+}
+
+.metronome-meter-button {
+  flex: 1 1 0;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.metronome-meter-button.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .metronome-step,
+:root[data-theme="dark"] .metronome-meter-button {
+  background: #25221b;
+  border-color: #3a352b;
+  color: var(--ink);
 }
 
 .viewer-page {
@@ -5526,20 +5950,16 @@ body.app-ready .app-shell {
   column-gap: 4px;
 }
 
-.viewer-left-controls,
-.viewer-right-controls {
-  display: contents;
-}
-
 .viewer-back-button,
 .viewer-performance-button,
 .viewer-page-indicator,
 .viewer-key-signature,
-.viewer-favorite-button {
+.viewer-more {
   position: static;
   align-self: center;
   justify-self: center;
   transform: none;
+  margin-left: 0;
 }
 
 .viewer-back-button {
@@ -5556,6 +5976,7 @@ body.app-ready .app-shell {
 
 .viewer-key-signature {
   grid-column: 4;
+  margin-left: 0;
   max-width: 100%;
   border-color: transparent;
   background: var(--accent);
@@ -5563,8 +5984,12 @@ body.app-ready .app-shell {
   box-shadow: 0 8px 18px rgba(37, 99, 235, 0.18);
 }
 
-.viewer-favorite-button {
+.viewer-more {
   grid-column: 5;
+}
+
+.viewer-more-button {
+  width: 100%;
 }
 
 :root[data-theme="dark"] .viewer-key-signature {
@@ -5909,6 +6334,7 @@ body::before {
 .usage-filter-demo,
 .usage-card-demo,
 .usage-viewer-demo,
+.usage-annotation-demo,
 .usage-share-demo {
   margin-top: 10px;
 }
@@ -5936,6 +6362,7 @@ body::before {
 }
 
 .usage-filter-demo,
+.usage-annotation-demo,
 .usage-share-demo {
   display: flex;
   flex-wrap: wrap;
@@ -5943,6 +6370,8 @@ body::before {
 }
 
 .usage-filter-demo span,
+.usage-annotation-demo span,
+.usage-annotation-demo b,
 .usage-share-demo span {
   display: inline-grid;
   place-items: center;
@@ -5953,6 +6382,18 @@ body::before {
   color: var(--accent-strong);
   font-size: 0.78rem;
   font-weight: 850;
+}
+
+.usage-annotation-demo b {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.usage-note {
+  margin-top: 8px;
+  color: var(--accent-strong);
+  font-size: 0.84rem;
+  font-weight: 760;
 }
 
 .usage-card-demo {
@@ -6546,4 +6987,201 @@ body::before {
   color: var(--muted);
   font-size: 0.74rem;
   text-align: center;
+}
+
+/* ===== Annotation layer ===== */
+.viewer-annotation-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.viewer-annotation-button .lucide,
+.viewer-annotation-button [data-lucide] {
+  width: 15px;
+  height: 15px;
+}
+
+.viewer-annotation-button.is-active {
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-strong, var(--accent));
+}
+
+.viewer-page-shell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+}
+
+.viewer-page-shell.is-live-pinching {
+  position: relative;
+  z-index: 30;
+  contain: paint;
+  backface-visibility: hidden;
+  transform:
+    translate3d(var(--pinch-x, 0px), var(--pinch-y, 0px), 0)
+    scale(var(--pinch-scale, 1));
+  transform-origin: var(--pinch-origin-x, 50%) var(--pinch-origin-y, 50%);
+  will-change: transform;
+  -webkit-backface-visibility: hidden;
+}
+
+.viewer-pages.is-pinching {
+  scroll-behavior: auto;
+}
+
+.viewer-pages.has-multiple-pages .viewer-page-shell {
+  display: block;
+  height: auto;
+}
+
+.viewer-pages.is-horizontal-mode .viewer-page-shell {
+  display: grid;
+  height: 100%;
+}
+
+.viewer-page-image {
+  position: relative;
+  z-index: 1;
+}
+
+.annotation-canvas {
+  position: absolute;
+  z-index: 2;
+  display: block;
+  pointer-events: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+}
+
+.viewer-pages.is-annotation-mode {
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+
+.viewer-pages.is-annotation-mode .annotation-canvas {
+  pointer-events: auto;
+}
+
+.viewer-dialog.annotations-hidden .annotation-canvas {
+  opacity: 0;
+}
+
+.annotation-toolbar {
+  position: fixed;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: max(10px, calc(env(safe-area-inset-bottom) + 10px));
+  left: max(10px, env(safe-area-inset-left));
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 9px 10px;
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.16);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  scrollbar-width: none;
+}
+
+.annotation-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.annotation-tool-button,
+.annotation-size-control,
+.annotation-color-control {
+  flex: 0 0 auto;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.annotation-tool-button {
+  min-width: 58px;
+  padding: 7px 12px;
+}
+
+.annotation-tool-button.is-active {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-strong, var(--accent));
+}
+
+.annotation-tool-button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.annotation-tool-button.danger {
+  color: var(--danger);
+}
+
+.annotation-tool-button:disabled {
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+.annotation-size-control,
+.annotation-color-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+}
+
+.annotation-size-control input {
+  width: 86px;
+  accent-color: var(--accent);
+}
+
+.annotation-color-control input {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.viewer-dialog.is-performance-mode .annotation-toolbar {
+  display: none;
+}
+
+:root[data-theme="dark"] .viewer-annotation-button,
+:root[data-theme="dark"] .annotation-toolbar,
+:root[data-theme="dark"] .annotation-tool-button,
+:root[data-theme="dark"] .annotation-size-control,
+:root[data-theme="dark"] .annotation-color-control {
+  background: color-mix(in srgb, var(--surface) 90%, #11110f);
+}
+
+:root[data-theme="dark"] .annotation-toolbar {
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
 }

@@ -1,16 +1,17 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
 const SETLIST_STORE_NAME = "setlists";
 const SETLIST_ITEM_STORE_NAME = "setlist_items";
 const TRASH_STORE_NAME = "trash";
+const ANNOTATION_STORE_NAME = "annotations";
 const SYNC_OUTBOX_STORE_NAME = "sync_outbox";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 1;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v159";
+const APP_BUILD = "v194";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -28,12 +29,14 @@ const CLOUD_TABLES = {
   shareItems: "share_items",
   setlists: "setlists",
   setlistItems: "setlist_items",
+  annotations: "annotations",
 };
 const VIEWER_MIN_ZOOM = 1;
 const VIEWER_MAX_ZOOM = 4;
 const VIEWER_DOUBLE_TAP_ZOOM = 2;
 const VIEWER_TAP_MAX_DISTANCE = 10;
 const VIEWER_DOUBLE_TAP_DELAY = 320;
+const ANNOTATION_POINTER_DEBUG = false;
 const IMAGE_MAX_EDGE = 1600;
 const IMAGE_WEBP_QUALITY = 0.7;
 const IMAGE_JPEG_QUALITY = 0.76;
@@ -159,6 +162,7 @@ const state = {
   shareSelectedFolderIds: new Set(),
   shareSelectedScoreIds: new Set(),
   setlistDraftScoreIds: [],
+  setlistPickerExpandedFolders: new Set(),
   copyFeedbackTimer: 0,
   activeTab: "library",
   currentFolderId: null,
@@ -194,6 +198,39 @@ const state = {
   pageManagerBusy: false,
   pageManagerSaveChain: Promise.resolve(),
   scoreMetadataSaveChains: new Map(),
+  annotationMode: false,
+  annotationVisible: true,
+  annotationTool: "pen",
+  annotationColor: "#ef4444",
+  annotationSize: 4,
+  annotationOpacity: 1,
+  annotationHighlighterColor: "#facc15",
+  annotationHighlighterOpacity: 0.35,
+  annotationDraftStroke: null,
+  annotationPointerId: null,
+  annotationDraftCanvas: null,
+  annotationDraftInserted: false,
+  annotationDraftUndoRegistered: false,
+  annotationPenActiveStrokeId: "",
+  annotationLastCommittedAt: 0,
+  annotationLastPenDownAt: 0,
+  annotationStrokeToken: 0,
+  annotationActiveStrokeToken: 0,
+  annotationStrokeStartedAt: 0,
+  annotationLastPointerDownAt: 0,
+  annotationLastPointerUpAt: 0,
+  annotationPenLeaveTimer: 0,
+  annotationRecentPenEvents: [],
+  annotationRenderFrame: 0,
+  annotationPendingRenderCanvas: null,
+  annotationUndoStack: [],
+  annotationRedoStack: [],
+  annotationSaveTimer: 0,
+  annotationPendingPageIds: new Set(),
+  annotationSaveVersions: new Map(),
+  annotationFlushPromise: null,
+  annotationImmediateSaveTimes: new Map(),
+  annotationRecords: new Map(),
   libraryRenderQueued: false,
   scoreEditId: "",
   folderActionId: "",
@@ -203,6 +240,22 @@ const state = {
   viewerPointers: new Map(),
   viewerPinchStartDistance: 0,
   viewerPinchStartZoom: VIEWER_MIN_ZOOM,
+  viewerPinchLastCenter: null,
+  viewerPinchRaf: 0,
+  viewerPendingPinch: null,
+  viewerPinchLastDistance: 0,
+  viewerPinchLastAppliedZoom: VIEWER_MIN_ZOOM,
+  viewerPinchActive: false,
+  viewerPinchTarget: null,
+  viewerPinchAnchor: null,
+  viewerPinchOriginX: 0,
+  viewerPinchOriginY: 0,
+  viewerPinchStartCenter: null,
+  viewerPinchCurrentCenter: null,
+  viewerPinchLiveScale: 1,
+  viewerPinchLiveTranslateX: 0,
+  viewerPinchLiveTranslateY: 0,
+  viewerPinchCommitFrame: 0,
   viewerDrag: null,
   viewerTapStart: null,
   viewerLastTap: null,
@@ -211,6 +264,11 @@ const state = {
   folderHistoryActive: false,
   currentViewerScoreId: null,
   currentViewerSetlistId: null,
+  viewerPianoOpen: false,
+  viewerMetronomeOpen: false,
+  annotationResizeFrame: 0,
+  annotationResizePending: false,
+  annotationResizeNeedsFull: false,
 };
 
 const elements = {};
@@ -226,6 +284,9 @@ let edgeBackTracking = null;
 
 // 执行“返回上一级”——等价于点击当前界面的返回键。
 function triggerEdgeBack() {
+  if (state.annotationMode) {
+    return;
+  }
   if (elements.viewerDialog?.open) {
     // 演出模式吞掉返回，避免误退出。
     if (state.viewerPerformanceMode) {
@@ -242,6 +303,10 @@ function triggerEdgeBack() {
 }
 
 function handleEdgeBackTouchStart(event) {
+  if (state.annotationMode) {
+    edgeBackTracking = null;
+    return;
+  }
   if (!event.touches || event.touches.length !== 1) {
     edgeBackTracking = null;
     return;
@@ -257,6 +322,10 @@ function handleEdgeBackTouchStart(event) {
 }
 
 function handleEdgeBackTouchEnd(event) {
+  if (state.annotationMode) {
+    edgeBackTracking = null;
+    return;
+  }
   if (!edgeBackTracking) {
     return;
   }
@@ -273,11 +342,30 @@ function handleEdgeBackTouchEnd(event) {
   }
 }
 
+function isStandaloneMode() {
+  return (
+    window.matchMedia?.("(display-mode: standalone)")?.matches ||
+    window.navigator.standalone === true
+  );
+}
+
+function isAndroidDevice() {
+  const ua = window.navigator?.userAgent || "";
+  const platform = window.navigator?.userAgentData?.platform || "";
+  return /Android/i.test(ua) || platform.toLowerCase() === "android";
+}
+
+function updateInstallButtonVisibility() {
+  if (!elements.installAppButton) {
+    return;
+  }
+  elements.installAppButton.hidden = isStandaloneMode() || (!state.installPrompt && !isAndroidDevice());
+  refreshIcons();
+}
+
 // PWA 显示模式调试：用于排查 bottom-nav 离屏幕底部距离的问题。
 function logLayoutDebug() {
-  const isStandalone =
-    window.matchMedia?.("(display-mode: standalone)")?.matches ||
-    window.navigator.standalone === true;
+  const isStandalone = isStandaloneMode();
 
   console.log("[layout-debug] isStandalone:", isStandalone);
   console.log("[layout-debug] innerHeight:", window.innerHeight);
@@ -296,6 +384,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   applyThemePreference(state.themeMode);
   bindElements();
   bindEvents();
+  updateInstallButtonVisibility();
   setAppReady(false);
   registerServiceWorker();
   renderPending();
@@ -741,8 +830,34 @@ function bindElements() {
   elements.viewerPerformanceButton = document.querySelector("#viewerPerformanceButton");
   elements.viewerPerformanceText = document.querySelector("#viewerPerformanceText");
   elements.viewerFavoriteButton = document.querySelector("#viewerFavoriteButton");
+  elements.viewerPianoButton = document.querySelector("#viewerPianoButton");
+  elements.viewerPianoPanel = document.querySelector("#viewerPianoPanel");
+  elements.viewerPiano = document.querySelector("#viewerPiano");
+  elements.viewerMetronomeButton = document.querySelector("#viewerMetronomeButton");
+  elements.viewerMetronomePanel = document.querySelector("#viewerMetronomePanel");
+  elements.metronomePlayButton = document.querySelector("#metronomePlayButton");
+  elements.metronomeMinusButton = document.querySelector("#metronomeMinusButton");
+  elements.metronomePlusButton = document.querySelector("#metronomePlusButton");
+  elements.metronomeBpmValue = document.querySelector("#metronomeBpmValue");
+  elements.metronomeBeats = document.querySelector("#metronomeBeats");
+  elements.metronomeSlider = document.querySelector("#metronomeSlider");
+  elements.metronomeMeterOptions = document.querySelector("#metronomeMeterOptions");
+  elements.viewerAnnotationButton = document.querySelector("#viewerAnnotationButton");
+  elements.viewerNativeAnnotationButton = document.querySelector("#viewerNativeAnnotationButton");
+  elements.viewerMore = document.querySelector(".viewer-more");
+  elements.viewerMoreButton = document.querySelector("#viewerMoreButton");
+  elements.viewerMoreMenu = document.querySelector("#viewerMoreMenu");
   elements.viewerBackButton = document.querySelector("#viewerBackButton");
   elements.viewerPages = document.querySelector("#viewerPages");
+  elements.annotationToolbar = document.querySelector("#annotationToolbar");
+  elements.annotationToolButtons = Array.from(document.querySelectorAll("[data-annotation-tool]"));
+  elements.annotationColorInput = document.querySelector("#annotationColorInput");
+  elements.annotationSizeInput = document.querySelector("#annotationSizeInput");
+  elements.annotationUndoButton = document.querySelector("#annotationUndoButton");
+  elements.annotationRedoButton = document.querySelector("#annotationRedoButton");
+  elements.annotationClearButton = document.querySelector("#annotationClearButton");
+  elements.annotationToggleVisibilityButton = document.querySelector("#annotationToggleVisibilityButton");
+  elements.annotationDoneButton = document.querySelector("#annotationDoneButton");
 }
 
 function bindEvents() {
@@ -775,6 +890,7 @@ function bindEvents() {
   elements.deleteSetlistButton?.addEventListener("click", () => deleteSetlist(state.editingSetlistId));
   elements.setlistScoreSearch?.addEventListener("input", renderSetlistScorePicker);
   elements.setlistScorePicker?.addEventListener("change", handleSetlistPickerChange);
+  elements.setlistScorePicker?.addEventListener("click", handleSetlistPickerClick);
   elements.setlistOrderList?.addEventListener("click", handleSetlistOrderAction);
   elements.setlistDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -1039,6 +1155,14 @@ function bindEvents() {
   elements.viewerPages.addEventListener("pointermove", handleViewerPointerMove);
   elements.viewerPages.addEventListener("pointerup", handleViewerPointerEnd);
   elements.viewerPages.addEventListener("pointercancel", handleViewerPointerEnd);
+  elements.viewerPages.addEventListener("pointerdown", handlePenAnnotationFallbackDown, {
+    capture: true,
+    passive: false,
+  });
+  elements.viewerPages.addEventListener("pointermove", handlePenAnnotationFallbackMove, {
+    capture: true,
+    passive: false,
+  });
   elements.viewerPages.addEventListener("scroll", scheduleViewerPageIndicatorUpdate, { passive: true });
   elements.viewerDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -1050,6 +1174,61 @@ function bindEvents() {
   elements.viewerBackButton.addEventListener("click", closeViewerUI);
   elements.viewerPerformanceButton?.addEventListener("click", toggleViewerPerformanceMode);
   elements.viewerFavoriteButton?.addEventListener("click", toggleCurrentViewerFavorite);
+  elements.viewerPianoButton?.addEventListener("click", () => setViewerPianoOpen(!state.viewerPianoOpen));
+  elements.viewerMetronomeButton?.addEventListener("click", () => setViewerMetronomeOpen(!state.viewerMetronomeOpen));
+  elements.viewerAnnotationButton?.addEventListener("click", toggleAnnotationMode);
+  elements.viewerNativeAnnotationButton?.addEventListener("click", openNativeAnnotationForCurrentPage);
+  ["pointerdown", "pointermove", "pointerup", "pointercancel", "click"].forEach((eventName) => {
+    elements.viewerPianoPanel?.addEventListener(eventName, (event) => event.stopPropagation());
+    elements.viewerMetronomePanel?.addEventListener(eventName, (event) => event.stopPropagation());
+  });
+  elements.viewerPianoPanel?.addEventListener("touchstart", (event) => event.stopPropagation(), { passive: true });
+  elements.viewerPianoPanel?.addEventListener("touchmove", (event) => event.stopPropagation(), { passive: true });
+  elements.viewerMetronomePanel?.addEventListener("touchstart", (event) => event.stopPropagation(), { passive: true });
+  elements.viewerMetronomePanel?.addEventListener("touchmove", (event) => event.stopPropagation(), { passive: true });
+  elements.metronomePlayButton?.addEventListener("click", toggleMetronome);
+  elements.metronomeMinusButton?.addEventListener("click", () => adjustMetronomeBpm(-1));
+  elements.metronomePlusButton?.addEventListener("click", () => adjustMetronomeBpm(1));
+  elements.metronomeSlider?.addEventListener("input", (event) => setMetronomeBpm(Number(event.target.value)));
+  elements.metronomeMeterOptions?.addEventListener("click", handleMetronomeMeterClick);
+  // “更多”弹出菜单：仅做显示/隐藏（标注、收藏的逻辑不变）。
+  elements.viewerMoreButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleViewerMoreMenu();
+  });
+  // 点击菜单内任意按钮（标注/收藏）后收起菜单；其原有点击逻辑照常执行。
+  elements.viewerMoreMenu?.addEventListener("click", (event) => {
+    if (event.target.closest("button")) {
+      setViewerMoreMenuOpen(false);
+    }
+  });
+  // 点击菜单和“更多”按钮之外的任意区域时收起菜单。
+  document.addEventListener("click", (event) => {
+    if (elements.viewerMore?.classList.contains("is-open") && !event.target.closest(".viewer-more")) {
+      setViewerMoreMenuOpen(false);
+    }
+  });
+  elements.viewerPages?.addEventListener("pointerdown", () => setViewerMoreMenuOpen(false));
+  elements.annotationToolButtons?.forEach((button) => {
+    button.addEventListener("click", () => setAnnotationTool(button.dataset.annotationTool));
+  });
+  elements.annotationColorInput?.addEventListener("input", () => {
+    state.annotationColor = elements.annotationColorInput.value || state.annotationColor;
+  });
+  elements.annotationSizeInput?.addEventListener("input", () => {
+    state.annotationSize = clamp(Number(elements.annotationSizeInput.value) || 4, 2, 18);
+  });
+  elements.annotationUndoButton?.addEventListener("click", undoAnnotationStroke);
+  elements.annotationRedoButton?.addEventListener("click", redoAnnotationStroke);
+  elements.annotationClearButton?.addEventListener("click", clearCurrentPageAnnotations);
+  elements.annotationToggleVisibilityButton?.addEventListener("click", toggleAnnotationVisibility);
+  elements.annotationDoneButton?.addEventListener("click", () => {
+    finishAnnotationMode().catch((error) => {
+      console.warn(error);
+      setStatus("标注暂未保存，请稍后重试。", true);
+    });
+  });
+  updateNativeAnnotationButtonState();
   elements.cancelDeleteButton.addEventListener("click", () => closeDeleteDialog(false));
   elements.confirmDeleteButton.addEventListener("click", () => closeDeleteDialog(true));
   elements.deleteDialog.addEventListener("cancel", (event) => {
@@ -1078,12 +1257,27 @@ function bindEvents() {
 
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("dragstart", handleDragStart);
-  window.addEventListener("beforeunload", revokeAllUrls);
-  window.addEventListener("resize", clampFabIntoBounds);
+  window.addEventListener("beforeunload", () => {
+    flushAnnotationSave();
+    revokeAllUrls();
+  });
+  window.addEventListener("pagehide", () => {
+    flushAnnotationSave();
+  });
+  window.addEventListener("resize", () => {
+    clampFabIntoBounds();
+    scheduleAnnotationCanvasResize();
+  });
   window.addEventListener("orientationchange", () => {
     window.setTimeout(clampFabIntoBounds, 250);
+    window.setTimeout(scheduleAnnotationCanvasResize, 280);
   });
-  document.addEventListener("visibilitychange", handleWakeLockVisibilityChange);
+  document.addEventListener("visibilitychange", () => {
+    handleWakeLockVisibilityChange();
+    if (document.visibilityState === "hidden") {
+      flushAnnotationSave();
+    }
+  });
   // 自定义“边缘返回”手势（替代不可靠的浏览器历史手势）。capture 阶段记录，passive 观察，不打断内容滚动。
   document.addEventListener("touchstart", handleEdgeBackTouchStart, { passive: true, capture: true });
   document.addEventListener("touchend", handleEdgeBackTouchEnd, { passive: true, capture: true });
@@ -1093,12 +1287,11 @@ function bindEvents() {
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     state.installPrompt = event;
-    elements.installAppButton.hidden = false;
-    refreshIcons();
+    updateInstallButtonVisibility();
   });
   window.addEventListener("appinstalled", () => {
     state.installPrompt = null;
-    elements.installAppButton.hidden = true;
+    updateInstallButtonVisibility();
     setStatus("已安装到手机。");
   });
 }
@@ -2850,6 +3043,7 @@ async function handlePermanentDeleteTrashEntry(entry, button) {
     button.disabled = true;
   }
   try {
+    await cleanupTrashAnnotationResidues([entry]);
     await deleteTrashEntry(entry.id);
   } catch (error) {
     console.warn(error);
@@ -2875,6 +3069,7 @@ async function emptyRecycleBin() {
     return;
   }
   try {
+    await cleanupTrashAnnotationResidues(entries);
     await clearTrashStore();
     setStatus("已清空回收站。");
   } catch (error) {
@@ -2917,7 +3112,8 @@ async function handleExportBackup() {
   setBackupStatus("正在导出备份...");
   try {
     const result = await exportFullBackup();
-    setBackupStatus(`已导出备份：${result.scores} 份歌谱、${result.folders} 个文件夹、${result.setlists} 个歌单。`);
+    const annotationText = result.annotations ? `、${result.annotations} 条标注` : "";
+    setBackupStatus(`已导出备份：${result.scores} 份歌谱、${result.folders} 个文件夹、${result.setlists} 个歌单${annotationText}。`);
   } catch (error) {
     console.error(error);
     setBackupStatus(getErrorMessage(error) || "导出失败，请稍后重试。", true);
@@ -2939,6 +3135,9 @@ async function handleImportBackup(fileList) {
     const parts = [`已导入 ${result.importedScores} 份歌谱`];
     if (result.importedSetlists) {
       parts.push(`${result.importedSetlists} 个歌单`);
+    }
+    if (result.importedAnnotations) {
+      parts.push(`${result.importedAnnotations} 条标注`);
     }
     if (result.skippedScores) {
       parts.push(`跳过 ${result.skippedScores} 份同名歌谱`);
@@ -2983,6 +3182,7 @@ function setViewerModePreference(mode) {
       resetViewerGestureState();
       setViewerZoom(VIEWER_MIN_ZOOM);
       renderViewerPages(score);
+      updateViewerPianoKeySignature();
       elements.viewerPages.scrollTo({ left: 0, top: 0 });
     }
   } else if (elements.viewerDialog?.open && state.currentViewerSetlistId) {
@@ -2991,6 +3191,7 @@ function setViewerModePreference(mode) {
       resetViewerGestureState();
       setViewerZoom(VIEWER_MIN_ZOOM);
       renderViewerPages(createSetlistViewerScore(setlist));
+      updateViewerPianoKeySignature();
       elements.viewerPages.scrollTo({ left: 0, top: 0 });
     }
   }
@@ -3895,7 +4096,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=175");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=197");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -3904,6 +4105,7 @@ async function registerServiceWorker() {
 
 async function installApp() {
   if (!state.installPrompt) {
+    showInstallFallbackGuide();
     return;
   }
 
@@ -3916,6 +4118,16 @@ async function installApp() {
   if (choice.outcome !== "accepted") {
     setStatus("可以稍后再安装。");
   }
+  updateInstallButtonVisibility();
+}
+
+function showInstallFallbackGuide() {
+  const message = isAndroidDevice()
+    ? "如果没有弹出安装窗口，请点浏览器右上角菜单，选择“安装应用”或“添加到主屏幕”。部分安卓自带浏览器只能通过浏览器菜单安装网页 App。"
+    : "请使用浏览器菜单中的“添加到主屏幕”或“安装应用”来安装。";
+  setStatus(message);
+  window.alert(message);
+  updateInstallButtonVisibility();
 }
 
 function setViewerZoom(value, options = {}) {
@@ -3926,6 +4138,25 @@ function setViewerZoom(value, options = {}) {
   state.viewerZoom = Math.round(nextZoom * 100) / 100;
   elements.viewerPages.style.setProperty("--viewer-zoom", state.viewerZoom);
   elements.viewerPages.classList.toggle("is-zoomed", state.viewerZoom > VIEWER_MIN_ZOOM);
+
+  if (anchor && previousZoom > 0 && previousZoom !== state.viewerZoom) {
+    applyViewerZoomAnchor(anchor);
+  }
+}
+
+function setViewerZoomFast(value, options = {}) {
+  const previousZoom = state.viewerZoom;
+  const nextZoom = clamp(value, VIEWER_MIN_ZOOM, VIEWER_MAX_ZOOM);
+
+  if (Math.abs(nextZoom - previousZoom) < 0.001) {
+    return;
+  }
+
+  const anchor = getViewerZoomAnchor(options.centerPoint);
+
+  state.viewerZoom = Math.round(nextZoom * 1000) / 1000;
+  elements.viewerPages.style.setProperty("--viewer-zoom", state.viewerZoom);
+  elements.viewerPages.classList.toggle("is-zoomed", state.viewerZoom > VIEWER_MIN_ZOOM + 0.001);
 
   if (anchor && previousZoom > 0 && previousZoom !== state.viewerZoom) {
     applyViewerZoomAnchor(anchor);
@@ -4008,7 +4239,347 @@ function resetViewerZoom() {
   });
 }
 
+function resetViewerPointerState() {
+  resetViewerLivePinchState();
+  state.viewerPointers.clear();
+  state.viewerPinchStartDistance = 0;
+  state.viewerPinchStartZoom = state.viewerZoom;
+  state.viewerPinchLastCenter = null;
+  state.viewerPinchLastDistance = 0;
+  state.viewerPinchLastAppliedZoom = state.viewerZoom;
+  state.viewerDrag = null;
+  state.viewerTapStart = null;
+  elements.viewerPages?.classList.remove("is-pinching", "is-dragging");
+}
+
+function requestViewerPinchFrame() {
+  if (state.viewerPinchRaf) {
+    return;
+  }
+
+  state.viewerPinchRaf = requestAnimationFrame(applyViewerPinchFrame);
+}
+
+function applyViewerPinchFrame() {
+  state.viewerPinchRaf = 0;
+
+  const pending = state.viewerPendingPinch;
+  state.viewerPendingPinch = null;
+  const target = state.viewerPinchTarget;
+
+  if (!pending || !target || !state.viewerPinchActive || !state.viewerPinchStartDistance) {
+    return;
+  }
+
+  const rawScale = pending.distance / state.viewerPinchStartDistance;
+  const finalZoom = clamp(state.viewerPinchStartZoom * rawScale, VIEWER_MIN_ZOOM, VIEWER_MAX_ZOOM);
+  const visualScale = finalZoom / Math.max(state.viewerPinchStartZoom, 0.001);
+  const startCenter = state.viewerPinchStartCenter || pending.center;
+  const currentCenter = pending.center || startCenter;
+  state.viewerPinchCurrentCenter = currentCenter;
+  state.viewerPinchLiveScale = visualScale;
+  state.viewerPinchLiveTranslateX = currentCenter.x - startCenter.x;
+  state.viewerPinchLiveTranslateY = currentCenter.y - startCenter.y;
+  state.viewerPinchLastCenter = pending.center;
+  state.viewerPinchLastDistance = pending.distance;
+  state.viewerPinchLastAppliedZoom = finalZoom;
+
+  target.style.setProperty("--pinch-scale", String(visualScale));
+  target.style.setProperty("--pinch-x", `${state.viewerPinchLiveTranslateX}px`);
+  target.style.setProperty("--pinch-y", `${state.viewerPinchLiveTranslateY}px`);
+}
+
+function getViewerPinchTarget(center) {
+  if (center) {
+    const element = document.elementFromPoint(center.x, center.y);
+    const shell = element?.closest(".viewer-page-shell");
+    if (shell && elements.viewerPages?.contains(shell)) {
+      return shell;
+    }
+  }
+
+  const currentPageId = getCurrentViewerPageId();
+  if (currentPageId) {
+    const escapedPageId = cssEscape(currentPageId);
+    const shell = elements.viewerPages?.querySelector(`.viewer-page-shell[data-page-id="${escapedPageId}"]`);
+    if (shell) {
+      return shell;
+    }
+  }
+
+  return getMostVisibleViewerPageShell();
+}
+
+function getMostVisibleViewerPageShell() {
+  const container = elements.viewerPages;
+  if (!container) {
+    return null;
+  }
+
+  const containerRect = container.getBoundingClientRect();
+  const targetY = containerRect.top + containerRect.height / 2;
+  let nearestTarget = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  container.querySelectorAll(".viewer-page-shell").forEach((candidate) => {
+    const rect = candidate.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return;
+    }
+    const distance = Math.abs(rect.top + rect.height / 2 - targetY);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestTarget = candidate;
+    }
+  });
+  return nearestTarget;
+}
+
+function createViewerPinchAnchor(target, center) {
+  const container = elements.viewerPages;
+  if (!target || !center || !container) {
+    return null;
+  }
+
+  const targetRect = target.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+
+  if (!targetRect.width || !targetRect.height) {
+    return null;
+  }
+
+  return {
+    target,
+    ratioX: clamp((center.x - targetRect.left) / targetRect.width, 0, 1),
+    ratioY: clamp((center.y - targetRect.top) / targetRect.height, 0, 1),
+    startCenterX: center.x,
+    startCenterY: center.y,
+    startOffsetX: center.x - containerRect.left,
+    startOffsetY: center.y - containerRect.top,
+    startScrollLeft: container.scrollLeft,
+    startScrollTop: container.scrollTop,
+  };
+}
+
+function beginViewerLivePinch() {
+  const center = getViewerPointerCenter();
+  const target = getViewerPinchTarget(center);
+  const distance = getViewerPointerDistance();
+  if (!center || !target || !distance) {
+    return false;
+  }
+
+  if (state.viewerPinchCommitFrame) {
+    cancelAnimationFrame(state.viewerPinchCommitFrame);
+    state.viewerPinchCommitFrame = 0;
+  }
+  clearViewerLivePinchTransform();
+  state.viewerPinchActive = true;
+  state.viewerPinchTarget = target;
+  state.viewerPinchAnchor = createViewerPinchAnchor(target, center);
+  state.viewerPinchStartDistance = distance;
+  state.viewerPinchStartZoom = state.viewerZoom;
+  state.viewerPinchStartCenter = center;
+  state.viewerPinchCurrentCenter = center;
+  state.viewerPinchLiveScale = 1;
+  state.viewerPinchLiveTranslateX = 0;
+  state.viewerPinchLiveTranslateY = 0;
+  state.viewerPendingPinch = null;
+  state.viewerPinchLastCenter = center;
+  state.viewerPinchLastDistance = distance;
+  state.viewerPinchLastAppliedZoom = state.viewerZoom;
+
+  const rect = target.getBoundingClientRect();
+  state.viewerPinchOriginX = center.x - rect.left;
+  state.viewerPinchOriginY = center.y - rect.top;
+
+  target.classList.add("is-live-pinching");
+  target.style.setProperty("--pinch-origin-x", `${state.viewerPinchOriginX}px`);
+  target.style.setProperty("--pinch-origin-y", `${state.viewerPinchOriginY}px`);
+  target.style.setProperty("--pinch-scale", "1");
+  target.style.setProperty("--pinch-x", "0px");
+  target.style.setProperty("--pinch-y", "0px");
+
+  elements.viewerPages.classList.add("is-pinching");
+  getTouchViewerPointerEntries().forEach(([pointerId]) => captureViewerPointer(pointerId));
+  return true;
+}
+
+function commitViewerLivePinch() {
+  const target = state.viewerPinchTarget;
+  const anchor = state.viewerPinchAnchor;
+  if (!state.viewerPinchActive || !target) {
+    resetViewerLivePinchState();
+    return;
+  }
+
+  if (state.viewerPendingPinch) {
+    if (state.viewerPinchRaf) {
+      cancelAnimationFrame(state.viewerPinchRaf);
+      state.viewerPinchRaf = 0;
+    }
+    applyViewerPinchFrame();
+  }
+
+  if (state.viewerPinchRaf) {
+    cancelAnimationFrame(state.viewerPinchRaf);
+    state.viewerPinchRaf = 0;
+  }
+
+  const finalZoom = clamp(
+    state.viewerPinchStartZoom * state.viewerPinchLiveScale,
+    VIEWER_MIN_ZOOM,
+    VIEWER_MAX_ZOOM,
+  );
+  const currentCenter = state.viewerPinchCurrentCenter || state.viewerPinchStartCenter;
+  const translateX = state.viewerPinchLiveTranslateX || 0;
+  const translateY = state.viewerPinchLiveTranslateY || 0;
+
+  if (state.viewerPinchCommitFrame) {
+    cancelAnimationFrame(state.viewerPinchCommitFrame);
+  }
+
+  state.viewerPinchCommitFrame = requestAnimationFrame(() => {
+    state.viewerPinchCommitFrame = 0;
+    clearViewerLivePinchTransform(target);
+    commitViewerZoomWithPinchAnchor({
+      finalZoom,
+      anchor,
+      currentCenter,
+      translateX,
+      translateY,
+    });
+    resetViewerLivePinchStateAfterCommit();
+
+    requestAnimationFrame(() => {
+      resizeAllAnnotationCanvases();
+      renderAllVisibleAnnotations();
+    });
+  });
+}
+
+function commitViewerZoomWithPinchAnchor({ finalZoom, anchor, currentCenter, translateX = 0, translateY = 0 }) {
+  const container = elements.viewerPages;
+  if (!container) {
+    return;
+  }
+
+  const previousZoom = state.viewerZoom;
+  const nextZoom = Math.round(clamp(finalZoom, VIEWER_MIN_ZOOM, VIEWER_MAX_ZOOM) * 1000) / 1000;
+  const targetCenter =
+    currentCenter ||
+    (anchor
+      ? {
+          x: anchor.startCenterX + translateX,
+          y: anchor.startCenterY + translateY,
+        }
+      : null);
+
+  if (!anchor || !anchor.target || !anchor.target.isConnected) {
+    setViewerZoomFast(nextZoom, { centerPoint: targetCenter || undefined });
+    clampViewerScroll();
+    return;
+  }
+
+  if (Math.abs(nextZoom - previousZoom) >= 0.001) {
+    state.viewerZoom = nextZoom;
+    container.style.setProperty("--viewer-zoom", state.viewerZoom);
+    container.classList.toggle("is-zoomed", state.viewerZoom > VIEWER_MIN_ZOOM + 0.001);
+  }
+
+  const targetRect = anchor.target.getBoundingClientRect();
+  const anchorClientX = targetRect.left + targetRect.width * anchor.ratioX;
+  const anchorClientY = targetRect.top + targetRect.height * anchor.ratioY;
+  const finalCenter = targetCenter || {
+    x: anchor.startCenterX + translateX,
+    y: anchor.startCenterY + translateY,
+  };
+
+  container.scrollLeft += anchorClientX - finalCenter.x;
+  container.scrollTop += anchorClientY - finalCenter.y;
+  clampViewerScroll();
+}
+
+function clampViewerScroll() {
+  const container = elements.viewerPages;
+  if (!container) {
+    return;
+  }
+
+  const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+
+  if (container.scrollLeft < 0) {
+    container.scrollLeft = 0;
+  } else if (container.scrollLeft > maxLeft) {
+    container.scrollLeft = maxLeft;
+  }
+
+  if (container.scrollTop < 0) {
+    container.scrollTop = 0;
+  } else if (container.scrollTop > maxTop) {
+    container.scrollTop = maxTop;
+  }
+}
+
+function clearViewerLivePinchTransform(target = state.viewerPinchTarget) {
+  if (!target) {
+    return;
+  }
+  target.classList.remove("is-live-pinching");
+  target.style.removeProperty("--pinch-origin-x");
+  target.style.removeProperty("--pinch-origin-y");
+  target.style.removeProperty("--pinch-scale");
+  target.style.removeProperty("--pinch-x");
+  target.style.removeProperty("--pinch-y");
+}
+
+function resetViewerLivePinchStateAfterCommit() {
+  state.viewerPendingPinch = null;
+  state.viewerPinchActive = false;
+  state.viewerPinchTarget = null;
+  state.viewerPinchAnchor = null;
+  state.viewerPinchStartDistance = 0;
+  state.viewerPinchStartCenter = null;
+  state.viewerPinchCurrentCenter = null;
+  state.viewerPinchLiveScale = 1;
+  state.viewerPinchLiveTranslateX = 0;
+  state.viewerPinchLiveTranslateY = 0;
+  state.viewerPinchLastCenter = null;
+  state.viewerPinchLastDistance = 0;
+  state.viewerPinchLastAppliedZoom = state.viewerZoom;
+  elements.viewerPages?.classList.remove("is-pinching");
+}
+
+function resetViewerLivePinchState() {
+  if (state.viewerPinchRaf) {
+    cancelAnimationFrame(state.viewerPinchRaf);
+    state.viewerPinchRaf = 0;
+  }
+  if (state.viewerPinchCommitFrame) {
+    cancelAnimationFrame(state.viewerPinchCommitFrame);
+    state.viewerPinchCommitFrame = 0;
+  }
+  clearViewerLivePinchTransform();
+  state.viewerPendingPinch = null;
+  state.viewerPinchActive = false;
+  state.viewerPinchTarget = null;
+  state.viewerPinchAnchor = null;
+  state.viewerPinchStartDistance = 0;
+  state.viewerPinchStartCenter = null;
+  state.viewerPinchCurrentCenter = null;
+  state.viewerPinchLiveScale = 1;
+  state.viewerPinchLiveTranslateX = 0;
+  state.viewerPinchLiveTranslateY = 0;
+  state.viewerPinchLastCenter = null;
+  state.viewerPinchLastDistance = 0;
+  state.viewerPinchLastAppliedZoom = state.viewerZoom;
+  elements.viewerPages?.classList.remove("is-pinching");
+}
+
 function handleViewerWheel(event) {
+  if (state.annotationMode) {
+    return;
+  }
   if (!elements.viewerDialog.open || (!event.ctrlKey && !event.metaKey)) {
     return;
   }
@@ -4023,15 +4594,68 @@ function handleViewerWheel(event) {
   });
 }
 
+function getPointerKind(event) {
+  return event?.pointerType || "mouse";
+}
+
+function isTouchPointer(event) {
+  return getPointerKind(event) === "touch";
+}
+
+function isPenPointer(event) {
+  return getPointerKind(event) === "pen";
+}
+
+function getTouchViewerPointerEntries() {
+  return Array.from(state.viewerPointers.entries()).filter(([, pointer]) => pointer?.pointerType === "touch");
+}
+
+function getTouchViewerPointers() {
+  return getTouchViewerPointerEntries().map(([, pointer]) => pointer);
+}
+
+function clearPenFromViewerPointers(pointerId) {
+  if (pointerId != null) {
+    state.viewerPointers.delete(pointerId);
+  }
+  state.viewerPointers.forEach((value, key) => {
+    if (value?.pointerType === "pen" || value?.pointerType === "mouse") {
+      state.viewerPointers.delete(key);
+    }
+  });
+}
+
 function handleViewerPointerDown(event) {
   if (!elements.viewerDialog.open || !event.target.closest(".viewer-pages")) {
+    return;
+  }
+
+  if (state.annotationMode && isPenPointer(event)) {
+    clearPenFromViewerPointers(event.pointerId);
+    return;
+  }
+
+  if (state.annotationMode && !isTouchPointer(event)) {
+    state.viewerPointers.delete(event.pointerId);
     return;
   }
 
   state.viewerPointers.set(event.pointerId, {
     x: event.clientX,
     y: event.clientY,
+    pointerType: getPointerKind(event),
   });
+
+  if (state.annotationMode) {
+    if (getTouchViewerPointers().length === 2) {
+      event.preventDefault();
+      cancelAnnotationDraft();
+      state.viewerTapStart = null;
+      state.viewerDrag = null;
+      beginViewerLivePinch();
+    }
+    return;
+  }
 
   if (state.viewerPointers.size === 2) {
     event.preventDefault();
@@ -4039,6 +4663,7 @@ function handleViewerPointerDown(event) {
     state.viewerDrag = null;
     state.viewerPinchStartDistance = getViewerPointerDistance();
     state.viewerPinchStartZoom = state.viewerZoom;
+    state.viewerPinchLastCenter = getViewerPointerCenter();
     elements.viewerPages.classList.add("is-pinching");
     state.viewerPointers.forEach((_, pointerId) => captureViewerPointer(pointerId));
     return;
@@ -4067,6 +4692,11 @@ function handleViewerPointerDown(event) {
 }
 
 function handleViewerPointerMove(event) {
+  if (state.annotationMode && isPenPointer(event)) {
+    clearPenFromViewerPointers(event.pointerId);
+    return;
+  }
+
   if (!state.viewerPointers.has(event.pointerId)) {
     return;
   }
@@ -4074,7 +4704,22 @@ function handleViewerPointerMove(event) {
   state.viewerPointers.set(event.pointerId, {
     x: event.clientX,
     y: event.clientY,
+    pointerType: getPointerKind(event),
   });
+
+  if (state.annotationMode) {
+    if (getTouchViewerPointers().length === 2 && state.viewerPinchActive) {
+      event.preventDefault();
+      const distance = getViewerPointerDistance();
+      const center = getViewerPointerCenter();
+      state.viewerPendingPinch = {
+        distance,
+        center,
+      };
+      requestViewerPinchFrame();
+    }
+    return;
+  }
 
   if (state.viewerPointers.size === 2 && state.viewerPinchStartDistance > 0) {
     event.preventDefault();
@@ -4100,6 +4745,28 @@ function handleViewerPointerMove(event) {
 }
 
 function handleViewerPointerEnd(event) {
+  if (state.annotationMode && isPenPointer(event)) {
+    clearPenFromViewerPointers(event.pointerId);
+    return;
+  }
+
+  if (state.annotationMode) {
+    state.viewerPointers.delete(event.pointerId);
+    try {
+      elements.viewerPages.releasePointerCapture(event.pointerId);
+    } catch (error) {
+      // Pointer capture may already be released by the browser.
+    }
+    const remainingTouchPointers = getTouchViewerPointers();
+    if (remainingTouchPointers.length < 2) {
+      if (state.viewerPinchActive && !state.viewerPinchCommitFrame) {
+        commitViewerLivePinch();
+      } else if (remainingTouchPointers.length === 0 && !state.viewerPinchActive && !state.viewerPinchCommitFrame) {
+        resetViewerLivePinchState();
+      }
+    }
+    return;
+  }
   const tapStart = state.viewerTapStart;
   state.viewerPointers.delete(event.pointerId);
 
@@ -4124,6 +4791,7 @@ function handleViewerPointerEnd(event) {
 
   if (state.viewerPointers.size < 2) {
     state.viewerPinchStartDistance = 0;
+    state.viewerPinchLastCenter = null;
     elements.viewerPages.classList.remove("is-pinching");
   }
 }
@@ -4161,23 +4829,25 @@ function toggleViewerZoom(x, y) {
 }
 
 function getViewerPointerDistance() {
-  const pointers = Array.from(state.viewerPointers.values());
-  if (pointers.length < 2) {
+  const pointers = getTouchViewerPointers();
+  const source = pointers.length >= 2 ? pointers : Array.from(state.viewerPointers.values());
+  if (source.length < 2) {
     return 0;
   }
 
-  return Math.hypot(pointers[0].x - pointers[1].x, pointers[0].y - pointers[1].y);
+  return Math.hypot(source[0].x - source[1].x, source[0].y - source[1].y);
 }
 
 function getViewerPointerCenter() {
-  const pointers = Array.from(state.viewerPointers.values());
-  if (pointers.length < 2) {
+  const pointers = getTouchViewerPointers();
+  const source = pointers.length >= 2 ? pointers : Array.from(state.viewerPointers.values());
+  if (source.length < 2) {
     return null;
   }
 
   return {
-    x: (pointers[0].x + pointers[1].x) / 2,
-    y: (pointers[0].y + pointers[1].y) / 2,
+    x: (source[0].x + source[1].x) / 2,
+    y: (source[0].y + source[1].y) / 2,
   };
 }
 
@@ -4422,6 +5092,36 @@ function openDatabase() {
       if (!db.objectStoreNames.contains(TRASH_STORE_NAME)) {
         const trashStore = db.createObjectStore(TRASH_STORE_NAME, { keyPath: "id" });
         trashStore.createIndex("trashedAt", "trashedAt", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(ANNOTATION_STORE_NAME)) {
+        const annotationStore = db.createObjectStore(ANNOTATION_STORE_NAME, { keyPath: "id" });
+        annotationStore.createIndex("pageId", "pageId", { unique: false });
+        annotationStore.createIndex("scoreId", "scoreId", { unique: false });
+        annotationStore.createIndex("userId", "userId", { unique: false });
+        annotationStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        annotationStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        annotationStore.createIndex("updatedAt", "updatedAt", { unique: false });
+      } else {
+        const annotationStore = request.transaction.objectStore(ANNOTATION_STORE_NAME);
+        if (!annotationStore.indexNames.contains("pageId")) {
+          annotationStore.createIndex("pageId", "pageId", { unique: false });
+        }
+        if (!annotationStore.indexNames.contains("scoreId")) {
+          annotationStore.createIndex("scoreId", "scoreId", { unique: false });
+        }
+        if (!annotationStore.indexNames.contains("userId")) {
+          annotationStore.createIndex("userId", "userId", { unique: false });
+        }
+        if (!annotationStore.indexNames.contains("syncStatus")) {
+          annotationStore.createIndex("syncStatus", "syncStatus", { unique: false });
+        }
+        if (!annotationStore.indexNames.contains("deletedAt")) {
+          annotationStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        }
+        if (!annotationStore.indexNames.contains("updatedAt")) {
+          annotationStore.createIndex("updatedAt", "updatedAt", { unique: false });
+        }
       }
 
       // 同步发件箱（sync_outbox）：把每个待推送到云端的操作显式入队，便于观测与重试。
@@ -5190,8 +5890,8 @@ async function deleteScoresLocalAtomic(scoreIds, options = {}) {
   // 阶段一：先在只读事务中读出受影响的页与歌单项，await 完成后再写。
   // 旧实现在 readwrite 事务的 getAll().onsuccess 回调里发起写入，这种模式在
   // iOS / iPad Safari 上容易让事务卡死（永不 oncomplete），从而拖垮后续的保存。
-  const [pageRecords, itemRecords] = await withTimeout(
-    Promise.all([readPagesForScoreIds(ids), readSetlistItemsForScoreIds(ids)]),
+  const [pageRecords, itemRecords, annotationRecords] = await withTimeout(
+    Promise.all([readPagesForScoreIds(ids), readSetlistItemsForScoreIds(ids), readAnnotationsForScoreIds(ids)]),
     Math.max(LOCAL_SAVE_TIMEOUT, ids.length * 4000 + 5000),
     "读取本地数据超时，请稍后重试。",
   );
@@ -5209,6 +5909,13 @@ async function deleteScoresLocalAtomic(scoreIds, options = {}) {
     list.push(item);
     itemsByScore.set(key, list);
   });
+  const annotationsByScore = new Map();
+  annotationRecords.forEach((annotation) => {
+    const key = String(annotation.scoreId);
+    const list = annotationsByScore.get(key) || [];
+    list.push(annotation);
+    annotationsByScore.set(key, list);
+  });
 
   // 阶段二：单个读写事务，所有写操作同步发起（不依赖异步回调），完成更可靠。
   // 通过 runIdbTransaction 获得统一超时/abort/重连兜底，并经本地写队列串行执行。
@@ -5216,9 +5923,9 @@ async function deleteScoresLocalAtomic(scoreIds, options = {}) {
   const deleteTimeout = Math.max(LOCAL_SAVE_TIMEOUT, ids.length * 4000 + 5000);
   return enqueueLocalWrite("deleteScoresLocalAtomic", () =>
     runIdbTransaction(
-      [STORE_NAME, PAGE_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      [STORE_NAME, PAGE_STORE_NAME, SETLIST_ITEM_STORE_NAME, ANNOTATION_STORE_NAME],
       "readwrite",
-      ([scoreStore, pageStore, setlistItemStore]) => {
+      ([scoreStore, pageStore, setlistItemStore, annotationStore]) => {
         ids.forEach((scoreId) => {
           const score = providedScores.get(scoreId) || state.scores.find((item) => item.id === scoreId) || null;
           const forceSoft = Boolean(options.forceSoft);
@@ -5227,6 +5934,7 @@ async function deleteScoresLocalAtomic(scoreIds, options = {}) {
           const userId = score?.userId || state.session?.user?.id || null;
           const pages = pagesByScore.get(scoreId) || [];
           const items = itemsByScore.get(scoreId) || [];
+          const annotations = annotationsByScore.get(scoreId) || [];
 
           if (keepTombstone && score) {
             scoreStore.put({
@@ -5254,10 +5962,20 @@ async function deleteScoresLocalAtomic(scoreIds, options = {}) {
                 syncStatus: SYNC_STATUS_PENDING,
               });
             });
+            annotations.forEach((annotation) => {
+              annotationStore.put({
+                ...annotation,
+                userId: annotation.userId || userId,
+                deletedAt,
+                updatedAt: deletedAt,
+                syncStatus: SYNC_STATUS_PENDING,
+              });
+            });
           } else {
             scoreStore.delete(scoreId);
             pages.forEach((page) => pageStore.delete(page.id));
             items.forEach((item) => setlistItemStore.delete(item.id));
+            annotations.forEach((annotation) => annotationStore.delete(annotation.id));
           }
         });
       },
@@ -5299,6 +6017,32 @@ function clearTrashStore() {
   return clearStore(TRASH_STORE_NAME, "清空回收站超时，请重试。");
 }
 
+function cleanupTrashAnnotationResidues(entries) {
+  const annotationIds = Array.from(
+    new Set(
+      (entries || [])
+        .flatMap((entry) => entry.annotations || [])
+        .map((annotation) => annotation?.id)
+        .filter(Boolean)
+        .map(String),
+    ),
+  );
+  if (!annotationIds.length) {
+    return Promise.resolve();
+  }
+
+  return enqueueLocalWrite("cleanupTrashAnnotationResidues", () =>
+    runIdbTransaction(
+      ANNOTATION_STORE_NAME,
+      "readwrite",
+      (annotationStore) => {
+        annotationIds.forEach((annotationId) => annotationStore.delete(annotationId));
+      },
+      { timeoutMessage: "清理标注回收残留超时，请重试。" },
+    ),
+  );
+}
+
 // 删除前把歌谱（含图片 blob）快照存入回收站，便于后续恢复。
 async function snapshotScoresToTrash(scores) {
   const targets = (scores || []).filter(Boolean);
@@ -5306,7 +6050,10 @@ async function snapshotScoresToTrash(scores) {
     return;
   }
   const ids = targets.map((score) => score.id);
-  const pageRecords = await readPagesForScoreIds(ids);
+  const [pageRecords, annotationRecords] = await Promise.all([
+    readPagesForScoreIds(ids),
+    readAnnotationsForScoreIds(ids),
+  ]);
   const pagesByScore = new Map();
   pageRecords.forEach((page) => {
     const key = String(page.scoreId);
@@ -5314,12 +6061,20 @@ async function snapshotScoresToTrash(scores) {
     list.push(page);
     pagesByScore.set(key, list);
   });
+  const annotationsByScore = new Map();
+  annotationRecords.forEach((annotation) => {
+    const key = String(annotation.scoreId);
+    const list = annotationsByScore.get(key) || [];
+    list.push(annotation);
+    annotationsByScore.set(key, list);
+  });
   const trashedAt = new Date().toISOString();
   for (const score of targets) {
     const folder = score.folderId ? state.folders.find((item) => item.id === score.folderId) : null;
     const pages = (pagesByScore.get(String(score.id)) || (score.pages || []))
       .slice()
       .sort((a, b) => a.pageIndex - b.pageIndex);
+    const annotations = annotationsByScore.get(String(score.id)) || [];
     const entry = {
       id: String(score.id),
       trashedAt,
@@ -5329,6 +6084,7 @@ async function snapshotScoresToTrash(scores) {
       pageCount: pages.length,
       score: toScoreRecord(score),
       pages: pages.map((page) => ({ ...page })),
+      annotations: annotations.map((annotation) => ({ ...annotation })),
     };
     try {
       await putTrashEntry(entry);
@@ -5357,26 +6113,68 @@ async function restoreScoreFromTrash(id) {
     updatedAt: now,
     syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
   };
-  const newPages = (entry.pages || []).map((page, index) => ({
-    ...page,
-    id: createId(),
-    scoreId: newScore.id,
-    userId,
-    pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
-    storagePath: null,
-    storageSyncedAt: null,
-    storageUploadVersion: 0,
-    deletedAt: null,
-    createdAt: now,
-    updatedAt: now,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-  }));
+  const pageIdMap = new Map();
+  const newPages = (entry.pages || []).map((page, index) => {
+    const newPageId = createId();
+    pageIdMap.set(String(page.id), newPageId);
+    return {
+      ...page,
+      id: newPageId,
+      scoreId: newScore.id,
+      userId,
+      pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+      storagePath: null,
+      storageSyncedAt: null,
+      storageUploadVersion: 0,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+    };
+  });
+  const newAnnotations = (entry.annotations || [])
+    .map((annotation) => {
+      const pageId = pageIdMap.get(String(annotation.pageId));
+      if (!pageId) {
+        return null;
+      }
+      return normalizeAnnotationRecord({
+        ...annotation,
+        id: createId(),
+        scoreId: newScore.id,
+        pageId,
+        userId,
+        deletedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+      });
+    })
+    .filter(Boolean);
 
   const saved = await saveScoreLocalAtomic(newScore, newPages, { requireBlobs: false });
+  for (const annotation of newAnnotations) {
+    await saveAnnotationRecord(annotation);
+    state.annotationRecords.set(annotation.pageId, annotation);
+    if (!saved) {
+      return false;
+    }
+    if (userId || state.session) {
+      enqueueOutboxTask("UPSERT_ANNOTATION", {
+        entityId: annotation.id,
+        entityType: "annotation",
+        dedupeKey: `annotation.upsert:${annotation.id}`,
+        payload: { annotation },
+      }).catch((error) => console.warn(error));
+    }
+  }
   insertSavedScoreInMemory(saved.score, saved.pages);
   await deleteTrashEntry(id);
   if (userId || state.session) {
     queueScoreCloudUpload(newScore.id);
+    if (newAnnotations.length) {
+      kickOutbox(0);
+    }
   }
   return true;
 }
@@ -5418,12 +6216,13 @@ function triggerFileDownload(filename, blob) {
 }
 
 async function exportFullBackup() {
-  const [scoreRecords, pageRecords, folderRecords, setlistRecords, setlistItemRecords] = await Promise.all([
+  const [scoreRecords, pageRecords, folderRecords, setlistRecords, setlistItemRecords, annotationRecords] = await Promise.all([
     getAllScores(),
     getAllScorePages(),
     getAllFolders(),
     getAllSetlists(),
     getAllSetlistItems(),
+    getAllAnnotations(),
   ]);
 
   const activeScores = scoreRecords.filter((score) => !score.deletedAt);
@@ -5435,6 +6234,13 @@ async function exportFullBackup() {
     (item) => !item.deletedAt && setlistIdSet.has(String(item.setlistId)) && scoreIdSet.has(String(item.scoreId)),
   );
   const activePages = pageRecords.filter((page) => !page.deletedAt && scoreIdSet.has(String(page.scoreId)));
+  const activePageIdSet = new Set(activePages.map((page) => String(page.id)));
+  const activeAnnotations = annotationRecords.filter(
+    (annotation) =>
+      !annotation.deletedAt &&
+      scoreIdSet.has(String(annotation.scoreId)) &&
+      activePageIdSet.has(String(annotation.pageId)),
+  );
 
   const encodedPages = [];
   for (const page of activePages) {
@@ -5462,11 +6268,17 @@ async function exportFullBackup() {
     pages: encodedPages,
     setlists: activeSetlists,
     setlistItems: activeItems,
+    annotations: activeAnnotations,
   };
 
   const stamp = new Date().toISOString().slice(0, 10);
   triggerFileDownload(`我的谱夹备份-${stamp}.json`, new Blob([JSON.stringify(backup)], { type: "application/json" }));
-  return { scores: activeScores.length, folders: activeFolders.length, setlists: activeSetlists.length };
+  return {
+    scores: activeScores.length,
+    folders: activeFolders.length,
+    setlists: activeSetlists.length,
+    annotations: activeAnnotations.length,
+  };
 }
 
 async function importFullBackup(file) {
@@ -5516,6 +6328,7 @@ async function importFullBackup(file) {
     list.push(page);
     pagesByScore.set(key, list);
   });
+  const pageIdMap = new Map();
 
   // 歌谱按名称去重：同名（未删除）则跳过，避免重复导入。
   const existingScoreByName = new Map(
@@ -5553,9 +6366,11 @@ async function importFullBackup(file) {
     const newPages = sourcePages.map((page, index) => {
       const restoredBlob = page.blobData ? base64ToBlob(page.blobData, page.blobType || page.type) : null;
       const { blobData, blobType, blob: ignoredBlob, ...pageRest } = page;
+      const newPageId = createId();
+      pageIdMap.set(String(page.id), newPageId);
       return {
         ...pageRest,
-        id: createId(),
+        id: newPageId,
         scoreId: newScoreId,
         userId,
         pageIndex: index,
@@ -5630,13 +6445,46 @@ async function importFullBackup(file) {
     });
   }
 
+  let importedAnnotations = 0;
+  for (const annotation of data.annotations || []) {
+    const newScoreId = scoreIdMap.get(String(annotation.scoreId));
+    const newPageId = pageIdMap.get(String(annotation.pageId));
+    if (!newScoreId || !newPageId || annotation.deletedAt) {
+      continue;
+    }
+    const newAnnotation = normalizeAnnotationRecord({
+      ...annotation,
+      id: createId(),
+      scoreId: newScoreId,
+      pageId: newPageId,
+      userId,
+      deletedAt: null,
+      createdAt: annotation.createdAt || now,
+      updatedAt: now,
+      syncStatus,
+    });
+    await saveAnnotationRecord(newAnnotation);
+    importedAnnotations += 1;
+    if (userId || state.session) {
+      enqueueOutboxTask("UPSERT_ANNOTATION", {
+        entityId: newAnnotation.id,
+        entityType: "annotation",
+        dedupeKey: `annotation.upsert:${newAnnotation.id}`,
+        payload: { annotation: newAnnotation },
+      }).catch((error) => console.warn(error));
+    }
+  }
+
   await loadScores();
   renderScores();
   renderSetlists();
   if (userId && state.cloudReady) {
+    if (importedAnnotations) {
+      kickOutbox(0);
+    }
     queueSync();
   }
-  return { importedScores, skippedScores, importedSetlists };
+  return { importedScores, skippedScores, importedSetlists, importedAnnotations };
 }
 
 function cleanupSetlistItemsForDeletedScores(scoreIds) {
@@ -5688,6 +6536,331 @@ function getAllSetlists() {
 
 function getAllSetlistItems() {
   return readStoreAll(SETLIST_ITEM_STORE_NAME);
+}
+
+function getAllAnnotations() {
+  return readStoreAll(ANNOTATION_STORE_NAME);
+}
+
+function cloneAnnotationStroke(stroke) {
+  return {
+    ...(stroke || {}),
+    points: Array.isArray(stroke?.points) ? stroke.points.map((point) => ({ ...point })) : [],
+  };
+}
+
+function cloneAnnotationStrokes(strokes) {
+  return Array.isArray(strokes) ? strokes.map(cloneAnnotationStroke) : [];
+}
+
+function normalizeAnnotationRecord(record) {
+  const now = new Date().toISOString();
+  return {
+    ...record,
+    id: String(record?.id || createId()),
+    scoreId: String(record?.scoreId || ""),
+    pageId: String(record?.pageId || ""),
+    userId: record?.userId || null,
+    baseWidth: Number(record?.baseWidth) || 0,
+    baseHeight: Number(record?.baseHeight) || 0,
+    strokes: cloneAnnotationStrokes(record?.strokes),
+    createdAt: record?.createdAt || now,
+    updatedAt: record?.updatedAt || record?.createdAt || now,
+    syncStatus: record?.syncStatus || SYNC_STATUS_LOCAL,
+    deletedAt: record?.deletedAt || null,
+  };
+}
+
+function getAnnotationSaveVersion(pageId) {
+  return state.annotationSaveVersions.get(String(pageId || "")) || 0;
+}
+
+function bumpAnnotationSaveVersion(pageId) {
+  const id = String(pageId || "");
+  if (!id) {
+    return 0;
+  }
+  const nextVersion = getAnnotationSaveVersion(id) + 1;
+  state.annotationSaveVersions.set(id, nextVersion);
+  return nextVersion;
+}
+
+function getAnnotationRecordForPage(pageId, options = {}) {
+  const id = String(pageId || "");
+  if (!id) {
+    return null;
+  }
+  const existing = state.annotationRecords.get(id);
+  if (existing || !options.create) {
+    return existing || null;
+  }
+  const page = state.currentViewerPages.find((item) => item.id === id) || state.scorePages.find((item) => item.id === id);
+  if (!page) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const record = normalizeAnnotationRecord({
+    id: createId(),
+    scoreId: page.scoreId,
+    pageId: id,
+    userId: page.userId || state.session?.user?.id || null,
+    baseWidth: 0,
+    baseHeight: 0,
+    strokes: [],
+    createdAt: now,
+    updatedAt: now,
+    syncStatus: state.session?.user?.id ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  });
+  state.annotationRecords.set(id, record);
+  return record;
+}
+
+function loadAnnotationForPage(pageId) {
+  return loadAnnotationsForPages([pageId]).then((records) => records.get(String(pageId)) || null);
+}
+
+async function loadAnnotationsForPages(pageIds) {
+  const ids = Array.from(new Set((pageIds || []).filter(Boolean).map(String)));
+  const result = new Map();
+  if (!ids.length) {
+    return result;
+  }
+  try {
+    const transactionResult = await runIdbTransaction(
+      ANNOTATION_STORE_NAME,
+      "readonly",
+      (store, transaction) => {
+        const output = { rows: [] };
+        const index = store.index("pageId");
+        ids.forEach((pageId) => {
+          const request = index.getAll(pageId);
+          request.onsuccess = () => {
+            (request.result || []).forEach((record) => output.rows.push(record));
+          };
+          request.onerror = () => {
+            try {
+              transaction.abort();
+            } catch (error) {
+              console.warn(error);
+            }
+          };
+        });
+        return output;
+      },
+      { timeoutMessage: "读取标注超时，请重试。" },
+    );
+    const latestByPage = new Map();
+    (transactionResult.rows || []).map(normalizeAnnotationRecord).forEach((record) => {
+      if (record.deletedAt || !ids.includes(String(record.pageId))) {
+        return;
+      }
+      const previous = latestByPage.get(record.pageId);
+      if (!previous || String(record.updatedAt).localeCompare(String(previous.updatedAt)) > 0) {
+        latestByPage.set(record.pageId, record);
+      }
+    });
+    latestByPage.forEach((record, pageId) => {
+      const existing = state.annotationRecords.get(pageId);
+      const existingIsNewer =
+        existing &&
+        !existing.deletedAt &&
+        String(existing.updatedAt || "").localeCompare(String(record.updatedAt || "")) >= 0;
+      const nextRecord = existingIsNewer ? existing : record;
+      state.annotationRecords.set(pageId, nextRecord);
+      result.set(pageId, nextRecord);
+    });
+  } catch (error) {
+    console.warn("读取标注失败", error);
+  }
+  return result;
+}
+
+async function readAnnotationsForScoreIds(scoreIds) {
+  const ids = Array.from(new Set((scoreIds || []).filter(Boolean).map(String)));
+  if (!ids.length) {
+    return [];
+  }
+  try {
+    const result = await runIdbTransaction(
+      ANNOTATION_STORE_NAME,
+      "readonly",
+      (store, transaction) => {
+        const output = { rows: [] };
+        const index = store.index("scoreId");
+        ids.forEach((scoreId) => {
+          const request = index.getAll(scoreId);
+          request.onsuccess = () => {
+            (request.result || []).forEach((record) => output.rows.push(record));
+          };
+          request.onerror = () => {
+            try {
+              transaction.abort();
+            } catch (error) {
+              console.warn(error);
+            }
+          };
+        });
+        return output;
+      },
+      { timeoutMessage: "读取标注超时，请重试。" },
+    );
+    return (result.rows || []).map(normalizeAnnotationRecord);
+  } catch (error) {
+    console.warn("读取标注失败", error);
+    return [];
+  }
+}
+
+async function markAnnotationsForDeletedPages(pageIds, userId, deletedAt = new Date().toISOString()) {
+  const ids = Array.from(new Set((pageIds || []).filter(Boolean).map(String)));
+  if (!ids.length) {
+    return;
+  }
+  const records = Array.from((await loadAnnotationsForPages(ids)).values());
+  if (!records.length) {
+    return;
+  }
+  const keepTombstone = Boolean(userId || state.session?.user?.id);
+  await enqueueLocalWrite("markAnnotationsForDeletedPages", () =>
+    runIdbTransaction(
+      ANNOTATION_STORE_NAME,
+      "readwrite",
+      (annotationStore) => {
+        records.forEach((record) => {
+          if (keepTombstone) {
+            annotationStore.put({
+              ...record,
+              userId: record.userId || userId || state.session?.user?.id || null,
+              deletedAt,
+              updatedAt: deletedAt,
+              syncStatus: SYNC_STATUS_PENDING,
+            });
+          } else {
+            annotationStore.delete(record.id);
+          }
+        });
+      },
+      { timeoutMessage: "清理页面标注超时，请重试。" },
+    ),
+  );
+  records.forEach((record) => state.annotationRecords.delete(record.pageId));
+  if (keepTombstone) {
+    queueDeleteSyncForAnnotations(records, deletedAt);
+  }
+}
+
+function saveAnnotationRecord(record) {
+  const normalized = normalizeAnnotationRecord(record);
+  return putStoreRecord(ANNOTATION_STORE_NAME, normalized, LOCAL_SAVE_TIMEOUT, "标注保存超时，请重试。");
+}
+
+function saveAnnotationSnapshot(snapshot, pageId, version) {
+  const normalized = normalizeAnnotationRecord(snapshot);
+  const id = String(pageId || normalized.pageId || "");
+  return enqueueLocalWrite(`put:${ANNOTATION_STORE_NAME}`, () => {
+    if (id && getAnnotationSaveVersion(id) > version) {
+      return Promise.resolve(false);
+    }
+    return runIdbTransaction(
+      ANNOTATION_STORE_NAME,
+      "readwrite",
+      (store) => {
+        store.put(normalized);
+      },
+      { timeoutMs: LOCAL_SAVE_TIMEOUT, timeoutMessage: "标注保存超时，请重试。" },
+    ).then(() => true);
+  });
+}
+
+async function saveAnnotationForPage(pageId) {
+  const id = String(pageId || "");
+  const record = getAnnotationRecordForPage(id);
+  if (!record) {
+    return;
+  }
+  const now = new Date().toISOString();
+  const page = state.currentViewerPages.find((item) => item.id === id) || state.scorePages.find((item) => item.id === id);
+  const userId = record.userId || page?.userId || state.session?.user?.id || null;
+  record.userId = userId;
+  record.updatedAt = now;
+  record.syncStatus = userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL;
+  const version = getAnnotationSaveVersion(id);
+  const snapshot = normalizeAnnotationRecord({
+    ...record,
+    userId,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  });
+  try {
+    const saved = await saveAnnotationSnapshot(snapshot, id, version);
+    if (!saved) {
+      return false;
+    }
+    if (userId || state.session) {
+      enqueueOutboxTask("UPSERT_ANNOTATION", {
+        entityId: snapshot.id,
+        entityType: "annotation",
+        dedupeKey: `annotation.upsert:${snapshot.id}`,
+        payload: { annotation: snapshot },
+      }).catch((error) => console.warn(error));
+    }
+    return saved;
+  } catch (error) {
+    console.warn("标注保存失败", error);
+    setStatus("标注暂未保存，请稍后重试。", true);
+  }
+}
+
+function requestAnnotationImmediateFlush() {
+  flushAnnotationSave().catch((error) => console.warn(error));
+}
+
+function scheduleAnnotationSave(pageId, options = {}) {
+  if (!pageId) {
+    return;
+  }
+  const id = String(pageId);
+  bumpAnnotationSaveVersion(id);
+  state.annotationPendingPageIds.add(id);
+  window.clearTimeout(state.annotationSaveTimer);
+  state.annotationSaveTimer = window.setTimeout(() => {
+    flushAnnotationSave().catch((error) => console.warn(error));
+  }, 500);
+
+  if (options.immediate) {
+    const throttleMs = Number(options.throttleMs) || 0;
+    const now = Date.now();
+    const last = state.annotationImmediateSaveTimes.get(id) || 0;
+    if (!throttleMs || now - last >= throttleMs) {
+      state.annotationImmediateSaveTimes.set(id, now);
+      requestAnnotationImmediateFlush();
+    }
+  }
+}
+
+async function flushAnnotationSave() {
+  if (state.annotationFlushPromise) {
+    return state.annotationFlushPromise;
+  }
+  state.annotationFlushPromise = drainAnnotationSaves().finally(() => {
+    state.annotationFlushPromise = null;
+    if (state.annotationPendingPageIds.size) {
+      requestAnnotationImmediateFlush();
+    }
+  });
+  return state.annotationFlushPromise;
+}
+
+async function drainAnnotationSaves() {
+  window.clearTimeout(state.annotationSaveTimer);
+  state.annotationSaveTimer = 0;
+  while (state.annotationPendingPageIds.size) {
+    const ids = Array.from(state.annotationPendingPageIds);
+    state.annotationPendingPageIds.clear();
+    for (const pageId of ids) {
+      await saveAnnotationForPage(pageId);
+    }
+  }
 }
 
 function putStoreRecord(storeName, record, timeoutMs = LOCAL_SAVE_TIMEOUT, timeoutMessage = "本地数据库写入超时，请重新打开 App 后再试。") {
@@ -5798,16 +6971,21 @@ async function deleteScoreRecord(id) {
 async function deleteFolderRecord(folderId, scoreIds) {
   const ids = (scoreIds || []).filter(Boolean).map(String);
   // 先 readonly 读出每个歌谱对应的页 keys，再单独 readwrite 删除，避免在写事务回调里 getAllKeys 删页卡死。
-  const pageKeyGroups = await Promise.all(ids.map((scoreId) => readKeysByIndex(PAGE_STORE_NAME, "scoreId", scoreId)));
+  const [pageKeyGroups, annotationKeyGroups] = await Promise.all([
+    Promise.all(ids.map((scoreId) => readKeysByIndex(PAGE_STORE_NAME, "scoreId", scoreId))),
+    Promise.all(ids.map((scoreId) => readKeysByIndex(ANNOTATION_STORE_NAME, "scoreId", scoreId))),
+  ]);
   const pageKeys = pageKeyGroups.flat();
+  const annotationKeys = annotationKeyGroups.flat();
   return enqueueLocalWrite("deleteFolderRecord", () =>
     runIdbTransaction(
-      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME],
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, ANNOTATION_STORE_NAME],
       "readwrite",
-      ([folderStore, scoreStore, pageStore]) => {
+      ([folderStore, scoreStore, pageStore, annotationStore]) => {
         folderStore.delete(folderId);
         ids.forEach((scoreId) => scoreStore.delete(scoreId));
         pageKeys.forEach((key) => pageStore.delete(key));
+        annotationKeys.forEach((key) => annotationStore.delete(key));
       },
       {
         timeoutMs: Math.max(IDB_TXN_TIMEOUT, ids.length * 3000 + 5000),
@@ -5817,14 +6995,15 @@ async function deleteFolderRecord(folderId, scoreIds) {
   );
 }
 
-function markScoreDeletedRecord(score, deletedAt) {
+async function markScoreDeletedRecord(score, deletedAt) {
   const userId = score.userId || state.session?.user?.id || null;
   const pages = score.pages || state.scorePages.filter((page) => page.scoreId === score.id);
+  const annotations = await readAnnotationsForScoreIds([score.id]);
   return enqueueLocalWrite("markScoreDeletedRecord", () =>
     runIdbTransaction(
-      [STORE_NAME, PAGE_STORE_NAME],
+      [STORE_NAME, PAGE_STORE_NAME, ANNOTATION_STORE_NAME],
       "readwrite",
-      ([scoreStore, pageStore]) => {
+      ([scoreStore, pageStore, annotationStore]) => {
         scoreStore.put({
           ...toScoreRecord(score),
           userId,
@@ -5841,19 +7020,37 @@ function markScoreDeletedRecord(score, deletedAt) {
             syncStatus: SYNC_STATUS_PENDING,
           });
         });
+        annotations.forEach((annotation) => {
+          annotationStore.put({
+            ...annotation,
+            userId: annotation.userId || userId,
+            deletedAt,
+            updatedAt: deletedAt,
+            syncStatus: SYNC_STATUS_PENDING,
+          });
+        });
       },
       { timeoutMessage: "删除歌谱超时，请重试。" },
     ),
   );
 }
 
-function markFolderDeletedRecord(folder, folderScores, deletedAt) {
+async function markFolderDeletedRecord(folder, folderScores, deletedAt) {
   const userId = folder.userId || state.session?.user?.id || null;
+  const scoreIds = (folderScores || []).map((score) => score.id);
+  const annotationRecords = await readAnnotationsForScoreIds(scoreIds);
+  const annotationsByScore = new Map();
+  annotationRecords.forEach((annotation) => {
+    const key = String(annotation.scoreId);
+    const list = annotationsByScore.get(key) || [];
+    list.push(annotation);
+    annotationsByScore.set(key, list);
+  });
   return enqueueLocalWrite("markFolderDeletedRecord", () =>
     runIdbTransaction(
-      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME],
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, ANNOTATION_STORE_NAME],
       "readwrite",
-      ([folderStore, scoreStore, pageStore]) => {
+      ([folderStore, scoreStore, pageStore, annotationStore]) => {
         folderStore.put({
           ...folder,
           userId,
@@ -5874,6 +7071,15 @@ function markFolderDeletedRecord(folder, folderScores, deletedAt) {
             pageStore.put({
               ...page,
               userId: page.userId || scoreUserId,
+              deletedAt,
+              updatedAt: deletedAt,
+              syncStatus: SYNC_STATUS_PENDING,
+            });
+          });
+          (annotationsByScore.get(String(score.id)) || []).forEach((annotation) => {
+            annotationStore.put({
+              ...annotation,
+              userId: annotation.userId || scoreUserId,
               deletedAt,
               updatedAt: deletedAt,
               syncStatus: SYNC_STATUS_PENDING,
@@ -6670,6 +7876,13 @@ function queueManagedPageSave(updatedScore, pagesToSave, deletedPages, userId, s
       beginUserWrite();
       try {
         await putScorePageChanges(updatedScore, pagesToSave, deletedPages);
+        if (deletedPages.length) {
+          await markAnnotationsForDeletedPages(
+            deletedPages.map((page) => page.id),
+            userId,
+            deletedPages[0]?.deletedAt || new Date().toISOString(),
+          );
+        }
       } finally {
         endUserWrite();
       }
@@ -7427,6 +8640,10 @@ async function dispatchOutboxTask(task) {
     }
     case "setlist.upsert":
       await uploadSetlistToCloud(task.entityId);
+      return;
+    case "UPSERT_ANNOTATION":
+    case "DELETE_ANNOTATION":
+      console.info("标注云同步已预留，本版先保留本地标注。", task.type);
       return;
     default:
       console.warn("未知的同步任务类型", task.type);
@@ -10889,6 +12106,15 @@ function openSetlistDialog(setlistId = "") {
   state.editingSetlistId = setlist?.id || "";
   state.setlistDraftScoreIds = setlist ? getSetlistItems(setlist.id).map((item) => item.scoreId) : [];
 
+  // 默认展开包含已选歌谱的文件夹，方便编辑时直接看到勾选项。
+  state.setlistPickerExpandedFolders = new Set();
+  const draftSet = new Set(state.setlistDraftScoreIds);
+  state.scores.forEach((score) => {
+    if (score.folderId && draftSet.has(score.id)) {
+      state.setlistPickerExpandedFolders.add(score.folderId);
+    }
+  });
+
   elements.setlistForm.reset();
   elements.setlistDialogTitle.textContent = setlist ? "管理歌单" : "创建歌单";
   elements.setlistName.value = setlist?.name || "";
@@ -10913,6 +12139,7 @@ function openSetlistDialog(setlistId = "") {
 function closeSetlistDialog() {
   state.editingSetlistId = "";
   state.setlistDraftScoreIds = [];
+  state.setlistPickerExpandedFolders = new Set();
   elements.setlistForm.reset();
   elements.saveSetlistButton.disabled = false;
   elements.deleteSetlistButton.hidden = true;
@@ -10925,10 +12152,24 @@ function closeSetlistDialog() {
   }
 }
 
+function createSetlistScoreOption(score, selectedIds) {
+  const label = document.createElement("label");
+  label.className = "setlist-score-option";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.dataset.scoreId = score.id;
+  checkbox.checked = selectedIds.has(score.id);
+  const text = document.createElement("span");
+  text.textContent = score.name;
+  label.append(checkbox, text);
+  return label;
+}
+
 function renderSetlistScorePicker() {
   elements.setlistScorePicker.replaceChildren();
   const query = normalizeText(elements.setlistScoreSearch.value || "");
-  const scores = state.scores.filter((score) => scoreMatchesQuery(score, query));
+  const searching = Boolean(query);
+  const scores = state.scores.filter((score) => !score.deletedAt && scoreMatchesQuery(score, query));
 
   if (!scores.length) {
     elements.setlistScorePicker.append(createEmptyState(query ? "没有找到歌谱" : "还没有歌谱", query ? "换个关键词试试。" : "先在谱夹中添加歌谱。"));
@@ -10937,18 +12178,91 @@ function renderSetlistScorePicker() {
   }
 
   const selectedIds = new Set(state.setlistDraftScoreIds);
+  const activeFolders = state.folders.filter((folder) => !folder.deletedAt);
+  const folderById = new Map(activeFolders.map((folder) => [folder.id, folder]));
+
+  // 按文件夹分组：未分类（根目录）歌谱直接列出，其余归到各自文件夹。
+  const rootScores = [];
+  const scoresByFolder = new Map();
   scores.forEach((score) => {
-    const label = document.createElement("label");
-    label.className = "setlist-score-option";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.dataset.scoreId = score.id;
-    checkbox.checked = selectedIds.has(score.id);
-    const text = document.createElement("span");
-    text.textContent = score.name;
-    label.append(checkbox, text);
-    elements.setlistScorePicker.append(label);
+    const folderId = score.folderId && folderById.has(score.folderId) ? score.folderId : null;
+    if (!folderId) {
+      rootScores.push(score);
+      return;
+    }
+    if (!scoresByFolder.has(folderId)) {
+      scoresByFolder.set(folderId, []);
+    }
+    scoresByFolder.get(folderId).push(score);
   });
+
+  // 文件夹排在未分类歌谱前面。
+  const foldersWithScores = activeFolders
+    .filter((folder) => (scoresByFolder.get(folder.id) || []).length > 0)
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), "zh"));
+
+  foldersWithScores.forEach((folder) => {
+    const folderScores = scoresByFolder.get(folder.id) || [];
+    // 搜索时自动展开命中文件夹，便于直接看到结果。
+    const expanded = searching || state.setlistPickerExpandedFolders.has(folder.id);
+    const selectedCount = folderScores.reduce((sum, score) => sum + (selectedIds.has(score.id) ? 1 : 0), 0);
+
+    const group = document.createElement("div");
+    group.className = "setlist-folder-group";
+    group.classList.toggle("is-expanded", expanded);
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "setlist-folder-header";
+    header.dataset.folderToggle = folder.id;
+    header.setAttribute("aria-expanded", expanded ? "true" : "false");
+
+    const chevron = createIcon(expanded ? "chevron-down" : "chevron-right");
+    chevron.classList.add("setlist-folder-chevron");
+    const folderIcon = createIcon("folder");
+    folderIcon.classList.add("setlist-folder-icon");
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "setlist-folder-name";
+    nameSpan.textContent = folder.name;
+    const countSpan = document.createElement("span");
+    countSpan.className = "setlist-folder-count";
+    countSpan.textContent = selectedCount ? `${selectedCount} / ${folderScores.length}` : String(folderScores.length);
+
+    header.append(chevron, folderIcon, nameSpan, countSpan);
+    group.append(header);
+
+    if (expanded) {
+      const body = document.createElement("div");
+      body.className = "setlist-folder-body";
+      folderScores.forEach((score) => {
+        body.append(createSetlistScoreOption(score, selectedIds));
+      });
+      group.append(body);
+    }
+
+    elements.setlistScorePicker.append(group);
+  });
+
+  // 未分类（根目录）歌谱放在文件夹之后。
+  rootScores.forEach((score) => {
+    elements.setlistScorePicker.append(createSetlistScoreOption(score, selectedIds));
+  });
+
+  refreshIcons();
+}
+
+function handleSetlistPickerClick(event) {
+  const header = event.target.closest("[data-folder-toggle]");
+  if (!header || !elements.setlistScorePicker.contains(header)) {
+    return;
+  }
+  const folderId = header.dataset.folderToggle;
+  if (state.setlistPickerExpandedFolders.has(folderId)) {
+    state.setlistPickerExpandedFolders.delete(folderId);
+  } else {
+    state.setlistPickerExpandedFolders.add(folderId);
+  }
+  renderSetlistScorePicker();
 }
 
 function renderSetlistOrderList() {
@@ -11426,7 +12740,9 @@ function openViewer(id) {
   setViewerKeySignature(score.keySignature);
   setViewerFavoriteButton(score);
   exitViewerPerformanceMode({ silent: true });
+  setViewerPianoOpen(false);
   renderViewerPages(score);
+  updateViewerPianoKeySignature();
   recordScoreOpened(score.id).catch((error) => console.warn(error));
 
   if (typeof elements.viewerDialog.showModal === "function") {
@@ -11442,6 +12758,7 @@ function openViewer(id) {
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ left: 0, top: 0 });
     prepareViewerPages(score.id, score.pages);
+    refreshViewerAnnotationCanvases();
   });
 }
 
@@ -11467,7 +12784,9 @@ function openSetlistViewer(id) {
   setViewerKeySignature("");
   setViewerFavoriteButton(null);
   exitViewerPerformanceMode({ silent: true });
+  setViewerPianoOpen(false);
   renderViewerPages(virtualScore);
+  updateViewerPianoKeySignature();
 
   if (typeof elements.viewerDialog.showModal === "function") {
     elements.viewerDialog.showModal();
@@ -11482,16 +12801,338 @@ function openSetlistViewer(id) {
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ left: 0, top: 0 });
     prepareSetlistViewerPages(setlist.id);
+    refreshViewerAnnotationCanvases();
   });
 }
 
 // 纯 UI 收起查看器（不操作历史；历史后退由 popstate 统一驱动）。
+// “更多”弹出菜单的显示/隐藏（仅 UI；标注、收藏的业务逻辑不变）。
+// 用容器上的 .is-open 类控制（不依赖全局 [hidden]），打开时渲染菜单内图标。
+function setViewerMoreMenuOpen(open) {
+  if (!elements.viewerMore || !elements.viewerMoreButton) {
+    return;
+  }
+  elements.viewerMore.classList.toggle("is-open", open);
+  elements.viewerMoreButton.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    updateNativeAnnotationButtonState();
+    refreshIcons();
+  }
+}
+
+function toggleViewerMoreMenu() {
+  if (!elements.viewerMore) {
+    return;
+  }
+  setViewerMoreMenuOpen(!elements.viewerMore.classList.contains("is-open"));
+}
+
+function ensureViewerPianoReady() {
+  if (!elements.viewerPiano) {
+    return null;
+  }
+  if (!elements.viewerPiano.__myScorePiano && window.MyScorePiano?.init) {
+    window.MyScorePiano.init(elements.viewerPiano);
+  }
+  return elements.viewerPiano.__myScorePiano || null;
+}
+
+function getCurrentViewerPage() {
+  const pageId = getCurrentViewerPageId();
+  if (pageId) {
+    return state.currentViewerPages.find((page) => page.id === pageId) || state.scorePages.find((page) => page.id === pageId) || null;
+  }
+  return state.currentViewerPages[0] || null;
+}
+
+function getCurrentViewerScore() {
+  if (state.currentViewerScoreId) {
+    return state.scores.find((score) => score.id === state.currentViewerScoreId) || null;
+  }
+  const currentPage = getCurrentViewerPage();
+  if (currentPage?.scoreId) {
+    return state.scores.find((score) => score.id === currentPage.scoreId) || null;
+  }
+  return null;
+}
+
+function updateViewerPianoKeySignature() {
+  if (!elements.viewerPiano) {
+    return;
+  }
+  const score = getCurrentViewerScore();
+  const keySignature = score?.keySignature || "C";
+  window.MyScorePiano?.setKeySignature?.(elements.viewerPiano, keySignature);
+}
+
+function setViewerPianoOpen(open) {
+  state.viewerPianoOpen = Boolean(open);
+  elements.viewerDialog?.classList.toggle("is-piano-open", state.viewerPianoOpen);
+
+  if (elements.viewerPianoPanel) {
+    elements.viewerPianoPanel.hidden = !state.viewerPianoOpen;
+  }
+
+  if (elements.viewerPianoButton) {
+    elements.viewerPianoButton.classList.toggle("is-active", state.viewerPianoOpen);
+    elements.viewerPianoButton.setAttribute("aria-pressed", state.viewerPianoOpen ? "true" : "false");
+  }
+
+  if (!state.viewerPianoOpen) {
+    window.MyScorePiano?.stopAll?.(elements.viewerPiano);
+    return;
+  }
+
+  // 钢琴与节拍器互斥：打开钢琴时收起节拍器面板。
+  setViewerMetronomeOpen(false);
+
+  const piano = ensureViewerPianoReady();
+  updateViewerPianoKeySignature();
+
+  // 在用户点击“钢琴”按钮这个手势里解锁音频并预解码可见采样，降低首次按键延迟。
+  window.MyScorePiano?.prepare?.(elements.viewerPiano);
+
+  requestAnimationFrame(() => {
+    piano?.render?.();
+    if (typeof resizeAllAnnotationCanvases === "function") {
+      resizeAllAnnotationCanvases();
+    }
+    if (typeof renderAllVisibleAnnotations === "function") {
+      renderAllVisibleAnnotations();
+    }
+  });
+}
+
+// ---------- 节拍器 ----------
+const metronome = {
+  ctx: null,
+  running: false,
+  bpm: 90,
+  beatsPerMeasure: 4,
+  currentBeat: 0,
+  nextNoteTime: 0,
+  lookaheadMs: 25,
+  scheduleAheadSec: 0.12,
+  timer: 0,
+};
+
+function getMetronomeContext() {
+  if (!metronome.ctx) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+      return null;
+    }
+    try {
+      metronome.ctx = new AudioCtx();
+    } catch (error) {
+      console.warn("[metronome] create AudioContext failed", error);
+      return null;
+    }
+  }
+  return metronome.ctx;
+}
+
+function renderMetronomeBeats() {
+  if (!elements.metronomeBeats) {
+    return;
+  }
+  elements.metronomeBeats.replaceChildren();
+  for (let i = 0; i < metronome.beatsPerMeasure; i += 1) {
+    const dot = document.createElement("span");
+    dot.className = "metronome-beat-dot";
+    if (i === 0) {
+      dot.classList.add("is-accent");
+    }
+    dot.dataset.beatIndex = String(i);
+    elements.metronomeBeats.append(dot);
+  }
+}
+
+function flashMetronomeBeat(beatIndex) {
+  if (!elements.metronomeBeats) {
+    return;
+  }
+  const dots = elements.metronomeBeats.children;
+  for (let i = 0; i < dots.length; i += 1) {
+    dots[i].classList.toggle("is-active", i === beatIndex);
+  }
+}
+
+function clearMetronomeBeatHighlight() {
+  if (!elements.metronomeBeats) {
+    return;
+  }
+  Array.from(elements.metronomeBeats.children).forEach((dot) => dot.classList.remove("is-active"));
+}
+
+function scheduleMetronomeClick(beatIndex, time) {
+  const ctx = metronome.ctx;
+  if (!ctx) {
+    return;
+  }
+  const accent = beatIndex === 0;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.frequency.value = accent ? 1600 : 1000;
+  const peak = accent ? 0.6 : 0.32;
+  gain.gain.setValueAtTime(0.0001, time);
+  gain.gain.exponentialRampToValueAtTime(peak, time + 0.001);
+  gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.05);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(time);
+  osc.stop(time + 0.06);
+
+  const delayMs = Math.max(0, (time - ctx.currentTime) * 1000);
+  window.setTimeout(() => {
+    if (metronome.running) {
+      flashMetronomeBeat(beatIndex);
+    }
+  }, delayMs);
+}
+
+function metronomeScheduler() {
+  const ctx = metronome.ctx;
+  if (!ctx) {
+    return;
+  }
+  const secondsPerBeat = 60 / metronome.bpm;
+  while (metronome.nextNoteTime < ctx.currentTime + metronome.scheduleAheadSec) {
+    scheduleMetronomeClick(metronome.currentBeat, metronome.nextNoteTime);
+    metronome.nextNoteTime += secondsPerBeat;
+    metronome.currentBeat = (metronome.currentBeat + 1) % metronome.beatsPerMeasure;
+  }
+}
+
+function startMetronome() {
+  const ctx = getMetronomeContext();
+  if (!ctx || metronome.running) {
+    return;
+  }
+  if (ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+  }
+  metronome.running = true;
+  metronome.currentBeat = 0;
+  metronome.nextNoteTime = ctx.currentTime + 0.08;
+  metronome.timer = window.setInterval(metronomeScheduler, metronome.lookaheadMs);
+  updateMetronomePlayUi();
+}
+
+function stopMetronome() {
+  if (metronome.timer) {
+    window.clearInterval(metronome.timer);
+    metronome.timer = 0;
+  }
+  metronome.running = false;
+  metronome.currentBeat = 0;
+  clearMetronomeBeatHighlight();
+  updateMetronomePlayUi();
+}
+
+function toggleMetronome() {
+  if (metronome.running) {
+    stopMetronome();
+  } else {
+    startMetronome();
+  }
+}
+
+function updateMetronomePlayUi() {
+  const button = elements.metronomePlayButton;
+  if (!button) {
+    return;
+  }
+  button.classList.toggle("is-running", metronome.running);
+  button.setAttribute("aria-pressed", metronome.running ? "true" : "false");
+  // 重建图标元素（lucide 会把 <i data-lucide> 替换为 <svg>，无法原地改属性）。
+  button.replaceChildren(createIcon(metronome.running ? "square" : "play"));
+  refreshIcons();
+}
+
+function setMetronomeBpm(value) {
+  const bpm = Math.max(40, Math.min(240, Math.round(Number(value) || metronome.bpm)));
+  metronome.bpm = bpm;
+  if (elements.metronomeBpmValue) {
+    elements.metronomeBpmValue.textContent = String(bpm);
+  }
+  if (elements.metronomeSlider && Number(elements.metronomeSlider.value) !== bpm) {
+    elements.metronomeSlider.value = String(bpm);
+  }
+}
+
+function adjustMetronomeBpm(delta) {
+  setMetronomeBpm(metronome.bpm + delta);
+}
+
+function handleMetronomeMeterClick(event) {
+  const button = event.target.closest("button[data-beats]");
+  if (!button || !elements.metronomeMeterOptions.contains(button)) {
+    return;
+  }
+  const beats = Math.max(1, Math.min(12, Number(button.dataset.beats) || 4));
+  metronome.beatsPerMeasure = beats;
+  metronome.currentBeat = 0;
+  Array.from(elements.metronomeMeterOptions.querySelectorAll("button")).forEach((item) => {
+    item.classList.toggle("is-active", item === button);
+  });
+  renderMetronomeBeats();
+}
+
+function setViewerMetronomeOpen(open) {
+  state.viewerMetronomeOpen = Boolean(open);
+  elements.viewerDialog?.classList.toggle("is-metronome-open", state.viewerMetronomeOpen);
+
+  if (elements.viewerMetronomePanel) {
+    elements.viewerMetronomePanel.hidden = !state.viewerMetronomeOpen;
+  }
+  if (elements.viewerMetronomeButton) {
+    elements.viewerMetronomeButton.classList.toggle("is-active", state.viewerMetronomeOpen);
+    elements.viewerMetronomeButton.setAttribute("aria-pressed", state.viewerMetronomeOpen ? "true" : "false");
+  }
+
+  if (!state.viewerMetronomeOpen) {
+    stopMetronome();
+    return;
+  }
+
+  // 节拍器与钢琴互斥：打开节拍器时收起钢琴面板。
+  setViewerPianoOpen(false);
+
+  // 同步 UI 到当前设置，并在用户手势内预热 AudioContext。
+  setMetronomeBpm(metronome.bpm);
+  renderMetronomeBeats();
+  updateMetronomePlayUi();
+  const ctx = getMetronomeContext();
+  if (ctx && ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+  }
+}
+
 function closeViewerUI() {
+  setViewerMoreMenuOpen(false);
+  setViewerPianoOpen(false);
+  setViewerMetronomeOpen(false);
+  setAnnotationMode(false, { deferSave: true });
+  flushAnnotationSave().catch((error) => console.warn(error));
   const shouldRenderLibrary = state.libraryRenderQueued;
   state.viewerHistoryActive = false;
   state.currentViewerScoreId = null;
   state.currentViewerSetlistId = null;
   state.currentViewerPages = [];
+  state.annotationDraftStroke = null;
+  state.annotationPointerId = null;
+  state.annotationDraftCanvas = null;
+  state.annotationDraftInserted = false;
+  state.annotationDraftUndoRegistered = false;
+  state.annotationPenActiveStrokeId = "";
+  state.annotationActiveStrokeToken = 0;
+  state.annotationStrokeStartedAt = 0;
+  if (state.annotationPenLeaveTimer) {
+    clearTimeout(state.annotationPenLeaveTimer);
+    state.annotationPenLeaveTimer = 0;
+  }
+  state.annotationUndoStack = [];
+  state.annotationRedoStack = [];
   state.libraryRenderQueued = false;
   if (elements.viewerTitle) {
     elements.viewerTitle.textContent = "查看歌谱";
@@ -11641,6 +13282,9 @@ function replaceScoreMetadataInMemory(scoreId, updatedScore) {
   );
   if (state.currentViewerScoreId === scoreId) {
     setViewerFavoriteButton(state.scores.find((item) => item.id === scoreId));
+    updateViewerPianoKeySignature();
+  } else if (state.currentViewerSetlistId && getCurrentViewerPage()?.scoreId === scoreId) {
+    updateViewerPianoKeySignature();
   }
   requestLibraryRender();
 }
@@ -11656,6 +13300,1111 @@ function requestLibraryRender() {
 
 function isViewerActive() {
   return Boolean(elements.viewerDialog?.open || state.currentViewerScoreId || state.currentViewerSetlistId);
+}
+
+function toggleAnnotationMode() {
+  if (state.annotationMode) {
+    finishAnnotationMode().catch((error) => {
+      console.warn(error);
+      setStatus("标注暂未保存，请稍后重试。", true);
+    });
+    return;
+  }
+  setAnnotationMode(true);
+}
+
+function getNativeAnnotationPlugin() {
+  return window.Capacitor?.Plugins?.NativeAnnotation || null;
+}
+
+function isNativeAnnotationAvailable() {
+  const capacitor = window.Capacitor;
+  const platform = typeof capacitor?.getPlatform === "function" ? capacitor.getPlatform() : capacitor?.platform;
+  return Boolean(capacitor?.isNativePlatform?.() && platform === "ios" && typeof getNativeAnnotationPlugin()?.open === "function");
+}
+
+function updateNativeAnnotationButtonState() {
+  if (!elements.viewerNativeAnnotationButton) {
+    return;
+  }
+  elements.viewerNativeAnnotationButton.hidden = !isNativeAnnotationAvailable();
+}
+
+async function openNativeAnnotationForCurrentPage() {
+  const plugin = getNativeAnnotationPlugin();
+  if (!isNativeAnnotationAvailable() || !plugin) {
+    setStatus("原生标注仅在 iPad/iPhone App 中可用。", true);
+    return;
+  }
+
+  const pageId = getCurrentViewerPageId();
+  const page = state.currentViewerPages.find((item) => item.id === pageId) || state.scorePages.find((item) => item.id === pageId);
+  if (!page) {
+    setStatus("没有找到当前歌谱页。", true);
+    return;
+  }
+
+  try {
+    await flushAnnotationSave().catch((error) => console.warn(error));
+    const imageSource = await getNativeAnnotationImageSource(page);
+    if (!imageSource) {
+      setStatus("当前页图片尚未准备好，请稍后再试。", true);
+      return;
+    }
+
+    const record = (await loadAnnotationForPage(pageId)) || getAnnotationRecordForPage(pageId, { create: true });
+    const score = state.scores.find((item) => item.id === page.scoreId) || null;
+    const response = await plugin.open({
+      scoreId: page.scoreId,
+      pageId,
+      title: score?.name || "歌谱标注",
+      imageSource: imageSource.source,
+      imageMimeType: imageSource.type || page.type || "image/jpeg",
+      drawingDataBase64: record?.drawingDataBase64 || "",
+      drawingData: record?.drawingDataBase64 || "",
+    });
+
+    if (response?.cancelled) {
+      return;
+    }
+
+    const drawingDataBase64 = response?.drawingDataBase64 || response?.drawingData || "";
+    if (!drawingDataBase64) {
+      setStatus("原生标注未返回绘图数据。", true);
+      return;
+    }
+
+    await saveNativeAnnotationForPage(page, {
+      drawingDataBase64,
+      imageWidth: response?.imageWidth,
+      imageHeight: response?.imageHeight,
+      updatedAt: response?.updatedAt,
+    });
+    setStatus("原生标注已保存。");
+  } catch (error) {
+    console.error(error);
+    setStatus(getErrorMessage(error) || "原生标注失败，请稍后重试。", true);
+  }
+}
+
+async function getNativeAnnotationImageSource(page) {
+  const latestPage = getLatestPageRecord(page) || page;
+  if (latestPage?.blob && latestPage.blob.size > 0) {
+    const encoded = await blobToBase64(latestPage.blob);
+    const type = encoded.type || latestPage.type || "image/jpeg";
+    return {
+      source: `data:${type};base64,${encoded.data}`,
+      type,
+    };
+  }
+
+  const tempUrl = latestPage?.storagePath ? state.pageTempUrls.get(latestPage.id) || (await getScorePageTempUrl(latestPage)) : "";
+  if (tempUrl) {
+    return {
+      source: tempUrl,
+      type: latestPage.type || "image/jpeg",
+    };
+  }
+
+  const image = elements.viewerPages?.querySelector(`img[data-page-id="${cssEscape(latestPage.id)}"]`);
+  const source = image?.src || "";
+  if (source && source !== SCORE_IMAGE_PLACEHOLDER && !source.startsWith("blob:")) {
+    return {
+      source,
+      type: latestPage.type || "image/jpeg",
+    };
+  }
+
+  return null;
+}
+
+async function saveNativeAnnotationForPage(page, data) {
+  const pageId = String(page.id);
+  const previous = getAnnotationRecordForPage(pageId, { create: true });
+  const now = data.updatedAt || new Date().toISOString();
+  const userId = previous?.userId || page.userId || state.session?.user?.id || null;
+  const nextRecord = normalizeAnnotationRecord({
+    ...(previous || {}),
+    id: previous?.id || createId(),
+    scoreId: page.scoreId,
+    pageId,
+    userId,
+    engine: "pencilkit",
+    drawingDataBase64: data.drawingDataBase64,
+    nativeDrawingUpdatedAt: now,
+    baseWidth: Number(data.imageWidth) || previous?.baseWidth || 0,
+    baseHeight: Number(data.imageHeight) || previous?.baseHeight || 0,
+    updatedAt: now,
+    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+  });
+  state.annotationRecords.set(pageId, nextRecord);
+  await saveAnnotationRecord(nextRecord);
+  if (userId || state.session) {
+    enqueueOutboxTask("UPSERT_ANNOTATION", {
+      entityId: nextRecord.id,
+      entityType: "annotation",
+      dedupeKey: `annotation.upsert:${nextRecord.id}`,
+      payload: { annotation: nextRecord },
+    }).catch((error) => console.warn(error));
+  }
+}
+
+function cancelAnnotationDraft() {
+  const draft = state.annotationDraftStroke;
+  if (draft?.inserted) {
+    finalizeAnnotationDraft({ reason: "cancel-inserted-draft" });
+    return;
+  }
+  state.annotationDraftStroke = null;
+  state.annotationPointerId = null;
+  state.annotationDraftCanvas = null;
+  state.annotationDraftInserted = false;
+  state.annotationDraftUndoRegistered = false;
+  state.annotationPenActiveStrokeId = "";
+  state.annotationActiveStrokeToken = 0;
+  state.annotationStrokeStartedAt = 0;
+  if (state.annotationPenLeaveTimer) {
+    clearTimeout(state.annotationPenLeaveTimer);
+    state.annotationPenLeaveTimer = 0;
+  }
+  if (!draft?.pageId) {
+    return;
+  }
+  const canvas = elements.viewerPages?.querySelector(`.annotation-canvas[data-page-id="${cssEscape(draft.pageId)}"]`);
+  if (canvas) {
+    renderAnnotationCanvas(canvas, state.annotationRecords.get(draft.pageId));
+  }
+}
+
+function isViewerPinching() {
+  return Boolean(state.viewerPinchActive || state.viewerPendingPinch || state.viewerPinchRaf);
+}
+
+function setAnnotationMode(enabled, options = {}) {
+  resetViewerPointerState();
+  state.annotationMode = Boolean(enabled) && !state.viewerPerformanceMode;
+  elements.viewerDialog?.classList.toggle("is-annotation-mode", state.annotationMode);
+  elements.viewerPages?.classList.toggle("is-annotation-mode", state.annotationMode);
+  if (elements.annotationToolbar) {
+    elements.annotationToolbar.hidden = !state.annotationMode;
+  }
+  if (elements.viewerAnnotationButton) {
+    elements.viewerAnnotationButton.classList.toggle("is-active", state.annotationMode);
+    elements.viewerAnnotationButton.setAttribute("aria-pressed", state.annotationMode ? "true" : "false");
+  }
+  if (state.annotationMode) {
+    setStatus("标注模式：单指书写，双指缩放或移动页面。");
+  } else {
+    cancelAnnotationDraft();
+    if (!options.deferSave) {
+      flushAnnotationSave().catch((error) => console.warn(error));
+    }
+    setStatus("");
+  }
+  updateAnnotationToolbarState();
+  scheduleAnnotationCanvasResize();
+}
+
+async function finishAnnotationMode() {
+  setAnnotationMode(false, { deferSave: true });
+  await flushAnnotationSave();
+}
+
+function setAnnotationTool(tool) {
+  if (!["pen", "highlighter", "eraser"].includes(tool)) {
+    return;
+  }
+  state.annotationTool = tool;
+  updateAnnotationToolbarState();
+}
+
+function updateAnnotationToolbarState() {
+  elements.annotationToolButtons?.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.annotationTool === state.annotationTool);
+  });
+  if (elements.annotationColorInput) {
+    elements.annotationColorInput.value = state.annotationColor;
+  }
+  if (elements.annotationSizeInput) {
+    elements.annotationSizeInput.value = String(state.annotationSize);
+  }
+  if (elements.annotationToggleVisibilityButton) {
+    elements.annotationToggleVisibilityButton.textContent = state.annotationVisible ? "隐藏标注" : "显示标注";
+  }
+  if (elements.annotationUndoButton) {
+    elements.annotationUndoButton.disabled = !state.annotationUndoStack.length;
+  }
+  if (elements.annotationRedoButton) {
+    elements.annotationRedoButton.disabled = !state.annotationRedoStack.length;
+  }
+}
+
+function getCurrentViewerPageId() {
+  const pages = Array.from(elements.viewerPages?.querySelectorAll(".viewer-page") || []);
+  if (!pages.length) {
+    return "";
+  }
+  const horizontal = elements.viewerPages.classList.contains("is-horizontal-mode") && !elements.viewerPages.classList.contains("is-zoomed");
+  let currentIndex = 0;
+  if (horizontal) {
+    const pageWidth = Math.max(1, pages[0].getBoundingClientRect().width || elements.viewerPages.clientWidth);
+    currentIndex = clamp(Math.round(elements.viewerPages.scrollLeft / pageWidth), 0, pages.length - 1);
+  } else {
+    const containerRect = elements.viewerPages.getBoundingClientRect();
+    const target = containerRect.top + containerRect.height * 0.35;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    pages.forEach((page, index) => {
+      const rect = page.getBoundingClientRect();
+      const distance = Math.abs(rect.top - target);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        currentIndex = index;
+      }
+    });
+  }
+  return pages[currentIndex]?.dataset.pageId || state.currentViewerPages[currentIndex]?.id || "";
+}
+
+function scheduleAnnotationCanvasResize(options = {}) {
+  if (!elements.viewerDialog?.open) {
+    return;
+  }
+
+  state.annotationResizePending = true;
+  if (!options.light) {
+    state.annotationResizeNeedsFull = true;
+  }
+
+  if (state.annotationResizeFrame) {
+    return;
+  }
+
+  state.annotationResizeFrame = requestAnimationFrame(() => {
+    state.annotationResizeFrame = 0;
+
+    if (!state.annotationResizePending) {
+      return;
+    }
+
+    state.annotationResizePending = false;
+    const lightOnly = options.light && !state.annotationResizeNeedsFull;
+    state.annotationResizeNeedsFull = false;
+
+    if (lightOnly) {
+      resizeVisibleAnnotationCanvases();
+      renderVisibleAnnotations();
+    } else {
+      resizeAllAnnotationCanvases();
+      renderAllVisibleAnnotations();
+    }
+  });
+}
+
+function resizeAllAnnotationCanvases() {
+  (elements.viewerPages || document).querySelectorAll(".annotation-canvas").forEach((canvas) => resizeAnnotationCanvas(canvas));
+}
+
+function getVisibleAnnotationCanvases() {
+  const container = elements.viewerPages;
+  if (!container) {
+    return [];
+  }
+
+  const containerRect = container.getBoundingClientRect();
+  return Array.from(container.querySelectorAll(".annotation-canvas")).filter((canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom >= containerRect.top - 120 &&
+      rect.top <= containerRect.bottom + 120 &&
+      rect.right >= containerRect.left - 120 &&
+      rect.left <= containerRect.right + 120
+    );
+  });
+}
+
+function resizeVisibleAnnotationCanvases() {
+  getVisibleAnnotationCanvases().forEach((canvas) => resizeAnnotationCanvas(canvas));
+}
+
+function resizeAnnotationCanvas(canvas) {
+  const shell = canvas.closest(".viewer-page-shell");
+  const image = shell?.querySelector(".viewer-page-image");
+  if (!shell || !image) {
+    return;
+  }
+  const shellRect = shell.getBoundingClientRect();
+  const imageRect = image.getBoundingClientRect();
+  if (!shellRect.width || !shellRect.height || !imageRect.width || !imageRect.height) {
+    return;
+  }
+
+  const naturalWidth = image.naturalWidth || imageRect.width;
+  const naturalHeight = image.naturalHeight || imageRect.height;
+  const scale = Math.min(imageRect.width / naturalWidth, imageRect.height / naturalHeight);
+  const drawWidth = Math.max(1, naturalWidth * scale);
+  const drawHeight = Math.max(1, naturalHeight * scale);
+  const left = imageRect.left - shellRect.left + (imageRect.width - drawWidth) / 2;
+  const top = imageRect.top - shellRect.top + (imageRect.height - drawHeight) / 2;
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.style.left = `${left}px`;
+  canvas.style.top = `${top}px`;
+  canvas.style.width = `${drawWidth}px`;
+  canvas.style.height = `${drawHeight}px`;
+  const width = Math.max(1, Math.round(drawWidth * dpr));
+  const height = Math.max(1, Math.round(drawHeight * dpr));
+  const resized = canvas.width !== width || canvas.height !== height;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  const record = getAnnotationRecordForPage(canvas.dataset.pageId);
+  if (record) {
+    record.baseWidth = naturalWidth;
+    record.baseHeight = naturalHeight;
+  }
+
+  if (resized) {
+    renderAnnotationCanvas(canvas, record);
+  }
+}
+
+function renderAllVisibleAnnotations() {
+  (elements.viewerPages || document).querySelectorAll(".annotation-canvas").forEach((canvas) => {
+    renderAnnotationCanvas(canvas, state.annotationRecords.get(canvas.dataset.pageId));
+  });
+}
+
+function renderVisibleAnnotations() {
+  getVisibleAnnotationCanvases().forEach((canvas) => {
+    renderAnnotationCanvas(canvas, state.annotationRecords.get(canvas.dataset.pageId));
+  });
+}
+
+function refreshViewerAnnotationCanvases() {
+  if (!elements.viewerDialog?.open || !elements.viewerPages) {
+    return;
+  }
+  resizeAllAnnotationCanvases();
+  renderAllVisibleAnnotations();
+}
+
+function renderAnnotationCanvas(canvas, record) {
+  if (!canvas) {
+    return;
+  }
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+  const width = canvas.width;
+  const height = canvas.height;
+  context.clearRect(0, 0, width, height);
+  if (!state.annotationVisible || !record || record.deletedAt) {
+    return;
+  }
+  (record.strokes || []).forEach((stroke) => drawAnnotationStroke(context, stroke, width, height));
+  const draft = state.annotationDraftStroke;
+  if (draft?.pageId === canvas.dataset.pageId && !draft.inserted) {
+    drawAnnotationStroke(context, draft.stroke, width, height);
+  }
+}
+
+function drawAnnotationStroke(context, stroke, width, height) {
+  const points = (stroke?.points || []).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!points.length) {
+    return;
+  }
+  context.save();
+  context.globalCompositeOperation = stroke.tool === "eraser" ? "destination-out" : "source-over";
+  context.globalAlpha = stroke.tool === "eraser" ? 1 : clamp(Number(stroke.opacity) || 1, 0.05, 1);
+  context.strokeStyle = stroke.color || "#ef4444";
+  context.fillStyle = stroke.color || "#ef4444";
+  context.lineWidth = Math.max(1, Number(stroke.size) || 4) * (window.devicePixelRatio || 1);
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  points.forEach((point, index) => {
+    const x = clamp(point.x, 0, 1) * width;
+    const y = clamp(point.y, 0, 1) * height;
+    if (index === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  });
+  if (points.length === 1) {
+    const point = points[0];
+    context.arc(clamp(point.x, 0, 1) * width, clamp(point.y, 0, 1) * height, context.lineWidth / 2, 0, Math.PI * 2);
+    context.fill();
+  } else {
+    context.stroke();
+  }
+  context.restore();
+}
+
+function getAnnotationCanvasPoint(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return null;
+  }
+  return {
+    x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+    y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+  };
+}
+
+function createAnnotationStroke(point) {
+  const tool = state.annotationTool;
+  const now = new Date().toISOString();
+  const size = tool === "highlighter" ? Math.max(8, state.annotationSize * 3) : tool === "eraser" ? Math.max(10, state.annotationSize * 3) : state.annotationSize;
+  return {
+    id: createId(),
+    tool,
+    color: tool === "highlighter" ? state.annotationHighlighterColor : state.annotationColor,
+    size,
+    opacity: tool === "highlighter" ? state.annotationHighlighterOpacity : state.annotationOpacity,
+    points: [point],
+    createdAt: now,
+  };
+}
+
+function getPointerPressure(event) {
+  const value = Number(event?.pressure);
+  if (Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return isPenPointer(event) ? 0.5 : 1;
+}
+
+function getPointerEventTime(event) {
+  const value = Number(event?.timeStamp);
+  if (Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return performance.now();
+}
+
+function isActivePenContact(event) {
+  if (!isPenPointer(event)) {
+    return false;
+  }
+
+  const pressure = Number(event.pressure);
+  if (Number.isFinite(pressure) && pressure > 0) {
+    return true;
+  }
+
+  if (Number(event.buttons) > 0) {
+    return true;
+  }
+
+  return false;
+}
+
+function getAnnotationCanvasFromPoint(event) {
+  if (!event || !elements.viewerPages) {
+    return null;
+  }
+
+  const element = document.elementFromPoint(event.clientX, event.clientY);
+  const directCanvas = element?.closest?.(".annotation-canvas");
+  if (directCanvas && elements.viewerPages.contains(directCanvas)) {
+    return directCanvas;
+  }
+
+  const shell = element?.closest?.(".viewer-page-shell");
+  const shellCanvas = shell?.querySelector?.(".annotation-canvas");
+  if (shellCanvas && elements.viewerPages.contains(shellCanvas)) {
+    return shellCanvas;
+  }
+
+  if (state.annotationDraftCanvas && elements.viewerPages.contains(state.annotationDraftCanvas)) {
+    return state.annotationDraftCanvas;
+  }
+
+  return null;
+}
+
+function clearAnnotationDraftState() {
+  state.annotationDraftStroke = null;
+  state.annotationPointerId = null;
+  state.annotationDraftCanvas = null;
+  state.annotationDraftInserted = false;
+  state.annotationDraftUndoRegistered = false;
+  state.annotationPenActiveStrokeId = "";
+  state.annotationActiveStrokeToken = 0;
+  state.annotationStrokeStartedAt = 0;
+  if (state.annotationPenLeaveTimer) {
+    clearTimeout(state.annotationPenLeaveTimer);
+    state.annotationPenLeaveTimer = 0;
+  }
+}
+
+function finalizeAnnotationDraft(options = {}) {
+  const draft = state.annotationDraftStroke;
+  if (!draft) {
+    return false;
+  }
+
+  const canvas = options.canvas || state.annotationDraftCanvas;
+  const record = getAnnotationRecordForPage(draft.pageId, { create: true });
+
+  if (!record) {
+    clearAnnotationDraftState();
+    return false;
+  }
+
+  const points = draft.stroke.points || [];
+  if (points.length === 1) {
+    points.push({ ...points[0] });
+  }
+
+  if (!draft.inserted) {
+    record.strokes = [...(record.strokes || []), draft.stroke];
+  } else if (!(record.strokes || []).some((item) => item.id === draft.stroke.id)) {
+    record.strokes = [...(record.strokes || []), draft.stroke];
+  }
+
+  record.updatedAt = new Date().toISOString();
+
+  if (!draft.undoRegistered) {
+    state.annotationUndoStack.push({
+      type: "stroke",
+      pageId: draft.pageId,
+      stroke: draft.stroke,
+    });
+    state.annotationRedoStack = [];
+    draft.undoRegistered = true;
+  }
+
+  scheduleAnnotationSave(draft.pageId, {
+    immediate: draft.pointerType === "pen" || draft.inserted,
+  });
+  clearAnnotationDraftState();
+  state.annotationLastCommittedAt = Date.now();
+
+  if (canvas && options.render !== false) {
+    renderAnnotationCanvas(canvas, record);
+  }
+
+  updateAnnotationToolbarState();
+  return true;
+}
+
+function beginPenAnnotationStroke(event, canvas, options = {}) {
+  if (!state.annotationMode || !isActivePenContact(event) || !canvas) {
+    return false;
+  }
+
+  clearPenFromViewerPointers(event.pointerId);
+
+  if (state.annotationDraftStroke) {
+    if (state.annotationDraftStroke.inserted) {
+      finalizeAnnotationDraft({
+        reason: options.reason || "begin-pen-before-old-up",
+        render: false,
+      });
+    } else {
+      commitAnnotationDraft({
+        reason: options.reason || "begin-pen-before-old-up",
+        force: true,
+      });
+    }
+  }
+
+  if (state.annotationPenLeaveTimer) {
+    clearTimeout(state.annotationPenLeaveTimer);
+    state.annotationPenLeaveTimer = 0;
+  }
+
+  resizeAnnotationCanvas(canvas);
+
+  const point = getAnnotationCanvasPoint(event, canvas);
+  if (!point) {
+    return false;
+  }
+
+  event.preventDefault();
+
+  const pageId = canvas.dataset.pageId;
+  const record = getAnnotationRecordForPage(pageId, { create: true });
+  if (!record) {
+    return false;
+  }
+
+  const eventTime = getPointerEventTime(event);
+  const stroke = createAnnotationStroke({
+    ...point,
+    pressure: getPointerPressure(event),
+    t: eventTime,
+  });
+
+  record.strokes = [...(record.strokes || []), stroke];
+  record.updatedAt = new Date().toISOString();
+  scheduleAnnotationSave(pageId, { immediate: true });
+
+  state.annotationDraftInserted = true;
+  state.annotationDraftUndoRegistered = false;
+  state.annotationPenActiveStrokeId = stroke.id;
+  state.annotationLastPenDownAt = eventTime;
+  state.annotationPointerId = event.pointerId;
+  state.annotationDraftCanvas = canvas;
+  state.annotationDraftStroke = {
+    pointerId: event.pointerId,
+    pointerType: "pen",
+    pageId,
+    stroke,
+    inserted: true,
+    undoRegistered: false,
+    startedAt: eventTime,
+  };
+
+  renderAnnotationCanvas(canvas, record);
+  return true;
+}
+
+function commitAnnotationDraft(options = {}) {
+  const draft = state.annotationDraftStroke;
+  if (!draft) {
+    return false;
+  }
+
+  if (draft.inserted) {
+    return finalizeAnnotationDraft(options);
+  }
+
+  const canvas =
+    options.canvas ||
+    state.annotationDraftCanvas ||
+    elements.viewerPages?.querySelector(`.annotation-canvas[data-page-id="${cssEscape(draft.pageId)}"]`);
+  const record = getAnnotationRecordForPage(draft.pageId, { create: true });
+
+  if (!record) {
+    clearAnnotationDraftState();
+    return false;
+  }
+
+  const points = draft.stroke.points || [];
+  if (!points.length) {
+    clearAnnotationDraftState();
+    return false;
+  }
+
+  if (points.length === 1) {
+    points.push({ ...points[0] });
+  }
+
+  record.strokes = [...(record.strokes || []), draft.stroke];
+  record.updatedAt = new Date().toISOString();
+  state.annotationUndoStack.push({
+    type: "stroke",
+    pageId: draft.pageId,
+    stroke: draft.stroke,
+  });
+  state.annotationRedoStack = [];
+  scheduleAnnotationSave(draft.pageId, {
+    immediate: draft.pointerType === "pen" || draft.inserted,
+  });
+
+  clearAnnotationDraftState();
+  state.annotationLastCommittedAt = Date.now();
+
+  if (canvas) {
+    renderAnnotationCanvas(canvas, record);
+  }
+
+  updateAnnotationToolbarState();
+  return true;
+}
+
+function appendAnnotationPointsFromEvent(event, canvas, options = {}) {
+  const draft = state.annotationDraftStroke;
+  if (!draft || draft.pointerId !== event.pointerId || !canvas) {
+    return false;
+  }
+
+  const point = getAnnotationCanvasPoint(event, canvas);
+  if (!point) {
+    return false;
+  }
+
+  const nextPoint = {
+    ...point,
+    pressure: getPointerPressure(event),
+    t: getPointerEventTime(event),
+  };
+
+  const points = draft.stroke.points;
+  const last = points[points.length - 1];
+  const rect = canvas.getBoundingClientRect();
+  const minDistance = isPenPointer(event) ? 1 : 2;
+
+  if (
+    !options.final &&
+    last &&
+    Math.hypot((nextPoint.x - last.x) * rect.width, (nextPoint.y - last.y) * rect.height) < minDistance
+  ) {
+    return false;
+  }
+
+  points.push(nextPoint);
+  if (draft.inserted) {
+    const record = getAnnotationRecordForPage(draft.pageId);
+    if (record) {
+      record.updatedAt = new Date().toISOString();
+    }
+    scheduleAnnotationSave(draft.pageId, {
+      immediate: isPenPointer(event),
+      throttleMs: 900,
+    });
+  }
+  return true;
+}
+
+function scheduleAnnotationRender(canvas) {
+  state.annotationPendingRenderCanvas = canvas;
+
+  if (state.annotationRenderFrame) {
+    return;
+  }
+
+  state.annotationRenderFrame = requestAnimationFrame(() => {
+    state.annotationRenderFrame = 0;
+    const target = state.annotationPendingRenderCanvas;
+    state.annotationPendingRenderCanvas = null;
+
+    if (!target) {
+      return;
+    }
+
+    renderAnnotationCanvas(target, state.annotationRecords.get(target.dataset.pageId));
+  });
+}
+
+function handleAnnotationPointerDown(event) {
+  if (!state.annotationMode) {
+    return;
+  }
+  const isPen = isPenPointer(event);
+  if (isPen) {
+    const canvas = event.currentTarget?.classList?.contains("annotation-canvas")
+      ? event.currentTarget
+      : getAnnotationCanvasFromPoint(event);
+    beginPenAnnotationStroke(event, canvas, { reason: "pen-pointerdown" });
+    return;
+  }
+
+  if (isTouchPointer(event) && !event.isPrimary) {
+    return;
+  }
+  if (!event.isPrimary) {
+    return;
+  }
+  if (isViewerPinching()) {
+    return;
+  }
+  if (state.annotationDraftStroke) {
+    commitAnnotationDraft({
+      reason: "new-pointerdown-before-old-up",
+      force: true,
+    });
+  }
+
+  const canvas = event.currentTarget;
+  resizeAnnotationCanvas(canvas);
+  const point = getAnnotationCanvasPoint(event, canvas);
+  if (!point) {
+    return;
+  }
+  event.preventDefault();
+
+  const pageId = canvas.dataset.pageId;
+  const record = getAnnotationRecordForPage(pageId, { create: true });
+  if (!record) {
+    return;
+  }
+
+  const stroke = createAnnotationStroke({
+    ...point,
+    pressure: getPointerPressure(event),
+    t: getPointerEventTime(event),
+  });
+
+  if (isPen) {
+    record.strokes = [...(record.strokes || []), stroke];
+    record.updatedAt = new Date().toISOString();
+
+    state.annotationDraftInserted = true;
+    state.annotationDraftUndoRegistered = false;
+    state.annotationPenActiveStrokeId = stroke.id;
+    state.annotationLastPenDownAt = getPointerEventTime(event);
+    state.annotationPointerId = event.pointerId;
+    state.annotationDraftCanvas = canvas;
+    state.annotationDraftStroke = {
+      pointerId: event.pointerId,
+      pointerType: "pen",
+      pageId,
+      stroke,
+      inserted: true,
+      undoRegistered: false,
+    };
+
+    renderAnnotationCanvas(canvas, record);
+    return;
+  }
+
+  try {
+    canvas.setPointerCapture(event.pointerId);
+  } catch (error) {
+    console.warn(error);
+  }
+
+  state.annotationPointerId = event.pointerId;
+  state.annotationDraftCanvas = canvas;
+  state.annotationDraftStroke = {
+    pointerId: event.pointerId,
+    pointerType: getPointerKind(event),
+    pageId,
+    stroke,
+    inserted: false,
+    undoRegistered: false,
+  };
+  renderAnnotationCanvas(canvas, record);
+}
+
+function handleAnnotationPointerMove(event) {
+  const isPen = isPenPointer(event);
+  if (isPen) {
+    clearPenFromViewerPointers(event.pointerId);
+  }
+
+  if (isViewerPinching() && !isPen) {
+    return;
+  }
+
+  let draft = state.annotationDraftStroke;
+  let canvas = event.currentTarget?.classList?.contains("annotation-canvas")
+    ? event.currentTarget
+    : state.annotationDraftCanvas;
+
+  if (isPen && isActivePenContact(event) && (!draft || draft.pointerId !== event.pointerId)) {
+    const fallbackCanvas = getAnnotationCanvasFromPoint(event) || canvas;
+    if (fallbackCanvas) {
+      const started = beginPenAnnotationStroke(event, fallbackCanvas, {
+        reason: "pen-move-without-down",
+      });
+
+      if (!started) {
+        return;
+      }
+
+      draft = state.annotationDraftStroke;
+      canvas = fallbackCanvas;
+    }
+  }
+
+  if (!state.annotationMode || !draft || draft.pointerId !== event.pointerId) {
+    return;
+  }
+
+  canvas = canvas || state.annotationDraftCanvas || getAnnotationCanvasFromPoint(event);
+  if (!canvas) {
+    return;
+  }
+  event.preventDefault();
+  const changed = appendAnnotationPointsFromEvent(event, canvas);
+  if (changed) {
+    renderAnnotationCanvas(canvas, state.annotationRecords.get(draft.pageId));
+  }
+}
+
+function handleAnnotationPointerEnd(event) {
+  const draft = state.annotationDraftStroke;
+  if (!draft || draft.pointerId !== event.pointerId) {
+    return;
+  }
+  const isPen = isPenPointer(event);
+  if (isPen) {
+    clearPenFromViewerPointers(event.pointerId);
+  }
+  if (
+    isPen &&
+    Number.isFinite(draft.startedAt) &&
+    getPointerEventTime(event) + 1 < draft.startedAt
+  ) {
+    return;
+  }
+  if (isViewerPinching() && !isPen) {
+    cancelAnnotationDraft();
+    return;
+  }
+
+  const canvas = event.currentTarget || state.annotationDraftCanvas;
+  if (canvas) {
+    event.preventDefault();
+    appendAnnotationPointsFromEvent(event, canvas, { final: true });
+  }
+  if (!isPen) {
+    try {
+      canvas?.releasePointerCapture(event.pointerId);
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+  state.annotationLastPointerUpAt = getPointerEventTime(event);
+  if (draft.inserted) {
+    finalizeAnnotationDraft({
+      canvas,
+      reason: event.type || "pen-pointer-end",
+    });
+  } else {
+    commitAnnotationDraft({
+      canvas,
+      reason: event.type || "pointer-end",
+    });
+  }
+}
+
+function handleAnnotationPointerMaybeLeave(event) {
+  return;
+}
+
+function handlePenAnnotationFallbackDown(event) {
+  if (!state.annotationMode || !isPenPointer(event)) {
+    return;
+  }
+
+  if (event.target?.closest?.(".annotation-canvas")) {
+    return;
+  }
+
+  const canvas = getAnnotationCanvasFromPoint(event);
+  if (!canvas) {
+    return;
+  }
+
+  beginPenAnnotationStroke(event, canvas, {
+    reason: "pen-fallback-down",
+  });
+}
+
+function handlePenAnnotationFallbackMove(event) {
+  if (!state.annotationMode || !isActivePenContact(event)) {
+    return;
+  }
+
+  if (event.target?.closest?.(".annotation-canvas")) {
+    return;
+  }
+
+  const draft = state.annotationDraftStroke;
+  let canvas = state.annotationDraftCanvas || getAnnotationCanvasFromPoint(event);
+
+  if (!draft || draft.pointerId !== event.pointerId) {
+    canvas = getAnnotationCanvasFromPoint(event) || canvas;
+    if (!canvas) {
+      return;
+    }
+
+    const started = beginPenAnnotationStroke(event, canvas, {
+      reason: "pen-fallback-move-without-down",
+    });
+
+    if (!started) {
+      return;
+    }
+  }
+
+  canvas = state.annotationDraftCanvas || canvas;
+  if (!canvas) {
+    return;
+  }
+
+  event.preventDefault();
+
+  const changed = appendAnnotationPointsFromEvent(event, canvas);
+  if (changed) {
+    renderAnnotationCanvas(canvas, state.annotationRecords.get(canvas.dataset.pageId));
+  }
+}
+
+function undoAnnotationStroke() {
+  const action = state.annotationUndoStack.pop();
+  if (!action) {
+    return;
+  }
+  const record = getAnnotationRecordForPage(action.pageId);
+  if (!record) {
+    return;
+  }
+  if (action.type === "clear") {
+    record.strokes = action.previousStrokes || [];
+  } else {
+    record.strokes = (record.strokes || []).filter((stroke) => stroke.id !== action.stroke.id);
+  }
+  state.annotationRedoStack.push(action);
+  record.updatedAt = new Date().toISOString();
+  scheduleAnnotationSave(action.pageId, { immediate: true });
+  renderAllVisibleAnnotations();
+  updateAnnotationToolbarState();
+}
+
+function redoAnnotationStroke() {
+  const action = state.annotationRedoStack.pop();
+  if (!action) {
+    return;
+  }
+  const record = getAnnotationRecordForPage(action.pageId, { create: true });
+  if (!record) {
+    return;
+  }
+  if (action.type === "clear") {
+    record.strokes = [];
+  } else {
+    record.strokes = [...(record.strokes || []), action.stroke];
+  }
+  state.annotationUndoStack.push(action);
+  record.updatedAt = new Date().toISOString();
+  scheduleAnnotationSave(action.pageId, { immediate: true });
+  renderAllVisibleAnnotations();
+  updateAnnotationToolbarState();
+}
+
+async function clearCurrentPageAnnotations() {
+  const pageId = getCurrentViewerPageId();
+  if (!pageId) {
+    return;
+  }
+  const record = getAnnotationRecordForPage(pageId, { create: true });
+  if (!record || !(record.strokes || []).length) {
+    return;
+  }
+  const confirmed = await requestDeleteConfirmation({
+    title: "清空本页标注？",
+    message: "只会清空当前页的标注，不会删除原始歌谱图片。",
+  });
+  if (!confirmed) {
+    return;
+  }
+  const previousStrokes = [...record.strokes];
+  record.strokes = [];
+  record.updatedAt = new Date().toISOString();
+  state.annotationUndoStack.push({ type: "clear", pageId, previousStrokes });
+  state.annotationRedoStack = [];
+  scheduleAnnotationSave(pageId, { immediate: true });
+  renderAllVisibleAnnotations();
+  updateAnnotationToolbarState();
+}
+
+function toggleAnnotationVisibility() {
+  state.annotationVisible = !state.annotationVisible;
+  elements.viewerDialog?.classList.toggle("annotations-hidden", !state.annotationVisible);
+  renderAllVisibleAnnotations();
+  updateAnnotationToolbarState();
 }
 
 function queueScoreMetadataSave(scoreId, createRecord) {
@@ -11752,6 +14501,7 @@ function updateViewerPageIndicator() {
 
   setViewerPageIndicator(currentIndex + 1, pages.length);
   updateViewerKeySignatureForIndex(currentIndex);
+  updateViewerPianoKeySignature();
   preloadViewerNeighbors(currentIndex);
 }
 
@@ -11764,6 +14514,10 @@ async function toggleViewerPerformanceMode() {
 }
 
 async function enterViewerPerformanceMode() {
+  if (state.annotationMode) {
+    setAnnotationMode(false, { deferSave: true });
+    await flushAnnotationSave().catch((error) => console.warn(error));
+  }
   state.viewerPerformanceMode = true;
   elements.viewerDialog.classList.add("is-performance-mode");
   elements.viewerPerformanceText.textContent = "退出";
@@ -11871,6 +14625,7 @@ async function prepareSetlistViewerPages(setlistId) {
         const previousScrollLeft = elements.viewerPages.scrollLeft;
         const virtualScore = createSetlistViewerScore(setlist);
         renderViewerPages(virtualScore);
+        updateViewerPianoKeySignature();
         requestAnimationFrame(() => {
           elements.viewerPages.scrollTo({ top: previousScrollTop, left: previousScrollLeft });
         });
@@ -11897,6 +14652,11 @@ function removeScoresFromMemory(scores) {
   state.scores = state.scores.filter((score) => !scoreIds.has(score.id));
   state.scorePages = state.scorePages.filter((page) => !scoreIds.has(page.scoreId));
   state.setlistItems = state.setlistItems.filter((item) => !scoreIds.has(item.scoreId));
+  state.annotationRecords.forEach((record, pageId) => {
+    if (scoreIds.has(record.scoreId)) {
+      state.annotationRecords.delete(pageId);
+    }
+  });
   if (state.currentViewerScoreId && scoreIds.has(state.currentViewerScoreId)) {
     closeViewerUI();
   }
@@ -11921,6 +14681,22 @@ function queueDeleteSyncForScores(scores, deletedAt) {
     }).catch((error) => console.warn(error));
   });
   kickOutbox(0);
+}
+
+function queueDeleteSyncForAnnotations(annotations, deletedAt) {
+  (annotations || [])
+    .filter((annotation) => annotation?.id)
+    .forEach((annotation) => {
+      enqueueOutboxTask("DELETE_ANNOTATION", {
+        entityId: annotation.id,
+        entityType: "annotation",
+        dedupeKey: `annotation.delete:${annotation.id}`,
+        payload: { annotation: { ...annotation, deletedAt, updatedAt: deletedAt }, deletedAt },
+      }).catch((error) => console.warn(error));
+    });
+  if ((annotations || []).length) {
+    kickOutbox(0);
+  }
 }
 
 function queueDeleteSyncForFolder(folder, folderScores, deletedAt) {
@@ -11975,6 +14751,7 @@ async function deleteScoresStable(scoreIds, options = {}) {
     try {
     const deletedAt = new Date().toISOString();
     const cloudDeleteQueued = targets.some((score) => shouldKeepDeleteTombstone(score));
+    const annotationsForDeleteSync = await readAnnotationsForScoreIds(ids);
 
     setStatus("正在从本机删除...");
     // 删除前先把完整副本存入回收站，便于恢复（失败不阻断删除本身）。
@@ -11997,6 +14774,7 @@ async function deleteScoresStable(scoreIds, options = {}) {
     }
 
     queueDeleteSyncForScores(targets, deletedAt);
+    queueDeleteSyncForAnnotations(annotationsForDeleteSync, deletedAt);
     if (rendered) {
       setStatus(cloudDeleteQueued ? `已删除 ${targets.length} 份歌谱，稍后同步云端。` : `已删除 ${targets.length} 份歌谱。`);
     }
@@ -12043,6 +14821,8 @@ async function deleteFolder(id) {
   try {
     const deletedAt = new Date().toISOString();
     const cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
+    const folderScoreIds = new Set(folderScores.map((score) => score.id));
+    const annotationsForDeleteSync = await readAnnotationsForScoreIds(Array.from(folderScoreIds));
 
     // 文件夹内的歌谱也先快照到回收站，便于单独恢复。
     if (folderScores.length) {
@@ -12064,9 +14844,13 @@ async function deleteFolder(id) {
     folderScores.forEach(revokeScoreUrls);
     state.folders = state.folders.filter((item) => item.id !== id);
     state.scores = state.scores.filter((score) => score.folderId !== id);
-    const folderScoreIds = new Set(folderScores.map((score) => score.id));
     state.scorePages = state.scorePages.filter((page) => !folderScoreIds.has(page.scoreId));
     state.setlistItems = state.setlistItems.filter((item) => !folderScoreIds.has(item.scoreId));
+    state.annotationRecords.forEach((record, pageId) => {
+      if (folderScoreIds.has(record.scoreId)) {
+        state.annotationRecords.delete(pageId);
+      }
+    });
     if (state.currentFolderId === id) {
       state.currentFolderId = null;
     }
@@ -12074,6 +14858,7 @@ async function deleteFolder(id) {
     renderSetlists();
     if (cloudDeleteQueued) {
       queueDeleteSyncForFolder(folder, folderScores, deletedAt);
+      queueDeleteSyncForAnnotations(annotationsForDeleteSync, deletedAt);
     }
     setStatus(
       cloudDeleteQueued
@@ -12207,8 +14992,10 @@ function renderViewerPages(score) {
     const figure = document.createElement("figure");
     figure.className = "viewer-page";
     figure.dataset.pageNumber = String(index + 1);
+    figure.dataset.pageId = page.id;
 
     const image = document.createElement("img");
+    image.className = "viewer-page-image";
     image.draggable = false;
     image.decoding = "async";
     // 首页立即加载，其余页懒加载，避免一次性解码所有大图。未加载前给页面预留高度
@@ -12226,16 +15013,41 @@ function renderViewerPages(score) {
 
     const imageFrame = document.createElement("div");
     imageFrame.className = "viewer-image-frame";
-    imageFrame.append(image);
+    const shell = document.createElement("div");
+    shell.className = "viewer-page-shell";
+    shell.dataset.pageId = page.id;
+    const canvas = document.createElement("canvas");
+    canvas.className = "annotation-canvas";
+    canvas.dataset.pageId = page.id;
+    canvas.setAttribute("aria-hidden", "true");
+    canvas.addEventListener("pointerdown", handleAnnotationPointerDown);
+    canvas.addEventListener("pointermove", handleAnnotationPointerMove);
+    canvas.addEventListener("pointerup", handleAnnotationPointerEnd);
+    canvas.addEventListener("pointercancel", handleAnnotationPointerEnd);
+    image.addEventListener("load", () => {
+      resizeAnnotationCanvas(canvas);
+      renderAnnotationCanvas(canvas, state.annotationRecords.get(page.id));
+    });
+    shell.append(image, canvas);
+    imageFrame.append(shell);
 
     figure.append(imageFrame);
     elements.viewerPages.append(figure);
     bindScorePageImage(image, page, { hydrate: false });
+    requestAnimationFrame(() => {
+      resizeAnnotationCanvas(canvas);
+      renderAnnotationCanvas(canvas, state.annotationRecords.get(page.id));
+    });
   });
   setViewerPageIndicator(1, pages.length || 1);
   scheduleViewerPageIndicatorUpdate();
   preloadViewerNeighbors(0);
   prioritizeScorePageDisplay(pages);
+  loadAnnotationsForPages(pages.map((page) => page.id)).then(() => {
+    requestAnimationFrame(() => {
+      refreshViewerAnnotationCanvases();
+    });
+  });
 }
 
 // 预加载当前页及其相邻页（下一页/上一页）：提前解码，使翻页时立即显示，不必等待懒加载。
@@ -12338,6 +15150,7 @@ function rerenderOpenViewerIfPageListChanged(scoreId) {
     ...score,
     pages: latestPages,
   });
+  updateViewerPianoKeySignature();
   requestAnimationFrame(() => {
     elements.viewerPages.scrollTo({ top: previousScrollTop, left: previousScrollLeft });
   });
