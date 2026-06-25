@@ -74,6 +74,13 @@
     return KEY_NAME_TO_PC[key] ?? 0;
   }
 
+  // 调根音“1”所在的参考 MIDI：放在最接近中央 C 的八度。
+  // C–F#（pc 0–6）用第 4 八度（C4–F#4）；G–B（pc 7–11）降到第 3 八度（G3–B3），
+  // 使 G/降A/A/降B/B 这些高调号的简谱整体低一个八度（例如 A 调时 A3 = 1）。
+  function keyRootReferenceMidi(keyRootPc) {
+    return keyRootPc >= 7 ? 48 + keyRootPc : 60 + keyRootPc;
+  }
+
   function numberedForKey(midi, keyRootPc) {
     const pc = midi % 12;
     const rel = (pc - keyRootPc + 12) % 12;
@@ -86,8 +93,7 @@
       10: "#6",
     };
     let label = scaleIndex >= 0 ? SCALE_NUMBERS[scaleIndex] : sharpMap[rel] || "?";
-    const keyRootMidiInOctave4 = 60 + keyRootPc;
-    const octaveOffset = Math.floor((midi - keyRootMidiInOctave4) / 12);
+    const octaveOffset = Math.floor((midi - keyRootReferenceMidi(keyRootPc)) / 12);
 
     if (octaveOffset > 0) {
       label += "\u0307".repeat(octaveOffset);
@@ -733,7 +739,13 @@
       } else if (labelMode === "solfege") {
         label.textContent = solfege(midi);
       } else if (labelMode === "numbered") {
-        label.textContent = numberedForKey(midi, keyRootPc);
+        // 只显示低八度 1（1 下加一点）到高八度 7（7 上加一点）这三个八度的简谱，其余琴键留空。
+        const octaveOffset = Math.floor((midi - keyRootReferenceMidi(keyRootPc)) / 12);
+        if (octaveOffset < -1 || octaveOffset > 1) {
+          label.classList.add("is-off");
+        } else {
+          label.textContent = numberedForKey(midi, keyRootPc);
+        }
       } else {
         label.classList.add("is-off");
       }

@@ -26,12 +26,12 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=194" />
-    <link rel="stylesheet" href="piano.css?v=194" />
+    <link rel="stylesheet" href="styles.css?v=202" />
+    <link rel="stylesheet" href="piano.css?v=202" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="piano.js?v=194"></script>
-    <script defer charset="UTF-8" src="app.js?v=194"></script>
+    <script defer charset="UTF-8" src="piano.js?v=202"></script>
+    <script defer charset="UTF-8" src="app.js?v=202"></script>
   </head>
   <body class="app-booting">
     <div class="app-shell">
@@ -362,6 +362,22 @@
                 <p>进入歌谱后点击右上角“更多”，选择“标注”。标注模式下单指或 Apple Pencil 可以书写，双指可以缩放或移动页面；工具栏支持画笔、荧光笔、橡皮、撤销、重做、清空和隐藏标注。标注会自动保存，不会修改原始歌谱图片。</p>
                 <p class="usage-note">iPad 使用 Apple Pencil 时，建议到系统“设置”→“Apple Pencil”中关闭“随手写”，避免系统输入功能抢占笔触。</p>
                 <div class="usage-annotation-demo" aria-hidden="true"><span>画笔</span><span>荧光笔</span><span>橡皮</span><b>完成</b></div>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="piano"></i></span>
+              <div>
+                <h3>钢琴</h3>
+                <p>查看歌谱时点击右上角“更多”，选择“钢琴”，底部会弹出一台钢琴。用上方滑动条可以平滑切换音区，点击或按住琴键即可发声，也能在琴键之间滑奏。标签可在音名 / 唱名 / 简谱 / 隐藏之间切换，简谱会随当前歌谱的调号自动变化。</p>
+              </div>
+            </section>
+
+            <section class="usage-guide-card">
+              <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="timer"></i></span>
+              <div>
+                <h3>节拍器</h3>
+                <p>在“更多”菜单里“钢琴”下方选择“节拍器”，底部会弹出节拍器。点击播放即可开始，拖动滑动条或用 −/＋ 调整速度（BPM），并选择 2/4、3/4、4/4、6/8 等拍号；每拍都有节拍点提示，第一拍为重音。钢琴和节拍器同一时间只会显示一个。</p>
               </div>
             </section>
 
@@ -1017,7 +1033,7 @@
                 <span>收藏</span>
               </button>
               <button class="viewer-annotation-button viewer-piano-button" id="viewerPianoButton" type="button" role="menuitem" aria-pressed="false">
-                <i data-lucide="music-2" aria-hidden="true"></i>
+                <i data-lucide="piano" aria-hidden="true"></i>
                 <span>钢琴</span>
               </button>
               <button class="viewer-annotation-button viewer-metronome-button" id="viewerMetronomeButton" type="button" role="menuitem" aria-pressed="false">

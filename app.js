@@ -11,7 +11,7 @@ const SYNC_OUTBOX_STORE_NAME = "sync_outbox";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 1;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v194";
+const APP_BUILD = "v202";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -1258,11 +1258,11 @@ function bindEvents() {
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("dragstart", handleDragStart);
   window.addEventListener("beforeunload", () => {
-    flushAnnotationSave();
+    flushAnnotationsForExit();
     revokeAllUrls();
   });
   window.addEventListener("pagehide", () => {
-    flushAnnotationSave();
+    flushAnnotationsForExit();
   });
   window.addEventListener("resize", () => {
     clampFabIntoBounds();
@@ -1275,7 +1275,7 @@ function bindEvents() {
   document.addEventListener("visibilitychange", () => {
     handleWakeLockVisibilityChange();
     if (document.visibilityState === "hidden") {
-      flushAnnotationSave();
+      flushAnnotationsForExit();
     }
   });
   // 自定义“边缘返回”手势（替代不可靠的浏览器历史手势）。capture 阶段记录，passive 观察，不打断内容滚动。
@@ -4142,6 +4142,12 @@ function setViewerZoom(value, options = {}) {
   if (anchor && previousZoom > 0 && previousZoom !== state.viewerZoom) {
     applyViewerZoomAnchor(anchor);
   }
+
+  if (previousZoom !== state.viewerZoom) {
+    // 即时让画布随图片缩放（不重绘，无闪烁），缩放停止后再去抖重栅格化恢复清晰度。
+    syncAllAnnotationCanvasGeometry();
+    scheduleAnnotationRerasterAfterZoom();
+  }
 }
 
 function setViewerZoomFast(value, options = {}) {
@@ -4161,6 +4167,10 @@ function setViewerZoomFast(value, options = {}) {
   if (anchor && previousZoom > 0 && previousZoom !== state.viewerZoom) {
     applyViewerZoomAnchor(anchor);
   }
+
+  // 即时几何同步（无重绘、无闪烁），停止后去抖重栅格化恢复清晰度。
+  syncAllAnnotationCanvasGeometry();
+  scheduleAnnotationRerasterAfterZoom();
 }
 
 function getViewerZoomAnchor(centerPoint) {
@@ -4661,11 +4671,8 @@ function handleViewerPointerDown(event) {
     event.preventDefault();
     state.viewerTapStart = null;
     state.viewerDrag = null;
-    state.viewerPinchStartDistance = getViewerPointerDistance();
-    state.viewerPinchStartZoom = state.viewerZoom;
-    state.viewerPinchLastCenter = getViewerPointerCenter();
-    elements.viewerPages.classList.add("is-pinching");
-    state.viewerPointers.forEach((_, pointerId) => captureViewerPointer(pointerId));
+    // 查看模式也用实时 CSS 变换缩放（与标注模式一致），避免每帧重排导致卡顿。
+    beginViewerLivePinch();
     return;
   }
 
@@ -4721,12 +4728,12 @@ function handleViewerPointerMove(event) {
     return;
   }
 
-  if (state.viewerPointers.size === 2 && state.viewerPinchStartDistance > 0) {
+  if (state.viewerPinchActive && getTouchViewerPointers().length === 2) {
     event.preventDefault();
     const distance = getViewerPointerDistance();
-    const ratio = distance / state.viewerPinchStartDistance;
     const center = getViewerPointerCenter();
-    setViewerZoom(state.viewerPinchStartZoom * ratio, { centerPoint: center });
+    state.viewerPendingPinch = { distance, center };
+    requestViewerPinchFrame();
     return;
   }
 
@@ -4774,6 +4781,18 @@ function handleViewerPointerEnd(event) {
     elements.viewerPages.releasePointerCapture(event.pointerId);
   } catch (error) {
     // Pointer capture may already be released by the browser.
+  }
+
+  // 结束实时双指缩放（与标注模式一致，平滑提交），避免落回每帧重排的卡顿路径。
+  if (state.viewerPinchActive && getTouchViewerPointers().length < 2) {
+    if (!state.viewerPinchCommitFrame) {
+      commitViewerLivePinch();
+    }
+    state.viewerTapStart = null;
+    if (state.viewerPointers.size < 2) {
+      elements.viewerPages.classList.remove("is-pinching");
+    }
+    return;
   }
 
   if (state.viewerDrag?.pointerId === event.pointerId) {
@@ -6836,6 +6855,18 @@ function scheduleAnnotationSave(pageId, options = {}) {
       requestAnnotationImmediateFlush();
     }
   }
+}
+
+// 退到后台 / 关闭前调用：先把进行中的笔迹落到记录与待存队列，再 flush，尽量保证不丢笔迹。
+function flushAnnotationsForExit() {
+  try {
+    if (state.annotationDraftStroke) {
+      commitAnnotationDraft({ reason: "app-exit", force: true });
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+  flushAnnotationSave().catch((error) => console.warn(error));
 }
 
 async function flushAnnotationSave() {
@@ -13604,6 +13635,25 @@ function resizeAllAnnotationCanvases() {
   (elements.viewerPages || document).querySelectorAll(".annotation-canvas").forEach((canvas) => resizeAnnotationCanvas(canvas));
 }
 
+// 缩放过程中只做“几何同步”：画布随图片即时缩放，不重栅格化，避免抖动。
+function syncAllAnnotationCanvasGeometry() {
+  (elements.viewerPages || document)
+    .querySelectorAll(".annotation-canvas")
+    .forEach((canvas) => resizeAnnotationCanvas(canvas, { geometryOnly: true }));
+}
+
+let annotationZoomRerasterTimer = 0;
+// 缩放停止后再做一次完整重栅格化，恢复清晰度（去抖）。
+function scheduleAnnotationRerasterAfterZoom() {
+  if (annotationZoomRerasterTimer) {
+    window.clearTimeout(annotationZoomRerasterTimer);
+  }
+  annotationZoomRerasterTimer = window.setTimeout(() => {
+    annotationZoomRerasterTimer = 0;
+    scheduleAnnotationCanvasResize();
+  }, 180);
+}
+
 function getVisibleAnnotationCanvases() {
   const container = elements.viewerPages;
   if (!container) {
@@ -13628,7 +13678,7 @@ function resizeVisibleAnnotationCanvases() {
   getVisibleAnnotationCanvases().forEach((canvas) => resizeAnnotationCanvas(canvas));
 }
 
-function resizeAnnotationCanvas(canvas) {
+function resizeAnnotationCanvas(canvas, options = {}) {
   const shell = canvas.closest(".viewer-page-shell");
   const image = shell?.querySelector(".viewer-page-image");
   if (!shell || !image) {
@@ -13653,6 +13703,13 @@ function resizeAnnotationCanvas(canvas) {
   canvas.style.top = `${top}px`;
   canvas.style.width = `${drawWidth}px`;
   canvas.style.height = `${drawHeight}px`;
+
+  // 仅同步几何（缩放过程中）：让画布随图片即时等比缩放，不改后备分辨率、不重绘，
+  // 避免每一步缩放都清屏重画导致的闪烁/抖动。清晰度由缩放停止后的去抖重栅格化恢复。
+  if (options.geometryOnly) {
+    return;
+  }
+
   const width = Math.max(1, Math.round(drawWidth * dpr));
   const height = Math.max(1, Math.round(drawHeight * dpr));
   const resized = canvas.width !== width || canvas.height !== height;
@@ -13723,7 +13780,9 @@ function drawAnnotationStroke(context, stroke, width, height) {
   context.globalAlpha = stroke.tool === "eraser" ? 1 : clamp(Number(stroke.opacity) || 1, 0.05, 1);
   context.strokeStyle = stroke.color || "#ef4444";
   context.fillStyle = stroke.color || "#ef4444";
-  context.lineWidth = Math.max(1, Number(stroke.size) || 4) * (window.devicePixelRatio || 1);
+  // 笔迹粗细随缩放等比变化，与画面内容“丝滑结合”（zoom=1 时与原来一致）。
+  const zoom = state.viewerZoom > 0 ? state.viewerZoom : 1;
+  context.lineWidth = Math.max(1, Number(stroke.size) || 4) * (window.devicePixelRatio || 1) * zoom;
   context.lineCap = "round";
   context.lineJoin = "round";
   context.beginPath();
@@ -13881,9 +13940,8 @@ function finalizeAnnotationDraft(options = {}) {
     draft.undoRegistered = true;
   }
 
-  scheduleAnnotationSave(draft.pageId, {
-    immediate: draft.pointerType === "pen" || draft.inserted,
-  });
+  // 与手指一致的去抖保存（不再用 immediate），保证待存队列在退到后台时仍可被 flush 落库。
+  scheduleAnnotationSave(draft.pageId);
   clearAnnotationDraftState();
   state.annotationLastCommittedAt = Date.now();
 
@@ -13945,7 +14003,9 @@ function beginPenAnnotationStroke(event, canvas, options = {}) {
 
   record.strokes = [...(record.strokes || []), stroke];
   record.updatedAt = new Date().toISOString();
-  scheduleAnnotationSave(pageId, { immediate: true });
+  // 走与手指一致的去抖保存：保持 pageId 在待存队列中，由 500ms 定时器或退到后台时的
+  // flush 可靠落库。避免 immediate 立即清空待存队列后、写入仍在途中就被系统杀掉而丢失。
+  scheduleAnnotationSave(pageId);
 
   state.annotationDraftInserted = true;
   state.annotationDraftUndoRegistered = false;
@@ -14006,9 +14066,7 @@ function commitAnnotationDraft(options = {}) {
     stroke: draft.stroke,
   });
   state.annotationRedoStack = [];
-  scheduleAnnotationSave(draft.pageId, {
-    immediate: draft.pointerType === "pen" || draft.inserted,
-  });
+  scheduleAnnotationSave(draft.pageId);
 
   clearAnnotationDraftState();
   state.annotationLastCommittedAt = Date.now();
@@ -14057,10 +14115,8 @@ function appendAnnotationPointsFromEvent(event, canvas, options = {}) {
     if (record) {
       record.updatedAt = new Date().toISOString();
     }
-    scheduleAnnotationSave(draft.pageId, {
-      immediate: isPenPointer(event),
-      throttleMs: 900,
-    });
+    // 去抖保存（不再用 immediate），与手指路径一致，确保退到后台时能可靠落库。
+    scheduleAnnotationSave(draft.pageId);
   }
   return true;
 }
