@@ -26,12 +26,12 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=202" />
-    <link rel="stylesheet" href="piano.css?v=202" />
+    <link rel="stylesheet" href="styles.css?v=216" />
+    <link rel="stylesheet" href="piano.css?v=216" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
-    <script defer charset="UTF-8" src="piano.js?v=202"></script>
-    <script defer charset="UTF-8" src="app.js?v=202"></script>
+    <script defer charset="UTF-8" src="piano.js?v=216"></script>
+    <script defer charset="UTF-8" src="app.js?v=221"></script>
   </head>
   <body class="app-booting">
     <div class="app-shell">
@@ -101,6 +101,7 @@
               <button class="library-filter-button" type="button" data-library-filter="recent">最近打开</button>
               <button class="library-filter-button" type="button" data-library-filter="favorite">我的收藏</button>
             </div>
+            <span class="library-storage-usage" id="libraryStorageUsage" aria-label="本地存储用量" hidden></span>
           </div>
 
           <div class="score-grid" id="scoreGrid" aria-live="polite"></div>
@@ -127,6 +128,7 @@
         <section class="mine-panel" aria-labelledby="myTitle">
           <div class="mine-head">
             <h2 id="myTitle">我的</h2>
+            <span class="app-version-tag" id="appVersionTag"></span>
           </div>
 
           <div class="mine-menu" aria-label="我的功能">
@@ -165,6 +167,13 @@
               <span>使用说明</span>
               <i data-lucide="chevron-right" aria-hidden="true"></i>
             </button>
+            <button class="mine-strip-button" id="supportAuthorButton" type="button">
+              <span class="mine-strip-icon" aria-hidden="true">
+                <i data-lucide="heart-handshake"></i>
+              </span>
+              <span>支持作者</span>
+              <i data-lucide="chevron-right" aria-hidden="true"></i>
+            </button>
           </div>
 
           <div class="mine-auth-panel">
@@ -175,15 +184,6 @@
             </button>
           </div>
 
-          <div class="mine-sync-panel" id="syncOutboxPanel" hidden>
-            <span class="mine-sync-icon" aria-hidden="true">
-              <i data-lucide="refresh-cw"></i>
-            </span>
-            <p class="mine-sync-state" id="syncOutboxState">同步队列已清空。</p>
-            <button class="mine-sync-retry" id="retryOutboxButton" type="button" hidden>立即重试</button>
-          </div>
-
-          <p class="app-version-tag" id="appVersionTag"></p>
         </section>
       </main>
 
@@ -416,6 +416,59 @@
           </div>
         </div>
       </section>
+
+      <section class="profile-screen support-screen" id="supportAuthorScreen" aria-labelledby="supportAuthorTitle" hidden>
+        <div class="profile-page support-page">
+          <div class="profile-page-head">
+            <span aria-hidden="true"></span>
+            <h2 id="supportAuthorTitle">支持作者</h2>
+            <span aria-hidden="true"></span>
+          </div>
+
+          <div class="support-content">
+            <div class="support-hero" aria-hidden="true">
+              <span class="support-hero-emoji">☕️</span>
+              <span class="support-hero-heart">❤️</span>
+            </div>
+            <p class="support-lead">感谢您使用「我的谱夹」。</p>
+            <p>我是一名刚刚毕业的计算机专业的大学生，本 App 从设计、开发、调试到后续维护，<strong>都是由我独立完成</strong>。为了让大家能更方便地保存歌谱、查看歌谱、标注排练、云端同步以及实现方便练习歌曲的小功能，我在功能优化和问题修复上投入了不少时间。</p>
+            <p>同时，<strong>本 App 的运行也会产生一些持续成本</strong>，包括数据库存储、云端同步、轻量应用服务器、静态托管等费用。随着使用人数和歌谱数量增加，维护成本也会逐渐上升。</p>
+            <p>如果本 App 确实帮到了您，也<strong>欢迎在能力范围内自愿打赏支持一下</strong>。金额多少都没有关系，哪怕打赏一元我也十分开心。您的支持会用于后续服务器运维、功能改进和长期维护，也会让我更有动力继续把它做得更稳定、更好用。</p>
+            <p>打赏完全自愿，不会影响任何功能使用。</p>
+            <p>此提示会在每月的 1 号弹出一次，其余时间不会反复打扰您。您也可以随时在「我的」→「支持作者」中进行打赏。</p>
+            <p class="support-closing">无论是否打赏，都感谢您的使用和支持。</p>
+          </div>
+
+          <div class="support-actions">
+            <button class="support-decline-button" id="supportDeclineButton" type="button">暂时不了</button>
+            <button class="support-accept-button" id="supportAcceptButton" type="button">支持一下 ❤️</button>
+          </div>
+        </div>
+      </section>
+
+      <dialog class="support-pay-dialog" id="supportPayDialog" aria-labelledby="supportPayTitle">
+        <div class="support-pay-surface" id="supportPaySurface" data-pay="wechat">
+          <button class="icon-button support-pay-save" id="supportPaySaveButton" type="button" title="保存图片" aria-label="保存收款码图片">
+            <i data-lucide="download" aria-hidden="true"></i>
+          </button>
+          <button class="icon-button support-pay-close" id="supportPayCloseButton" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+          <h3 class="support-pay-title" id="supportPayTitle">扫码支持作者</h3>
+          <div class="support-pay-tabs" role="group" aria-label="选择收款方式">
+            <button class="support-pay-tab is-active" id="supportPayWechatTab" type="button" data-pay="wechat">微信</button>
+            <button class="support-pay-tab" id="supportPayAlipayTab" type="button" data-pay="alipay">支付宝</button>
+          </div>
+          <div class="support-pay-qr">
+            <img class="support-pay-img" id="supportPayWechatImg" src="assets/pay-wechat.jpg?v=3" alt="微信收款码" />
+            <img class="support-pay-img" id="supportPayAlipayImg" src="assets/pay-alipay.jpg?v=3" alt="支付宝收款码" hidden />
+          </div>
+          <p class="support-pay-hint" id="supportPayHint">
+            <span class="support-pay-hint-line" id="supportPayHintLine1">保存图片后使用微信扫一扫</span>
+            <span class="support-pay-hint-line">金额随意，感谢您的支持 ❤️</span>
+          </p>
+        </div>
+      </dialog>
 
       <section class="profile-screen recycle-bin-screen" id="recycleBinScreen" aria-labelledby="recycleBinTitle" hidden>
         <div class="profile-page recycle-bin-page">
@@ -709,6 +762,30 @@
           </button>
         </div>
       </form>
+    </dialog>
+
+    <dialog class="birthday-dialog" id="birthdayDialog" aria-labelledby="birthdayDialogTitle">
+      <div class="birthday-surface">
+        <div class="birthday-confetti" aria-hidden="true">
+          <span>🎈</span><span>✨</span><span>🎊</span><span>🌟</span><span>🎁</span><span>🎉</span>
+        </div>
+        <div class="birthday-cake" aria-hidden="true">🎂🎂🎂</div>
+        <h2 class="birthday-title" id="birthdayDialogTitle">生日快乐！</h2>
+        <p class="birthday-message" id="birthdayMessage"></p>
+        <button class="birthday-close-button" id="birthdayCloseButton" type="button">谢谢 🎈</button>
+      </div>
+    </dialog>
+
+    <dialog class="db-recovery-dialog" id="dbRecoveryDialog" aria-labelledby="dbRecoveryTitle">
+      <div class="db-recovery-surface">
+        <span class="db-recovery-icon" aria-hidden="true"><i data-lucide="database-backup"></i></span>
+        <h2 class="db-recovery-title" id="dbRecoveryTitle">本地存储未响应</h2>
+        <p class="db-recovery-text" id="dbRecoveryText">本地数据库暂时未响应。点击“重试”会重置本地存储、从云端恢复数据，并继续刚才的操作。</p>
+        <div class="db-recovery-actions">
+          <button class="db-recovery-later" id="dbRecoveryLaterButton" type="button">稍后</button>
+          <button class="db-recovery-retry" id="dbRecoveryRetryButton" type="button">重试</button>
+        </div>
+      </div>
     </dialog>
 
     <dialog class="share-dialog" id="shareDialog" aria-labelledby="shareDialogTitle">

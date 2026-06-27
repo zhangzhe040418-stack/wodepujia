@@ -11,7 +11,7 @@ const SYNC_OUTBOX_STORE_NAME = "sync_outbox";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 1;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v202";
+const APP_BUILD = "v221";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -48,6 +48,16 @@ const STORAGE_UPLOAD_VERSION = 3;
 const ACCOUNT_LABEL_STORAGE_PREFIX = "my-score-folder-account-label:";
 const PROFILE_STORAGE_PREFIX = "my-score-folder-profile:";
 const PROFILE_COLLECTION_NAME = "profiles";
+// 记录“某用户在某年生日已用过的祝福语”，用于尽量不重复地轮换祝福语。
+const BIRTHDAY_USED_PREFIX = "my-score-folder-birthday-used:";
+// 记录“支持作者”月度提示在某年某月是否已弹出，避免每月 1 号多次打开 App 重复弹。
+const SUPPORT_PROMPT_SHOWN_PREFIX = "my-score-folder-support-shown:";
+// 收款码图片缺失时的占位图，避免出现浏览器“裂图”图标。
+const SUPPORT_PAY_PLACEHOLDER =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"><rect width="100%" height="100%" rx="12" fill="#f0f0f0"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#9a9a9a">收款码待添加</text></svg>',
+  );
 const VIEWER_MODE_STORAGE_KEY = "my-score-folder-viewer-mode";
 const VIEWER_MODE_PORTRAIT = "portrait";
 const VIEWER_MODE_LANDSCAPE = "landscape";
@@ -78,14 +88,21 @@ const FAB_VIEWPORT_MARGIN = 8;
 const IMAGE_COMPRESSION_TIMEOUT = 30000;
 const LOCAL_SAVE_TIMEOUT = 45000;
 const PAGE_SAVE_TIMEOUT = 18000;
+const TRASH_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024;
 const CLOUD_QUERY_TIMEOUT = 30000;
 const CLOUD_UPLOAD_TIMEOUT = 120000;
 const CLOUD_DOWNLOAD_TIMEOUT = 90000;
 const CLOUD_WRITE_CONCURRENCY = 4;
 // 任何本地 IndexedDB 事务的兜底超时：超过即主动 abort，避免事务永远 pending。
 const IDB_TXN_TIMEOUT = 20000;
+// 打开/重开本地数据库的兜底超时：iOS/PWA 退后台后连接可能卡死，open 请求永不回调，
+// 会阻塞整条串行写队列（删除/保存/编辑“点了没反应”）。超时即 reject，让重试/重连能恢复。
+const DB_OPEN_TIMEOUT = 8000;
 // 操作锁的总超时兜底：任何被锁包裹的操作最多占用这么久，超时后释放锁并报错，避免“点了没反应”。
 const OPERATION_LOCK_TIMEOUT = 180000;
+// 本地写队列的单任务兜底超时：防止某个后台写入长期占住队列，拖住后续用户操作。
+const LOCAL_WRITE_QUEUE_TIMEOUT = 240000;
+const LOCAL_WRITE_BATCH_SIZE = 10;
 // App 打开恢复 session 后，延迟这么久再做重型全量同步，避免一开就卡在网络/SDK 上。
 const STARTUP_SYNC_DELAY = 6000;
 const SHARE_SYNC_WAIT_TIMEOUT = 1200;
@@ -178,6 +195,13 @@ const state = {
   authRegisterPayload: null,
   profile: null,
   profileLoadedUserId: "",
+  // 本次启动是否已弹过生日弹窗：仅内存标记，防止同一次启动的多个触发重复弹；
+  // 不持久化，所以每次重新打开 App 都会再次弹出。
+  birthdayPopupShownThisSession: false,
+  // 本地数据库恢复弹窗最近一次被“稍后”关闭的时间戳，用于短时间内不反复打扰。
+  dbRecoveryDismissedAt: 0,
+  dbRecoveryPendingAction: null,
+  dbRecoveryBusy: false,
   profileLinkMode: "phone",
   profileLinkSudoToken: "",
   profileLinkVerificationId: "",
@@ -413,6 +437,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshOutboxCounts();
   // 明确的启动账号恢复流程：自动恢复登录 + 必要时轻量拉取云端歌谱。
   restoreStartupAuthSession();
+  // 每月 1 号自动弹出“支持作者”页面（稍延迟，等首屏稳定）。
+  window.setTimeout(() => {
+    try {
+      maybeShowMonthlySupportPrompt();
+    } catch (error) {
+      console.warn("支持作者月度提示失败（忽略）", error);
+    }
+  }, 1500);
 });
 
 function setAppReady(ready) {
@@ -437,10 +469,324 @@ function ensureAppReady(message = "正在读取谱夹，请稍后再试。") {
     return true;
   }
 
-  if (message) {
+  // 启动已完成但本地数据库不可用（连接卡死/打开失败）：弹出可一键重试的恢复弹窗，
+  // 而不仅是一句容易被忽略的提示。删除/编辑/添加/建歌单等写操作都经此判断。
+  if (state.appReady && !state.db) {
+    showDatabaseRecoveryDialog();
+  } else if (message) {
     setStatus(message, true);
   }
   return false;
+}
+
+// 有界只读自检：连接可用则成功，卡死/不可用则抛错。noRetry 避免触发重连/弹窗副作用。
+async function probeLocalDatabase() {
+  await runIdbTransaction(
+    STORE_NAME,
+    "readonly",
+    (store) => {
+      store.count();
+    },
+    { timeoutMs: 6000, noRetry: true },
+  );
+}
+
+// 恢复本地数据库：先用现有/正在打开的连接自检（多数“启动竞态/短暂卡顿”此步即可恢复，
+// 不会粗暴地反复 close+open 造成连接抖动）；自检失败再强制重连。返回是否恢复成功。
+async function recoverLocalDatabase() {
+  try {
+    await ensureDatabaseReady();
+    await probeLocalDatabase();
+    if (!state.appReady) {
+      setAppReady(true);
+    }
+    return true;
+  } catch (error) {
+    console.warn("数据库自检失败，尝试重连", error);
+  }
+  try {
+    await reopenDatabase();
+    await probeLocalDatabase();
+    if (!state.appReady) {
+      setAppReady(true);
+    }
+    return true;
+  } catch (error) {
+    console.warn("数据库重连失败", error);
+    return false;
+  }
+}
+
+// 回到前台时静默自检/重连数据库：iOS/PWA 退后台后连接常被系统冻结而卡死，提前恢复可避免“点了没反应”。
+// 仅在启动完成后执行，避免与首屏正在进行的数据库打开抢资源。
+async function handleForegroundDatabaseRecovery() {
+  if (document.visibilityState !== "visible" || !state.appReady) {
+    return;
+  }
+  try {
+    await ensureDatabaseReady();
+    await probeLocalDatabase();
+  } catch (error) {
+    console.warn("前台数据库自检失败，尝试重连", error);
+    try {
+      await reopenDatabase();
+    } catch (reopenError) {
+      console.warn(reopenError);
+    }
+  }
+}
+
+const DB_RECOVERY_DEFAULT_TEXT =
+  "本地数据库暂时未响应。点击“重试”会重置本地存储、从云端恢复数据，并继续刚才的操作。";
+
+function showDatabaseRecoveryDialog(message, options = {}) {
+  const dialog = elements.dbRecoveryDialog;
+  if (!dialog) {
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(options, "pendingAction")) {
+    state.dbRecoveryPendingAction = options.pendingAction || null;
+  } else if (!dialog.open) {
+    state.dbRecoveryPendingAction = null;
+  }
+  // 用户刚点过“稍后”的短时间内不反复打扰。
+  if (!options.force && !dialog.open && state.dbRecoveryDismissedAt && Date.now() - state.dbRecoveryDismissedAt < 20000) {
+    return;
+  }
+  if (elements.dbRecoveryText) {
+    elements.dbRecoveryText.textContent = message || DB_RECOVERY_DEFAULT_TEXT;
+  }
+  if (elements.dbRecoveryRetryButton) {
+    elements.dbRecoveryRetryButton.disabled = false;
+  }
+  if (dialog.open) {
+    return;
+  }
+  openDialogSafely(dialog);
+  refreshIcons();
+}
+
+function hideDatabaseRecoveryDialog() {
+  closeDialogSafely(elements.dbRecoveryDialog);
+}
+
+function dismissDatabaseRecoveryDialog() {
+  state.dbRecoveryDismissedAt = Date.now();
+  state.dbRecoveryPendingAction = null;
+  hideDatabaseRecoveryDialog();
+}
+
+function isRecoverableDatabaseError(error) {
+  if (!error) {
+    return false;
+  }
+  const message = error?.message || "";
+  return message !== "当前操作正在进行，请稍候。" && (shouldRetryIdbTransaction(error) || isLocalDatabaseNotReadyError(error));
+}
+
+// 在“用户主动写操作整体失败”时调用：仅当错误确属本地库卡死/超时/不可用才弹恢复弹窗，
+// 普通校验/业务错误不弹。由各操作的最终 catch 调用，避免中途事务抖动就过早误弹。
+function showRecoveryDialogIfDbWedged(error, options = {}) {
+  if (isRecoverableDatabaseError(error)) {
+    showDatabaseRecoveryDialog(options.message, options);
+  }
+}
+
+async function handleDatabaseRecoveryRetry() {
+  if (state.dbRecoveryBusy) {
+    return;
+  }
+  const pendingAction = state.dbRecoveryPendingAction;
+  if (pendingAction?.type === "deleteScores") {
+    await resetDatabaseAndReplayDelete(pendingAction);
+    return;
+  }
+  await handleDatabaseReset({ skipConfirm: true });
+}
+
+async function resetDatabaseAndReplayDelete(action) {
+  if (!state.session) {
+    if (elements.dbRecoveryText) {
+      elements.dbRecoveryText.textContent = "未登录，无法从云端恢复。请先登录账号后再重试。";
+    }
+    setStatus("请先登录后再从云端恢复。", true);
+    return;
+  }
+  const button = elements.dbRecoveryRetryButton;
+  const buttons = [elements.dbRecoveryRetryButton, elements.dbRecoveryLaterButton].filter(Boolean);
+  state.dbRecoveryBusy = true;
+  buttons.forEach((item) => {
+    item.disabled = true;
+  });
+  if (elements.dbRecoveryText) {
+    elements.dbRecoveryText.textContent = "正在重置本地存储并从云端恢复，随后会继续删除...";
+  }
+  try {
+    await resetLocalDatabaseAndResync();
+    state.dbRecoveryDismissedAt = 0;
+    hideDatabaseRecoveryDialog();
+    const scoreIds = Array.from(new Set((action.scoreIds || []).filter(Boolean).map(String)));
+    state.dbRecoveryPendingAction = null;
+    if (scoreIds.length) {
+      setStatus("本地存储已重置，正在重新执行删除...");
+      await deleteScoresStable(scoreIds, {
+        skipConfirm: true,
+        autoRetried: true,
+        fromRecoveryDialog: true,
+        suppressRecoveryDialog: true,
+      });
+    } else {
+      setStatus("本地存储已重置并从云端恢复。");
+    }
+  } catch (error) {
+    console.error("恢复后重试删除失败", error);
+    if (elements.dbRecoveryText) {
+      elements.dbRecoveryText.textContent =
+        "重试失败：" + (getErrorMessage(error) || "请彻底关闭 App 后再试，或卸载并重新添加 PWA。");
+    }
+    setStatus(getErrorMessage(error) || "重试删除失败，请稍后再试。", true);
+  } finally {
+    state.dbRecoveryBusy = false;
+    buttons.forEach((item) => {
+      item.disabled = false;
+    });
+  }
+}
+
+// 彻底删除本地数据库（连接卡死/损坏到“怎么都救不回”时使用）。带超时与 onblocked 兜底，绝不悬挂。
+async function deleteLocalDatabase() {
+  try {
+    state.db?.close();
+  } catch (error) {
+    console.warn(error);
+  }
+  state.db = null;
+  reopenDatabasePromise = null;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = 0;
+    const finish = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      callback();
+    };
+    let request;
+    try {
+      request = indexedDB.deleteDatabase(DB_NAME);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    timer = window.setTimeout(() => {
+      finish(() => reject(createNamedError("TimeoutError", "清除本地数据库超时，请稍后重试。")));
+    }, 10000);
+    request.onsuccess = () => finish(() => resolve());
+    request.onerror = () =>
+      finish(() => reject(request.error || createNamedError("AbortError", "清除本地数据库失败。")));
+    request.onblocked = () =>
+      finish(() => reject(createNamedError("BlockedError", "本地数据库被占用，请彻底关闭其它标签页后重试。")));
+  });
+}
+
+function clearInMemoryDataState() {
+  try {
+    revokeAllUrls();
+  } catch (error) {
+    console.warn(error);
+  }
+  state.scores = [];
+  state.scorePages = [];
+  state.folders = [];
+  state.setlists = [];
+  state.setlistItems = [];
+  state.annotationRecords.clear();
+  state.currentFolderId = null;
+}
+
+// 彻底重置本地存储并从云端恢复：删库重建 → 清内存 → 重新认领 + 拉取云端 → 重新加载渲染。
+// 已登录时本地清空是安全的（云端有数据）；未登录时调用方需先拦截。
+async function resetLocalDatabaseAndResync() {
+  await deleteLocalDatabase();
+  state.db = await openDatabase();
+  setAppReady(true);
+  clearInMemoryDataState();
+
+  if (state.session && state.cloudReady) {
+    try {
+      await claimLocalRecordsForUser(state.session.user.id);
+    } catch (error) {
+      console.warn("认领云端记录失败", error);
+    }
+    try {
+      await pullCloudMetadataForCurrentAccount();
+    } catch (error) {
+      console.warn("拉取云端元数据失败", error);
+    }
+  }
+
+  await loadScores();
+  try {
+    renderScores();
+    renderSetlists();
+  } catch (error) {
+    console.warn(error);
+  }
+  if (state.session) {
+    queueAccountBackgroundSync(state.session.user.id);
+    kickOutbox(1500);
+  }
+}
+
+async function handleDatabaseReset(options = {}) {
+  if (!state.session) {
+    if (elements.dbRecoveryText) {
+      elements.dbRecoveryText.textContent = "未登录，无法从云端恢复。请先登录账号后再重置，否则会永久丢失本机歌谱。";
+    }
+    setStatus("请先登录后再重置（未登录时重置会永久丢失本机歌谱）。", true);
+    return;
+  }
+  if (!options.skipConfirm) {
+    const confirmed = await requestDeleteConfirmation({
+      title: "彻底重置本地存储？",
+      message: "将清空本机本地数据并从云端重新下载。未同步到云端的本地改动会丢失；已登录账号的歌谱会自动恢复。",
+    });
+    if (!confirmed) {
+      return;
+    }
+  }
+  const buttons = [
+    elements.dbRecoveryRetryButton,
+    elements.dbRecoveryLaterButton,
+  ];
+  buttons.forEach((b) => {
+    if (b) {
+      b.disabled = true;
+    }
+  });
+  if (elements.dbRecoveryText) {
+    elements.dbRecoveryText.textContent = "正在重置并从云端恢复，请稍候（视歌谱数量可能需要一会儿）...";
+  }
+  try {
+    await resetLocalDatabaseAndResync();
+    state.dbRecoveryDismissedAt = 0;
+    hideDatabaseRecoveryDialog();
+    setStatus("已重置本地存储并从云端恢复。");
+  } catch (error) {
+    console.error("重置本地存储失败", error);
+    if (elements.dbRecoveryText) {
+      elements.dbRecoveryText.textContent =
+        "重置失败：" + (getErrorMessage(error) || "请彻底关闭 App 后重试，或卸载并重新添加 PWA。");
+    }
+  } finally {
+    buttons.forEach((b) => {
+      if (b) {
+        b.disabled = false;
+      }
+    });
+  }
 }
 
 function openDialogSafely(dialog) {
@@ -496,6 +842,44 @@ async function withOperationLock(name, callback, options = {}) {
   } finally {
     operationLocks.delete(name);
   }
+}
+
+async function runUserDataOperation(name, callback, options = {}) {
+  if (!options.skipReadyCheck && !ensureAppReady(options.readyMessage)) {
+    return options.fallbackValue ?? false;
+  }
+
+  const actionLabel = options.actionLabel || "操作";
+  const timeoutMessage = options.timeoutMessage || `${actionLabel}耗时过长，已超时，请重试。`;
+
+  return withOperationLock(
+    name,
+    async () => {
+      beginUserWrite();
+      try {
+        return await callback();
+      } catch (error) {
+        await recoverDatabaseIfWedged(error);
+        throw error;
+      } finally {
+        endUserWrite();
+      }
+    },
+    {
+      timeoutMs: options.timeoutMs || OPERATION_LOCK_TIMEOUT,
+      timeoutMessage,
+    },
+  ).catch(async (error) => {
+    if (typeof options.onError === "function") {
+      await options.onError(error);
+    } else {
+      setStatus(getStorageErrorMessage(error, actionLabel), true);
+    }
+    if (options.showRecovery !== false) {
+      showRecoveryDialogIfDbWedged(error, options.recoveryOptions || {});
+    }
+    return options.fallbackValue ?? false;
+  });
 }
 
 // ===== 调号选择器：第一排升/降，第二排音名 C–B，组合成调号（如 ♯ + E → "#E"）=====
@@ -608,6 +992,25 @@ function bindElements() {
   elements.usageGuideButton = document.querySelector("#usageGuideButton");
   elements.usageGuideScreen = document.querySelector("#usageGuideScreen");
   elements.closeUsageGuideButton = document.querySelector("#closeUsageGuideButton");
+  elements.supportAuthorButton = document.querySelector("#supportAuthorButton");
+  elements.supportAuthorScreen = document.querySelector("#supportAuthorScreen");
+  elements.closeSupportAuthorButton = document.querySelector("#closeSupportAuthorButton");
+  elements.supportDeclineButton = document.querySelector("#supportDeclineButton");
+  elements.supportAcceptButton = document.querySelector("#supportAcceptButton");
+  elements.supportPayDialog = document.querySelector("#supportPayDialog");
+  elements.supportPaySurface = document.querySelector("#supportPaySurface");
+  elements.supportPayCloseButton = document.querySelector("#supportPayCloseButton");
+  elements.supportPayWechatTab = document.querySelector("#supportPayWechatTab");
+  elements.supportPayAlipayTab = document.querySelector("#supportPayAlipayTab");
+  elements.supportPayWechatImg = document.querySelector("#supportPayWechatImg");
+  elements.supportPayAlipayImg = document.querySelector("#supportPayAlipayImg");
+  elements.supportPaySaveButton = document.querySelector("#supportPaySaveButton");
+  elements.supportPayHint = document.querySelector("#supportPayHint");
+  elements.supportPayHintLine1 = document.querySelector("#supportPayHintLine1");
+  elements.dbRecoveryDialog = document.querySelector("#dbRecoveryDialog");
+  elements.dbRecoveryText = document.querySelector("#dbRecoveryText");
+  elements.dbRecoveryRetryButton = document.querySelector("#dbRecoveryRetryButton");
+  elements.dbRecoveryLaterButton = document.querySelector("#dbRecoveryLaterButton");
   elements.myAuthState = document.querySelector("#myAuthState");
   elements.myAuthButton = document.querySelector("#myAuthButton");
   elements.syncOutboxPanel = document.querySelector("#syncOutboxPanel");
@@ -640,6 +1043,7 @@ function bindElements() {
   elements.resultCount = document.querySelector("#resultCount");
   elements.scoreGrid = document.querySelector("#scoreGrid");
   elements.searchInput = document.querySelector("#searchInput");
+  elements.libraryStorageUsage = document.querySelector("#libraryStorageUsage");
   elements.clearSearchButton = document.querySelector("#clearSearchButton");
   elements.libraryFilterButtons = Array.from(document.querySelectorAll("[data-library-filter]"));
   elements.scoreSortSelect = document.querySelector("#scoreSortSelect");
@@ -717,6 +1121,9 @@ function bindElements() {
   elements.profileLinkCode = document.querySelector("#profileLinkCode");
   elements.confirmProfileLinkButton = document.querySelector("#confirmProfileLinkButton");
   elements.closeProfileLinkButton = document.querySelector("#closeProfileLinkButton");
+  elements.birthdayDialog = document.querySelector("#birthdayDialog");
+  elements.birthdayMessage = document.querySelector("#birthdayMessage");
+  elements.birthdayCloseButton = document.querySelector("#birthdayCloseButton");
   elements.verifyDialog = document.querySelector("#verifyDialog");
   elements.verifyForm = document.querySelector("#verifyForm");
   elements.verifyState = document.querySelector("#verifyState");
@@ -906,6 +1313,38 @@ function bindEvents() {
   elements.preferencesButton.addEventListener("click", openPreferencesScreen);
   elements.usageGuideButton?.addEventListener("click", openUsageGuideScreen);
   elements.closeUsageGuideButton?.addEventListener("click", closeUsageGuideScreen);
+  elements.supportAuthorButton?.addEventListener("click", () => openSupportAuthorScreen());
+  elements.closeSupportAuthorButton?.addEventListener("click", closeSupportAuthorScreen);
+  elements.supportDeclineButton?.addEventListener("click", closeSupportAuthorScreen);
+  elements.supportAcceptButton?.addEventListener("click", openSupportPayDialog);
+  elements.supportPayCloseButton?.addEventListener("click", closeSupportPayDialog);
+  elements.supportPayWechatTab?.addEventListener("click", () => setSupportPayMethod("wechat"));
+  elements.supportPayAlipayTab?.addEventListener("click", () => setSupportPayMethod("alipay"));
+  elements.supportPaySaveButton?.addEventListener("click", saveSupportPayImage);
+  elements.dbRecoveryRetryButton?.addEventListener("click", handleDatabaseRecoveryRetry);
+  elements.dbRecoveryLaterButton?.addEventListener("click", dismissDatabaseRecoveryDialog);
+  elements.dbRecoveryDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    dismissDatabaseRecoveryDialog();
+  });
+  [elements.supportPayWechatImg, elements.supportPayAlipayImg].forEach((img) => {
+    img?.addEventListener("error", () => {
+      if (img.dataset.fallbackApplied) {
+        return;
+      }
+      img.dataset.fallbackApplied = "1";
+      img.src = SUPPORT_PAY_PLACEHOLDER;
+    });
+  });
+  elements.supportPayDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeSupportPayDialog();
+  });
+  elements.supportPayDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.supportPayDialog) {
+      closeSupportPayDialog();
+    }
+  });
   elements.closePreferencesButton?.addEventListener("click", closePreferencesScreen);
   elements.retryOutboxButton?.addEventListener("click", async () => {
     elements.retryOutboxButton.disabled = true;
@@ -971,6 +1410,16 @@ function bindEvents() {
   elements.profileLinkDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
     closeProfileLinkDialog();
+  });
+  elements.birthdayCloseButton?.addEventListener("click", closeBirthdayPopup);
+  elements.birthdayDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeBirthdayPopup();
+  });
+  elements.birthdayDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.birthdayDialog) {
+      closeBirthdayPopup();
+    }
   });
   elements.verifyForm?.addEventListener("submit", submitVerificationCode);
   elements.cancelVerifyButton?.addEventListener("click", () => closeVerifyDialog(""));
@@ -1276,6 +1725,9 @@ function bindEvents() {
     handleWakeLockVisibilityChange();
     if (document.visibilityState === "hidden") {
       flushAnnotationsForExit();
+    } else {
+      // 回到前台时尝试重连/自检本地数据库，避免退后台后连接卡死导致写操作失效。
+      handleForegroundDatabaseRecovery().catch((error) => console.warn(error));
     }
   });
   // 自定义“边缘返回”手势（替代不可靠的浏览器历史手势）。capture 阶段记录，passive 观察，不打断内容滚动。
@@ -1920,7 +2372,8 @@ async function connectCloud() {
         if (state.session) {
           rememberAccountIdentity();
           try {
-            await loadProfileForCurrentUser();
+            await loadProfileForCurrentUser({ includeCloud: true });
+            scheduleBirthdayPopupCheck();
           } catch (error) {
             console.warn("加载资料失败（忽略）", error);
           }
@@ -2014,7 +2467,8 @@ async function restoreCloudSession(options = {}) {
   if (state.session) {
     rememberAccountIdentity();
     try {
-      await loadProfileForCurrentUser();
+      await loadProfileForCurrentUser({ includeCloud: true });
+      scheduleBirthdayPopupCheck();
     } catch (error) {
       console.warn("加载资料失败（忽略）", error);
     }
@@ -2702,11 +3156,15 @@ async function loadProfileForCurrentUser(options = {}) {
     return null;
   }
 
-  if (state.profileLoadedUserId === userId && state.profile) {
+  // 已加载过且不要求拉云端时直接用缓存；includeCloud 时始终尝试从云端拉取，保证跨设备同步。
+  if (!options.includeCloud && state.profileLoadedUserId === userId && state.profile) {
     return state.profile;
   }
 
-  let profile = readStoredProfile(userId) || createDefaultProfile(userId);
+  let profile =
+    state.profileLoadedUserId === userId && state.profile
+      ? state.profile
+      : readStoredProfile(userId) || createDefaultProfile(userId);
 
   if (options.includeCloud && state.cloudReady && state.cloudDb) {
     try {
@@ -2880,6 +3338,156 @@ function openUsageGuideScreen() {
 function closeUsageGuideScreen() {
   elements.usageGuideScreen.hidden = true;
   document.body.classList.remove("usage-screen-open");
+}
+
+// ===== 支持作者 =====
+function openSupportAuthorScreen() {
+  if (!elements.supportAuthorScreen) {
+    return;
+  }
+  elements.supportAuthorScreen.hidden = false;
+  document.body.classList.add("support-screen-open");
+  elements.supportAuthorScreen.scrollTop = 0;
+  refreshIcons();
+}
+
+function closeSupportAuthorScreen() {
+  if (!elements.supportAuthorScreen) {
+    return;
+  }
+  elements.supportAuthorScreen.hidden = true;
+  document.body.classList.remove("support-screen-open");
+}
+
+const supportPayBlobs = { wechat: null, alipay: null };
+
+function setSupportPayMethod(method) {
+  const isAlipay = method === "alipay";
+  elements.supportPaySurface?.setAttribute("data-pay", isAlipay ? "alipay" : "wechat");
+  elements.supportPayWechatTab?.classList.toggle("is-active", !isAlipay);
+  elements.supportPayAlipayTab?.classList.toggle("is-active", isAlipay);
+  if (elements.supportPayWechatImg) {
+    elements.supportPayWechatImg.hidden = isAlipay;
+  }
+  if (elements.supportPayAlipayImg) {
+    elements.supportPayAlipayImg.hidden = !isAlipay;
+  }
+  if (elements.supportPayHintLine1) {
+    const app = isAlipay ? "支付宝" : "微信";
+    elements.supportPayHintLine1.textContent = `保存图片后使用${app}扫一扫`;
+  }
+}
+
+function currentSupportPayMethod() {
+  return elements.supportPaySurface?.getAttribute("data-pay") === "alipay" ? "alipay" : "wechat";
+}
+
+// 预取两张收款码图片为 Blob，便于点击“保存图片”时在用户手势内即时分享/下载。
+function prefetchSupportPayImages() {
+  const map = { wechat: elements.supportPayWechatImg, alipay: elements.supportPayAlipayImg };
+  Object.entries(map).forEach(([key, img]) => {
+    if (supportPayBlobs[key] || !img?.src) {
+      return;
+    }
+    fetch(img.src)
+      .then((res) => res.blob())
+      .then((blob) => {
+        supportPayBlobs[key] = blob;
+      })
+      .catch((error) => console.warn(error));
+  });
+}
+
+async function saveSupportPayImage() {
+  const method = currentSupportPayMethod();
+  const img = method === "alipay" ? elements.supportPayAlipayImg : elements.supportPayWechatImg;
+  if (!img) {
+    return;
+  }
+  const filename = method === "alipay" ? "支付宝收款码.jpg" : "微信收款码.jpg";
+  let blob = supportPayBlobs[method];
+  try {
+    if (!blob) {
+      const res = await fetch(img.src);
+      blob = await res.blob();
+      supportPayBlobs[method] = blob;
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+
+  // 优先用系统分享（移动端可直接“存储图像/保存到相册”）。
+  try {
+    if (blob && navigator.canShare) {
+      const file = new File([blob], filename, { type: blob.type || "image/jpeg" });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "收款码" });
+        return;
+      }
+    }
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      return; // 用户取消分享
+    }
+    console.warn(error);
+  }
+
+  // 兜底：直接下载图片文件。
+  try {
+    const url = blob ? URL.createObjectURL(blob) : img.src;
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    if (blob) {
+      window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+  } catch (error) {
+    console.warn(error);
+    setStatus("保存图片失败，请长按二维码自行保存。", true);
+  }
+}
+
+function openSupportPayDialog() {
+  const dialog = elements.supportPayDialog;
+  if (!dialog || dialog.open) {
+    return;
+  }
+  setSupportPayMethod("wechat"); // 默认显示微信收款码
+  prefetchSupportPayImages();
+  openDialogSafely(dialog);
+  refreshIcons();
+}
+
+function closeSupportPayDialog() {
+  closeDialogSafely(elements.supportPayDialog);
+}
+
+// 每月 1 号进入 App 时自动弹出一次“支持作者”页面（同一天多次打开只弹一次）。
+function maybeShowMonthlySupportPrompt() {
+  if (!elements.supportAuthorScreen) {
+    return;
+  }
+  const now = new Date();
+  if (now.getDate() !== 1) {
+    return;
+  }
+  const monthKey = `${SUPPORT_PROMPT_SHOWN_PREFIX}${now.getFullYear()}-${now.getMonth() + 1}`;
+  try {
+    if (window.localStorage && window.localStorage.getItem(monthKey)) {
+      return;
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+  openSupportAuthorScreen();
+  try {
+    window.localStorage?.setItem(monthKey, "1");
+  } catch (error) {
+    console.warn(error);
+  }
 }
 
 // ===== 回收站界面 =====
@@ -3320,6 +3928,270 @@ function fromCloudProfile(row) {
   };
 }
 
+// ===== 生日祝福弹窗 =====
+// 100 条祝福，按年龄段分组；命中用户年龄段后在段内随机抽取一条。
+const BIRTHDAY_BLESSINGS = [
+  {
+    maxAge: 19,
+    messages: [
+      "愿你新的一岁，如清晨第一缕光，明亮、干净、勇敢，照见更广阔的远方。",
+      "愿你的青春不被风雨折弯，眼里有星，心中有梦，脚下有路，一路明朗。",
+      "新岁如春芽初绽，愿你慢慢长大，也永远保留心里的天真与热望。",
+      "愿你在书页与晨光里汲取力量，在奔跑与欢笑中遇见更好的自己。",
+      "愿你像一株向阳的小树，根扎得深，枝叶伸向天空。",
+      "愿这一岁，你有敢试的勇气，也有被爱包围的底气；有少年意气，也有温柔心肠。",
+      "愿你一路追光，不惧山高水远；愿你心怀热爱，所到之处皆有花开。",
+      "愿你新的一岁，笑容像夏天一样明亮，心事像云朵一样轻盈。",
+      "愿你每一次努力都有回响，每一个梦想都慢慢发芽，每一天都比昨天更接近远方。",
+      "愿你在成长的路上，既能乘风，也能赏花；既有锋芒，也有善良。",
+      "愿你不慌不忙地长大，不负年少时的光，也不忘最初的自己。",
+      "新的一岁，愿你的世界有书香、有花香、有远方，也有家人朋友温暖的目光。",
+      "愿你像晨露一样清澈，像星辰一样闪耀，在青春最好的年纪，活成自己喜欢的模样。",
+      "愿你拥有奔向未来的勇气，也拥有停下来拥抱生活的温柔。",
+      "祝你生辰喜乐，愿岁月赠你明亮眼眸，也赠你热爱世界的心。",
+    ],
+  },
+  {
+    maxAge: 29,
+    messages: [
+      "愿你二十几岁的每一步，都走得热烈而坚定；既敢奔赴山海，也懂珍惜眼前烟火。",
+      "新的一岁，愿你心中有方向，脚下有力量，眼前有光，身旁有爱。",
+      "愿你在长大的路上，不只收获成熟，也继续保有热忱、浪漫与清澈。",
+      "愿你所遇皆温柔，所行皆坦途，所念皆有回应。",
+      "愿这一岁，你把平凡日子过成诗，把忙碌生活过成光，把自己活成答案。",
+      "愿你有迎风而上的胆量，也有随遇而安的从容；有锋芒，也有柔软。",
+      "愿你在新的一岁里，既能实现小目标，也能靠近大梦想。",
+      "愿你不被世俗催促，不被焦虑裹挟，按照自己的节奏，开出自己的花。",
+      "愿你往后每一年，都比昨天更自由，比过去更笃定，比想象中更闪亮。",
+      "愿生活予你清风、朗月、热茶，也予你坚定向前的力量。",
+      "愿你把日子过得有声有色，把人生走得有光有岸，把热爱守得长久明亮。",
+      "愿你新的一岁，有独立的清醒，也有被拥抱的幸运；有乘风的勇气，也有归家的温暖。",
+      "祝你一路有星河相伴，有花香入梦，有人懂你，有事可盼。",
+      "愿你在不确定的世界里，仍然拥有确定的热爱；在漫长岁月里，始终心怀明亮。",
+      "生辰快乐。愿你岁岁奔赴热爱，年年遇见新光，日日平安喜乐。",
+    ],
+  },
+  {
+    maxAge: 39,
+    messages: [
+      "三十以后，愿你更懂生活的深意，也更爱自己的从容；愿岁月温柔待你。",
+      "愿你新的一岁，心有山海而不张扬，眼有星辰而不迷茫，行有方向而不慌忙。",
+      "愿你在柴米油盐里见诗意，在奔波忙碌中有安宁。",
+      "愿你历经世事，仍能温柔；见过风雨，仍有晴朗；走过山河，仍爱人间。",
+      "新的一岁，愿你事业有稳稳的进步，生活有细细的欢喜，心中有长长的春天。",
+      "愿你不必事事圆满，却能处处心安；不必人人理解，却能坚定自在。",
+      "祝你生辰喜乐。愿你把日子过得丰盈，把人生走得坦荡，把内心安放得温柔。",
+      "愿这一岁，少些疲惫，多些舒展；少些遗憾，多些圆满；少些焦虑，多些安然。",
+      "愿你在成熟的年纪里，仍保有少年般的清澈，也拥有成年人最珍贵的笃定。",
+      "愿你有独处的清欢，也有相聚的热闹；有前行的力量，也有停靠的港湾。",
+      "愿你往后的人生，山一程水一程，程程皆有好风景；昼一段夜一段，段段皆有暖灯火。",
+      "愿你新的一岁，心中有秩序，眼里有温度，手中有能力，生活有回甘。",
+      "愿你既能扛起责任，也能拥抱浪漫；既能照顾别人，也能好好疼爱自己。",
+      "愿你在不声不响的日子里，积攒出越来越深的底气，活成温润而有力量的人。",
+      "愿岁月赠你阅历，也赠你欢喜；赠你沉稳，也赠你不灭的热爱。",
+    ],
+  },
+  {
+    maxAge: 49,
+    messages: [
+      "四十至五十，是人生由热烈走向丰盈的年纪。愿你心中有山河，眼里有清光，日子从容，岁月生香。",
+      "愿你走过半生风雨，依旧心怀明亮；历经人间冷暖，仍能温柔从容。",
+      "愿这一岁，你把过往沉淀成智慧，把未来铺展成坦途，把平凡日子过出清欢与回甘。",
+      "愿你不被年龄定义，不被忙碌消磨，心中仍有热爱，脚下仍有方向。",
+      "四十以后，愿你活得更通透，也更自在；更懂取舍，也更懂珍惜。",
+      "愿你眼里有阅历沉淀出的光，心中有岁月打磨后的静，身边有温暖长久相伴。",
+      "愿你新的一岁，事业稳中有进，家庭和乐安宁，心境舒展明朗，生活处处有喜。",
+      "愿你把生活过成一杯好茶，有清香，有回味，有温度，也有恰到好处的从容。",
+      "愿未来的日子，不慌不忙，不忧不惧；有山水可看，有知己可谈，有欢喜可盼。",
+      "愿你半生积攒的努力，都化作今日的底气；愿你往后的岁月，安稳、丰盛、明亮、自在。",
+    ],
+  },
+  {
+    maxAge: 59,
+    messages: [
+      "五十之后，人生如秋水长天，沉静而辽阔。愿您岁岁安康。",
+      "愿您新的一岁，心宽如海，福暖如春，日子有滋有味，生活有声有色。",
+      "愿岁月只添风度，不添烦忧；只赠从容，不减笑颜。",
+      "愿您把半生风霜走成坦途，把往后日子过成花开，平安健康，喜乐常在。",
+      "愿您的生活像一壶好茶，越品越香；像一卷好书，越读越有味。",
+      "新的一岁，愿您身康体健，心静神安，春有花香，秋有果甜，四季皆欢喜。",
+      "愿您眼中有笑，心中有暖，家中有爱，身边有福。",
+      "愿岁月温柔地经过您，不带走光彩，只沉淀智慧；不留下疲惫，只留下安宁。",
+      "愿您往后的日子，清晨有好茶，午后有闲趣，夜晚有安眠，心中有长乐。",
+      "五十多岁的光阴，是山水入画，也是人生入境。愿您越活越舒展，越走越明朗。",
+      "愿您不慌不忙地享受生活，不紧不慢地收获幸福，日日有暖意，年年有好景。",
+      "愿好运如春风常至，健康如青山常在，福气如流水绵长。",
+      "愿您把日子过得安静丰盈，把心情养得明亮舒展，把人生走得稳稳当当。",
+      "愿新的一岁，所有辛苦都被温柔接住，所有付出都被岁月记得。",
+      "祝您福气满怀，安康常伴；愿一岁一礼，一寸欢喜，一程岁月，一路花开。",
+    ],
+  },
+  {
+    maxAge: Infinity,
+    messages: [
+      "花甲之后，人生更见清明。愿您身体康健，心情舒朗，福泽绵长。",
+      "愿您新的一岁，如松柏常青，如春风常暖，日子平和，笑容常在。",
+      "愿健康与您相伴，快乐与您同行，家人围坐，岁月温良。",
+      "愿您把人生的风雨都走成风景，把岁月的痕迹都酿成慈祥。",
+      "六十多岁的光阴，是一盏温暖的灯。愿它照见团圆，也照见您心里的自在安宁。",
+      "愿您日日有清欢，月月有喜事，年年有安康，岁岁有福气。",
+      "祝您生辰吉乐。愿您心如明月，身似青松，福如春水，寿比南山。",
+      "愿您的晚年不止平安，更有乐趣；不止健康，更有自在；不止团圆，更有欢笑。",
+      "愿您在新的一岁里，晨起有鸟鸣，饭后有闲步，窗前有花开，身边有亲人。",
+      "愿岁月缓缓，福气长长，家和人安，万事皆顺。",
+      "愿您一生积攒的善意，都化作今日的祝福；一生付出的辛劳，都换来往后的安享。",
+      "愿您身体如松柏康健，心境如白云悠然，生活如春水温柔。",
+      "祝您新岁添福，寿域增辉；愿每一天都有好心情，每一年都有好光景。",
+      "愿您笑看庭前花开，闲听窗外风过，平平安安，和和美美，长长久久。",
+      "愿您福在眼前，乐在心间，安康在身边，团圆在岁岁年年。",
+      "岁至古稀，风华不减。愿您福寿安康，笑口常开，岁月长宁。",
+      "愿您如松柏长青，如明月常圆，福气绵绵，安康年年。",
+      "祝您生辰吉乐。愿家人绕膝，灯火可亲，日子温暖，心境安然。",
+      "愿您这一生的慈爱与辛劳，都在今天化作满堂祝福、满屋欢笑。",
+      "七十岁以后，人生如一幅淡雅长卷。愿您笔笔从容，页页安康，日日喜乐。",
+      "愿您福如春水长流，寿似青山不老，心中常有欢喜，身边常有团圆。",
+      "愿您吃得香、睡得安、笑得甜、走得稳，岁岁平安。",
+      "愿岁月不催您，只陪您慢慢享福；愿时光不扰您，只赠您安康与欢颜。",
+      "愿您一生的厚德，化作后辈的敬爱；一世的温良，换来满门的福气。",
+      "祝您寿辰安康。愿春有繁花，夏有清风，秋有硕果，冬有暖阳，四季皆吉祥。",
+      "愿您眉眼含笑，心中无忧；家中有爱，身边有伴；日子清宁，福寿绵延。",
+      "愿青山不老，绿水长流，福星常照，喜事常来。",
+      "愿您把日子过成诗，把岁月过成福；一餐一饭皆安稳，一朝一夕皆欢喜。",
+      "愿您所到之处皆有温暖，所念之人皆在身旁，所过之年皆是福年。",
+      "祝您福寿双全，安康长乐；愿今天的烛光映着团圆，往后的岁月盛满平安。",
+    ],
+  },
+];
+
+function getAgeFromBirthday(birthday) {
+  if (!birthday) {
+    return null;
+  }
+  const birth = new Date(birthday);
+  if (Number.isNaN(birth.getTime())) {
+    return null;
+  }
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const monthDiff = now.getMonth() - birth.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birth.getDate())) {
+    age -= 1;
+  }
+  return age;
+}
+
+function isBirthdayToday(birthday) {
+  if (!birthday) {
+    return false;
+  }
+  const birth = new Date(birthday);
+  if (Number.isNaN(birth.getTime())) {
+    return false;
+  }
+  const now = new Date();
+  return birth.getMonth() === now.getMonth() && birth.getDate() === now.getDate();
+}
+
+function pickBirthdayBlessing(birthday, userId) {
+  const age = getAgeFromBirthday(birthday);
+  const group =
+    BIRTHDAY_BLESSINGS.find((item) => age == null || age <= item.maxAge) ||
+    BIRTHDAY_BLESSINGS[BIRTHDAY_BLESSINGS.length - 1];
+  const messages = group.messages;
+  if (!messages.length) {
+    return "";
+  }
+  if (!userId) {
+    return messages[Math.floor(Math.random() * messages.length)];
+  }
+
+  // 尽量不重复：记录本年内已用过的祝福语，每次从未用过的里随机抽；用完一轮再重置。
+  const key = `${BIRTHDAY_USED_PREFIX}${userId}:${new Date().getFullYear()}`;
+  let used = [];
+  try {
+    const raw = window.localStorage?.getItem(key);
+    used = raw ? JSON.parse(raw) : [];
+  } catch (error) {
+    console.warn(error);
+  }
+  if (!Array.isArray(used)) {
+    used = [];
+  }
+  let available = messages.filter((message) => !used.includes(message));
+  if (!available.length) {
+    used = [];
+    available = messages.slice();
+  }
+  const chosen = available[Math.floor(Math.random() * available.length)];
+  used.push(chosen);
+  try {
+    window.localStorage?.setItem(key, JSON.stringify(used));
+  } catch (error) {
+    console.warn(error);
+  }
+  return chosen;
+}
+
+function scheduleBirthdayPopupCheck() {
+  // 略延迟，等启动/登录 UI 稳定后再弹，避免与其它流程冲突。
+  window.setTimeout(() => {
+    try {
+      maybeShowBirthdayPopup();
+    } catch (error) {
+      console.warn("生日弹窗检查失败（忽略）", error);
+    }
+  }, 1200);
+}
+
+function maybeShowBirthdayPopup() {
+  const profile = state.profile;
+  const userId = state.session?.user?.id || "";
+  if (!profile || !userId || !profile.birthday || !isBirthdayToday(profile.birthday)) {
+    return;
+  }
+  // 仅防止同一次启动的多个触发重复弹；不持久化，所以每次重新打开 App 都会再弹。
+  if (state.birthdayPopupShownThisSession) {
+    return;
+  }
+  state.birthdayPopupShownThisSession = true;
+  showBirthdayPopup(profile.birthday, userId);
+}
+
+function showBirthdayPopup(birthday, userId = state.session?.user?.id || "") {
+  const dialog = elements.birthdayDialog;
+  if (!dialog || dialog.open) {
+    return;
+  }
+  if (elements.birthdayMessage) {
+    elements.birthdayMessage.textContent = pickBirthdayBlessing(birthday, userId);
+  }
+  if (typeof dialog.showModal === "function") {
+    try {
+      dialog.showModal();
+    } catch (error) {
+      dialog.setAttribute("open", "");
+    }
+  } else {
+    dialog.setAttribute("open", "");
+  }
+}
+
+function closeBirthdayPopup() {
+  const dialog = elements.birthdayDialog;
+  if (!dialog) {
+    return;
+  }
+  if (dialog.open) {
+    try {
+      dialog.close();
+    } catch (error) {
+      dialog.removeAttribute("open");
+    }
+  } else {
+    dialog.removeAttribute("open");
+  }
+}
+
 function getCurrentUserPhoneNumber(profile = state.profile) {
   const userPhone = state.session?.user?.phoneNumber || "";
   const profilePhone = profile?.phoneNumber || "";
@@ -3657,7 +4529,8 @@ async function signInWithPassword(event) {
     rememberAccountIdentity();
     console.log("[auth-login] userId:", state.session.user.id, "| merged account ids:", getMergedAccountIds());
     try {
-      await loadProfileForCurrentUser();
+      await loadProfileForCurrentUser({ includeCloud: true });
+      scheduleBirthdayPopupCheck();
     } catch (profileError) {
       console.warn("加载资料失败（忽略）", profileError);
     }
@@ -3807,7 +4680,7 @@ async function completeRegisterWithPassword() {
     }
     rememberAccountIdentity();
     try {
-      await loadProfileForCurrentUser();
+      await loadProfileForCurrentUser({ includeCloud: true });
     } catch (profileError) {
       console.warn("加载资料失败（忽略）", profileError);
     }
@@ -4092,11 +4965,31 @@ async function registerServiceWorker() {
         return;
       }
 
-      reloadingForNewWorker = true;
-      window.location.reload();
+      const reloadWhenIdle = async () => {
+        if (isUserWriteActive()) {
+          setStatus("新版本已准备好，当前操作完成后自动刷新。");
+          window.setTimeout(reloadWhenIdle, 1500);
+          return;
+        }
+
+        try {
+          await waitForLocalWritesIdle(10000);
+        } catch (error) {
+          console.warn(error);
+          if (isUserWriteActive()) {
+            window.setTimeout(reloadWhenIdle, 1500);
+            return;
+          }
+        }
+
+        reloadingForNewWorker = true;
+        window.location.reload();
+      };
+
+      reloadWhenIdle();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=197");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=237");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -4982,9 +5875,47 @@ function openDatabase() {
       return;
     }
 
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    let settled = false;
+    let upgrading = false;
+    let timer = 0;
+    const finish = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      callback();
+    };
+
+    let request;
+    try {
+      request = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    // 兜底超时：open 一直不回调（卡死/被占用）时主动 reject，避免无限挂起。
+    // 升级迁移可能较久，检测到 upgradeneeded 后不再因超时中断，交给 success/error 收尾。
+    timer = window.setTimeout(() => {
+      if (upgrading) {
+        return;
+      }
+      finish(() => {
+        // 若稍后 open 又成功，关闭这条迟到的连接，避免占用/泄漏。
+        request.onsuccess = () => {
+          try {
+            request.result.close();
+          } catch (closeError) {
+            console.warn(closeError);
+          }
+        };
+        reject(createNamedError("TimeoutError", "打开本地数据库超时，请重试。"));
+      });
+    }, DB_OPEN_TIMEOUT);
 
     request.onupgradeneeded = () => {
+      upgrading = true;
       const db = request.result;
       let scoreStore;
 
@@ -5152,8 +6083,12 @@ function openDatabase() {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => finish(() => resolve(request.result));
+    request.onerror = () =>
+      finish(() => reject(request.error || createNamedError("AbortError", "打开本地数据库失败，请重试。")));
+    // 另一个连接（如旧标签页/卡死的连接）占用数据库时触发：不再无限等待，直接 reject 让上层重连。
+    request.onblocked = () =>
+      finish(() => reject(createNamedError("BlockedError", "本地数据库被占用，请重试。")));
   });
 }
 
@@ -5240,6 +6175,9 @@ async function runIdbTransaction(storeNames, mode, executor, options = {}) {
       return await runIdbTransactionOnce(storeNames, mode, executor, { ...options, noRetry: true });
     } catch (retryError) {
       await recoverDatabaseIfWedged(retryError);
+      // 注意：这里不弹“本地存储未响应”。单个事务的中途失败/重试不代表用户操作失败——
+      // 删除等操作由多个小事务组成，某个事务抖动后整体仍可能成功。
+      // 恢复弹窗改由“用户操作最终失败时”触发（见 showRecoveryDialogIfDbWedged），避免过早误弹。
       throw retryError;
     }
   }
@@ -5307,20 +6245,134 @@ async function runIdbTransactionOnce(storeNames, mode, executor, options = {}) {
   });
 }
 
-// 全局本地写队列：所有写 IndexedDB 的用户操作和后台同步写入都串行进入此队列，
-// 避免 iOS Safari / PWA 下并发事务相互阻塞而卡死。每个任务自身带超时（见 runIdbTransaction），
-// 因此队列不会被某个任务永久占用。
-let localWriteChain = Promise.resolve();
-function enqueueLocalWrite(label, task) {
-  const run = localWriteChain.then(() => task());
-  // 无论成败都让链继续，避免一次失败后整条队列卡住。
-  localWriteChain = run.then(
-    () => {},
-    (error) => {
-      console.warn(`本地写入失败（${label}）`, error);
-    },
+// 全局本地写队列：用户写入优先，后台同步/封面/水合写入让路。
+// 这比单条 Promise 链更适合 PWA：后台任务可以排队等待，用户保存/删除不会被低优先级任务无限拖住。
+const LOCAL_WRITE_PRIORITIES = {
+  user: 0,
+  normal: 1,
+  background: 2,
+};
+let localWriteQueue = [];
+let localWriteRunning = false;
+let localWriteSequence = 0;
+let localWriteWakeTimer = 0;
+const localWriteIdleResolvers = [];
+
+function normalizeLocalWritePriority(priority) {
+  if (priority && Object.prototype.hasOwnProperty.call(LOCAL_WRITE_PRIORITIES, priority)) {
+    return priority;
+  }
+  return isUserWriteActive() ? "user" : "normal";
+}
+
+function enqueueLocalWrite(label, task, options = {}) {
+  const priority = normalizeLocalWritePriority(options.priority);
+  const timeoutMs = options.timeoutMs || LOCAL_WRITE_QUEUE_TIMEOUT;
+  const item = {
+    label,
+    task,
+    priority,
+    timeoutMs,
+    sequence: localWriteSequence += 1,
+    resolve: null,
+    reject: null,
+  };
+
+  const promise = new Promise((resolve, reject) => {
+    item.resolve = resolve;
+    item.reject = reject;
+  });
+
+  localWriteQueue.push(item);
+  scheduleLocalWriteQueue();
+  return promise;
+}
+
+function isBackgroundWritePaused() {
+  return isUserWriteActive();
+}
+
+function pickNextLocalWriteIndex() {
+  let bestIndex = -1;
+  let bestPriority = Number.POSITIVE_INFINITY;
+  let bestSequence = Number.POSITIVE_INFINITY;
+  const backgroundPaused = isBackgroundWritePaused();
+
+  localWriteQueue.forEach((item, index) => {
+    if (backgroundPaused && item.priority === "background") {
+      return;
+    }
+    const priorityValue = LOCAL_WRITE_PRIORITIES[item.priority] ?? LOCAL_WRITE_PRIORITIES.normal;
+    if (priorityValue < bestPriority || (priorityValue === bestPriority && item.sequence < bestSequence)) {
+      bestIndex = index;
+      bestPriority = priorityValue;
+      bestSequence = item.sequence;
+    }
+  });
+
+  return bestIndex;
+}
+
+function scheduleLocalWriteQueue(delay = 0) {
+  window.clearTimeout(localWriteWakeTimer);
+  if (delay > 0) {
+    localWriteWakeTimer = window.setTimeout(processLocalWriteQueue, delay);
+    return;
+  }
+  Promise.resolve().then(processLocalWriteQueue);
+}
+
+async function processLocalWriteQueue() {
+  if (localWriteRunning) {
+    return;
+  }
+
+  localWriteRunning = true;
+  try {
+    while (localWriteQueue.length) {
+      const nextIndex = pickNextLocalWriteIndex();
+      if (nextIndex < 0) {
+        break;
+      }
+
+      const item = localWriteQueue.splice(nextIndex, 1)[0];
+      try {
+        const result = await withTimeout(
+          Promise.resolve().then(() => item.task()),
+          item.timeoutMs,
+          `本地写入队列超时（${item.label}），请重试。`,
+        );
+        item.resolve(result);
+      } catch (error) {
+        console.warn(`本地写入失败（${item.label}）`, error);
+        item.reject(error);
+      }
+    }
+  } finally {
+    localWriteRunning = false;
+    if (!localWriteQueue.length) {
+      while (localWriteIdleResolvers.length) {
+        localWriteIdleResolvers.shift()?.();
+      }
+    } else if (pickNextLocalWriteIndex() >= 0) {
+      scheduleLocalWriteQueue();
+    } else {
+      scheduleLocalWriteQueue(250);
+    }
+  }
+}
+
+function waitForLocalWritesIdle(timeoutMs = 5000) {
+  if (!localWriteRunning && !localWriteQueue.length) {
+    return Promise.resolve();
+  }
+  return withTimeout(
+    new Promise((resolve) => {
+      localWriteIdleResolvers.push(resolve);
+    }),
+    timeoutMs,
+    "本地写入仍在收尾，请稍后再试。",
   );
-  return run;
 }
 
 // 标记“用户正在进行本地写操作”，用于让后台 sync/outbox 让路（见 isUserWriteActive）。
@@ -5331,11 +6383,22 @@ function endUserWrite() {
   state.userWriteActive = Math.max(0, state.userWriteActive - 1);
   // 用户操作结束后，若有积压的同步任务，空闲时再推进。
   if (!state.userWriteActive) {
+    scheduleLocalWriteQueue();
     kickOutbox(1500);
   }
 }
 function isUserWriteActive() {
   return state.userWriteActive > 0;
+}
+
+function shouldYieldToUserWrite(options = {}) {
+  return isUserWriteActive() && !options.manual && !options.force;
+}
+
+function requeueBackgroundSyncSoon() {
+  if (state.session?.user?.id) {
+    queueAccountBackgroundSync(state.session.user.id, "", { immediate: true });
+  }
 }
 
 // CloudBase SDK 调用超时/网络异常后，标记 cloud 为 unhealthy 并清空 SDK 状态，
@@ -5876,6 +6939,19 @@ function getBlobWriteTimeout(byteSize) {
   return Math.max(PAGE_SAVE_TIMEOUT, Math.ceil(sizeMb) * 10000 + 5000);
 }
 
+function toDeletedPageTombstone(page, userId, deletedAt) {
+  const { blob, displayUrl, objectUrl, previewUrl, tempUrl, ...metadata } = page || {};
+  return {
+    ...metadata,
+    id: String(metadata.id || ""),
+    scoreId: String(metadata.scoreId || ""),
+    userId: metadata.userId || userId,
+    deletedAt,
+    updatedAt: deletedAt,
+    syncStatus: SYNC_STATUS_PENDING,
+  };
+}
+
 // 清理一次未完成的保存：删除已写入的页与（可能尚未写入的）歌谱记录，尽力而为、不抛错。
 function cleanupPartialScoreSave(scoreId, pageIds) {
   if (!scoreId && !(pageIds && pageIds.length)) {
@@ -5936,71 +7012,88 @@ async function deleteScoresLocalAtomic(scoreIds, options = {}) {
     annotationsByScore.set(key, list);
   });
 
-  // 阶段二：单个读写事务，所有写操作同步发起（不依赖异步回调），完成更可靠。
-  // 通过 runIdbTransaction 获得统一超时/abort/重连兜底，并经本地写队列串行执行。
-  // 软删除会重写带图片的页记录，超时按歌谱数量放大，避免大批量删除被误判为中断。
-  const deleteTimeout = Math.max(LOCAL_SAVE_TIMEOUT, ids.length * 4000 + 5000);
-  return enqueueLocalWrite("deleteScoresLocalAtomic", () =>
+  // 阶段二：拆分写入。软删除只需要保留页墓碑元数据（id / scoreId / storagePath / deletedAt），
+  // 不应再重写图片 blob。旧逻辑把每页大图重新 put 一遍，iOS / PWA 下极易超时，
+  // 表现为“删除失败，点恢复弹窗重试才成功”。
+  // 因此：① 歌谱墓碑 + 歌单项 + 标注 + 硬删的各表删除 放在一个小事务（不含页 blob）；
+  //       ② 软删的页墓碑逐页用独立小事务写入，且明确去掉 blob，保证删除快速稳定。
+  const softWrites = [];
+  const hardDeletes = [];
+  ids.forEach((scoreId) => {
+    const score = providedScores.get(scoreId) || state.scores.find((item) => item.id === scoreId) || null;
+    const forceSoft = Boolean(options.forceSoft);
+    const forceHard = Boolean(options.forceHard);
+    const keepTombstone = forceSoft || (!forceHard && shouldKeepDeleteTombstone(score));
+    const userId = score?.userId || state.session?.user?.id || null;
+    const pages = pagesByScore.get(scoreId) || [];
+    const items = itemsByScore.get(scoreId) || [];
+    const annotations = annotationsByScore.get(scoreId) || [];
+    if (keepTombstone && score) {
+      softWrites.push({ scoreId, score, userId, pages, items, annotations });
+    } else {
+      hardDeletes.push({ scoreId, pages, items, annotations });
+    }
+  });
+
+  // ① 元数据小事务：墓碑/删除（不含页图片，体积小、更稳）。
+  await enqueueLocalWrite("deleteScores:meta", () =>
     runIdbTransaction(
       [STORE_NAME, PAGE_STORE_NAME, SETLIST_ITEM_STORE_NAME, ANNOTATION_STORE_NAME],
       "readwrite",
       ([scoreStore, pageStore, setlistItemStore, annotationStore]) => {
-        ids.forEach((scoreId) => {
-          const score = providedScores.get(scoreId) || state.scores.find((item) => item.id === scoreId) || null;
-          const forceSoft = Boolean(options.forceSoft);
-          const forceHard = Boolean(options.forceHard);
-          const keepTombstone = forceSoft || (!forceHard && shouldKeepDeleteTombstone(score));
-          const userId = score?.userId || state.session?.user?.id || null;
-          const pages = pagesByScore.get(scoreId) || [];
-          const items = itemsByScore.get(scoreId) || [];
-          const annotations = annotationsByScore.get(scoreId) || [];
-
-          if (keepTombstone && score) {
-            scoreStore.put({
-              ...toScoreRecord(score),
-              userId,
+        softWrites.forEach(({ score, userId, items, annotations }) => {
+          scoreStore.put({
+            ...toScoreRecord(score),
+            userId,
+            deletedAt,
+            updatedAt: deletedAt,
+            syncStatus: SYNC_STATUS_PENDING,
+          });
+          items.forEach((item) => {
+            setlistItemStore.put({
+              ...item,
+              userId: item.userId || userId,
               deletedAt,
               updatedAt: deletedAt,
               syncStatus: SYNC_STATUS_PENDING,
             });
-            pages.forEach((page) => {
-              pageStore.put({
-                ...page,
-                userId: page.userId || userId,
-                deletedAt,
-                updatedAt: deletedAt,
-                syncStatus: SYNC_STATUS_PENDING,
-              });
+          });
+          annotations.forEach((annotation) => {
+            annotationStore.put({
+              ...annotation,
+              userId: annotation.userId || userId,
+              deletedAt,
+              updatedAt: deletedAt,
+              syncStatus: SYNC_STATUS_PENDING,
             });
-            items.forEach((item) => {
-              setlistItemStore.put({
-                ...item,
-                userId: item.userId || userId,
-                deletedAt,
-                updatedAt: deletedAt,
-                syncStatus: SYNC_STATUS_PENDING,
-              });
-            });
-            annotations.forEach((annotation) => {
-              annotationStore.put({
-                ...annotation,
-                userId: annotation.userId || userId,
-                deletedAt,
-                updatedAt: deletedAt,
-                syncStatus: SYNC_STATUS_PENDING,
-              });
-            });
-          } else {
-            scoreStore.delete(scoreId);
-            pages.forEach((page) => pageStore.delete(page.id));
-            items.forEach((item) => setlistItemStore.delete(item.id));
-            annotations.forEach((annotation) => annotationStore.delete(annotation.id));
-          }
+          });
+        });
+        hardDeletes.forEach(({ scoreId, pages, items, annotations }) => {
+          scoreStore.delete(scoreId);
+          pages.forEach((page) => pageStore.delete(page.id));
+          items.forEach((item) => setlistItemStore.delete(item.id));
+          annotations.forEach((annotation) => annotationStore.delete(annotation.id));
         });
       },
-      { timeoutMs: deleteTimeout, timeoutMessage: "本地删除超时，请减少单次删除数量后重试。" },
+      { timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, ids.length * 1500 + 5000) },
     ),
   );
+
+  // ② 软删页墓碑：逐页独立小事务写入，但只写元数据，不复制图片 blob。
+  for (const { userId, pages } of softWrites) {
+    for (const page of pages) {
+      await enqueueLocalWrite("deleteScores:softPage", () =>
+        runIdbTransaction(
+          PAGE_STORE_NAME,
+          "readwrite",
+          (pageStore) => {
+            pageStore.put(toDeletedPageTombstone(page, userId, deletedAt));
+          },
+          { timeoutMs: LOCAL_SAVE_TIMEOUT, timeoutMessage: "删除歌谱页面超时，请重试。" },
+        ),
+      );
+    }
+  }
 }
 
 function softDeleteScoresLocalAtomic(scores, deletedAt) {
@@ -6110,6 +7203,70 @@ async function snapshotScoresToTrash(scores) {
     } catch (error) {
       console.warn("写入回收站失败", error);
     }
+  }
+  // 回收站只增不减会持续占用本地存储、最终撑爆 IndexedDB。写入后裁剪到最多保留 N 条（按时间，保留最新）。
+  await pruneTrashEntries();
+}
+
+// 删除前预估：回收站要再存一份这些歌谱的图片，若剩余存储空间不够则返回 false（跳过备份）。
+async function hasRoomForTrashSnapshot(scores) {
+  if (!navigator.storage?.estimate) {
+    return true;
+  }
+  try {
+    const totalSize = (scores || []).reduce((sum, score) => {
+      const pages = score.pages && score.pages.length
+        ? score.pages
+        : state.scorePages.filter((page) => page.scoreId === score.id);
+      return sum + getPagesTotalBlobSize(pages);
+    }, 0);
+    if (!totalSize) {
+      return true;
+    }
+    const estimate = await navigator.storage.estimate();
+    const remaining = (Number(estimate.quota) || 0) - (Number(estimate.usage) || 0);
+    return !(remaining > 0 && remaining < totalSize * 1.5);
+  } catch (error) {
+    console.warn(error);
+    return true;
+  }
+}
+
+function getTrashSnapshotByteSize(scores) {
+  return (scores || []).reduce((sum, score) => {
+    const pages = score.pages && score.pages.length
+      ? score.pages
+      : state.scorePages.filter((page) => page.scoreId === score.id);
+    return sum + getPagesTotalBlobSize(pages);
+  }, 0);
+}
+
+function shouldAttemptTrashSnapshot(scores) {
+  const totalSize = getTrashSnapshotByteSize(scores);
+  return totalSize > 0 && totalSize <= TRASH_SNAPSHOT_MAX_BYTES;
+}
+
+// 回收站自动上限：只保留最新的若干条，删除更旧的，避免本地存储被无限占用。
+const TRASH_MAX_ENTRIES = 30;
+async function pruneTrashEntries() {
+  try {
+    const entries = await getAllTrashEntries();
+    if (!Array.isArray(entries) || entries.length <= TRASH_MAX_ENTRIES) {
+      return;
+    }
+    const sorted = entries
+      .slice()
+      .sort((a, b) => String(b.trashedAt || "").localeCompare(String(a.trashedAt || "")));
+    const stale = sorted.slice(TRASH_MAX_ENTRIES);
+    for (const entry of stale) {
+      try {
+        await deleteTrashEntry(entry.id);
+      } catch (error) {
+        console.warn("清理旧回收站记录失败", error);
+      }
+    }
+  } catch (error) {
+    console.warn(error);
   }
 }
 
@@ -6349,10 +7506,8 @@ async function importFullBackup(file) {
   });
   const pageIdMap = new Map();
 
-  // 歌谱按名称去重：同名（未删除）则跳过，避免重复导入。
-  const existingScoreByName = new Map(
-    state.scores.filter((score) => !score.deletedAt).map((score) => [normalizeText(score.name || score.normalizedName), score.id]),
-  );
+  // 歌谱按“所在文件夹 + 名称”去重：同一位置同名才跳过，不同文件夹允许同名。
+  const existingScoreByScope = createScoreNameScopeMap();
   const scoreIdMap = new Map();
   let importedScores = 0;
   let skippedScores = 0;
@@ -6361,15 +7516,15 @@ async function importFullBackup(file) {
     if (score.deletedAt) {
       continue;
     }
-    const nameKey = normalizeText(score.name || score.normalizedName);
-    if (existingScoreByName.has(nameKey)) {
-      scoreIdMap.set(String(score.id), existingScoreByName.get(nameKey));
+    const folderId = score.folderId && folderIdMap.has(String(score.folderId)) ? folderIdMap.get(String(score.folderId)) : null;
+    const nameKey = getScoreNameScopeKey(score.name || score.normalizedName, folderId);
+    if (existingScoreByScope.has(nameKey)) {
+      scoreIdMap.set(String(score.id), existingScoreByScope.get(nameKey));
       skippedScores += 1;
       continue;
     }
 
     const newScoreId = createId();
-    const folderId = score.folderId && folderIdMap.has(String(score.folderId)) ? folderIdMap.get(String(score.folderId)) : null;
     const { blob, pages, ...scoreRest } = score;
     const newScore = {
       ...scoreRest,
@@ -6409,7 +7564,7 @@ async function importFullBackup(file) {
     try {
       await saveScoreLocalAtomic(newScore, newPages, { requireBlobs: false });
       scoreIdMap.set(String(score.id), newScoreId);
-      existingScoreByName.set(nameKey, newScoreId);
+      existingScoreByScope.set(nameKey, newScoreId);
       importedScores += 1;
       if (userId || state.session) {
         queueScoreCloudUpload(newScoreId);
@@ -6669,8 +7824,9 @@ async function loadAnnotationsForPages(pageIds) {
       { timeoutMessage: "读取标注超时，请重试。" },
     );
     const latestByPage = new Map();
+    const ownerMatches = createOwnerMatcher();
     (transactionResult.rows || []).map(normalizeAnnotationRecord).forEach((record) => {
-      if (record.deletedAt || !ids.includes(String(record.pageId))) {
+      if (record.deletedAt || !ids.includes(String(record.pageId)) || !ownerMatches(record)) {
         return;
       }
       const previous = latestByPage.get(record.pageId);
@@ -6894,7 +8050,7 @@ async function drainAnnotationSaves() {
   }
 }
 
-function putStoreRecord(storeName, record, timeoutMs = LOCAL_SAVE_TIMEOUT, timeoutMessage = "本地数据库写入超时，请重新打开 App 后再试。") {
+function putStoreRecord(storeName, record, timeoutMs = LOCAL_SAVE_TIMEOUT, timeoutMessage = "本地数据库写入超时，请重新打开 App 后再试。", options = {}) {
   return enqueueLocalWrite(`put:${storeName}`, () =>
     runIdbTransaction(
       storeName,
@@ -6904,6 +8060,10 @@ function putStoreRecord(storeName, record, timeoutMs = LOCAL_SAVE_TIMEOUT, timeo
       },
       { timeoutMs, timeoutMessage },
     ),
+    {
+      priority: options.priority,
+      timeoutMs: options.queueTimeoutMs,
+    },
   );
 }
 
@@ -6921,8 +8081,8 @@ async function putScoreWithPages(score, pages, options = {}) {
   await saveScoreLocalAtomic(score, preparedPages, { requireBlobs, onProgress: options.onProgress });
 }
 
-function putScorePage(page) {
-  return putStoreRecord(PAGE_STORE_NAME, page);
+function putScorePage(page, options = {}) {
+  return putStoreRecord(PAGE_STORE_NAME, page, LOCAL_SAVE_TIMEOUT, "本地数据库写入超时，请重新打开 App 后再试。", options);
 }
 
 function putScorePageChanges(score, activePages, deletedPages = []) {
@@ -7364,7 +8524,8 @@ async function saveScore(event) {
       updateSaveState();
       return;
     }
-    if (hasDuplicateScoreName(name)) {
+    const folderId = elements.scoreFolder ? elements.scoreFolder.value || null : state.currentFolderId || null;
+    if (hasDuplicateScoreName(name, folderId)) {
       setStatus("已存在同名歌谱", true);
       elements.scoreName.focus();
       updateSaveState();
@@ -7373,7 +8534,6 @@ async function saveScore(event) {
 
     const now = new Date().toISOString();
     const userId = state.session?.user?.id || null;
-    const folderId = elements.scoreFolder ? elements.scoreFolder.value || null : state.currentFolderId || null;
     const score = {
       id: createId(),
       userId,
@@ -7472,6 +8632,7 @@ async function saveScore(event) {
       // 保存超时/中断时连接可能已卡死，重连数据库，保证再次保存能成功。
       await recoverDatabaseIfWedged(error);
       setStatus(getStorageErrorMessage(error, "保存"), true);
+      showRecoveryDialogIfDbWedged(error);
     } finally {
       endUserWrite();
       updateSaveState();
@@ -7511,6 +8672,49 @@ function insertSavedScoreInMemory(score, pages) {
   state.scores.sort((a, b) => getScoreTime(b.createdAt) - getScoreTime(a.createdAt) || getScoreTime(b.updatedAt) - getScoreTime(a.updatedAt));
 }
 
+function applyScoreMetadataInMemory(updatedScore) {
+  const normalized = normalizeLocalScoreRecord(updatedScore);
+  state.scores = state.scores.map((score) => {
+    if (score.id !== normalized.id) {
+      return score;
+    }
+    return {
+      ...score,
+      ...normalized,
+      pages: score.pages || state.scorePages.filter((page) => page.scoreId === normalized.id),
+    };
+  });
+  state.scores.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
+function applyFolderInMemory(folder) {
+  const normalized = normalizeLocalFolderRecord(folder);
+  const exists = state.folders.some((item) => item.id === normalized.id);
+  state.folders = exists
+    ? state.folders.map((item) => (item.id === normalized.id ? normalized : item))
+    : [normalized, ...state.folders];
+  state.folders = state.folders.filter((item) => !item.deletedAt);
+  state.folders.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
+function applySetlistInMemory(setlist, items) {
+  const normalizedSetlist = normalizeLocalSetlistRecord(setlist);
+  const exists = state.setlists.some((item) => item.id === normalizedSetlist.id);
+  state.setlists = exists
+    ? state.setlists.map((item) => (item.id === normalizedSetlist.id ? normalizedSetlist : item))
+    : [normalizedSetlist, ...state.setlists];
+  state.setlists = state.setlists.filter((item) => !item.deletedAt);
+
+  const normalizedItems = (items || [])
+    .map(normalizeLocalSetlistItemRecord)
+    .filter((item) => !item.deletedAt);
+  state.setlistItems = [
+    ...state.setlistItems.filter((item) => item.setlistId !== normalizedSetlist.id),
+    ...normalizedItems,
+  ].sort((a, b) => a.position - b.position || new Date(a.createdAt) - new Date(b.createdAt));
+  state.setlists.sort((a, b) => getSetlistSortTime(b) - getSetlistSortTime(a) || new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
 async function saveScoreEdit(event) {
   event.preventDefault();
   const score = state.scores.find((item) => item.id === state.scoreEditId);
@@ -7526,7 +8730,8 @@ async function saveScoreEdit(event) {
     elements.scoreEditName.focus();
     return;
   }
-  if (hasDuplicateScoreName(name, score.id)) {
+  const selectedFolderId = elements.scoreEditFolder.value || null;
+  if (hasDuplicateScoreName(name, selectedFolderId, score.id)) {
     setScoreEditStatus("已存在同名歌谱。", true);
     elements.scoreEditName.focus();
     return;
@@ -7539,7 +8744,7 @@ async function saveScoreEdit(event) {
     userId,
     name,
     normalizedName: normalizeText(name),
-    folderId: elements.scoreEditFolder.value || null,
+    folderId: selectedFolderId,
     keySignature: elements.scoreEditKey.value.trim(),
     notes: elements.scoreEditNotes.value.trim(),
     updatedAt: now,
@@ -7549,24 +8754,33 @@ async function saveScoreEdit(event) {
   elements.saveScoreEditButton.disabled = true;
   setScoreEditStatus(isMoveMode ? "正在移动..." : "正在保存...");
 
-  beginUserWrite();
-  try {
-    // 本地优先：本地写成功即给用户成功反馈，云端仅入 outbox 后台处理。
-    await putScore(updatedScore);
-    closeScoreEditDialog();
-    await loadScores();
-    setStatus(isMoveMode ? `《${updatedScore.name}》已移动。` : `《${updatedScore.name}》信息已保存。`);
-    // 只要存在 userId/session 就入队 outbox；cloudReady 只决定是否立刻 kick（见 queueScoreCloudUpload / kickOutbox）。
-    if (userId || state.session) {
-      queueScoreCloudUpload(updatedScore.id);
-    }
-  } catch (error) {
-    console.error(error);
-    setScoreEditStatus(getErrorMessage(error) || "保存失败，请稍后再试。", true);
-  } finally {
-    elements.saveScoreEditButton.disabled = false;
-    endUserWrite();
-  }
+  await runUserDataOperation(
+    "saveScoreEdit",
+    async () => {
+      // 本地优先：本地写成功即给用户成功反馈，云端仅入 outbox 后台处理。
+      await putScore(updatedScore);
+      applyScoreMetadataInMemory(updatedScore);
+      closeScoreEditDialog();
+      renderScores();
+      renderSetlists();
+      setStatus(isMoveMode ? `《${updatedScore.name}》已移动。` : `《${updatedScore.name}》信息已保存。`);
+      // 只要存在 userId/session 就入队 outbox；cloudReady 只决定是否立刻 kick（见 queueScoreCloudUpload / kickOutbox）。
+      if (userId || state.session) {
+        queueScoreCloudUpload(updatedScore.id);
+      }
+      return true;
+    },
+    {
+      actionLabel: "保存",
+      timeoutMs: 60000,
+      timeoutMessage: isMoveMode ? "移动歌谱耗时过长，请重试。" : "保存歌谱信息耗时过长，请重试。",
+      onError: (error) => {
+        console.error(error);
+        setScoreEditStatus(getStorageErrorMessage(error, "保存"), true);
+      },
+    },
+  );
+  elements.saveScoreEditButton.disabled = false;
 }
 
 function openPageManagerDialog(scoreId) {
@@ -8107,45 +9321,64 @@ async function createFolder(event) {
 
   elements.saveFolderButton.disabled = true;
 
-  beginUserWrite();
-  try {
-    await putFolder(folder);
-    elements.searchInput.value = "";
-    closeFolderDialog();
-    await loadScores();
-    if (existingFolder) {
-      renderScores();
-      setStatus(`《${folder.name}》文件夹名称已保存。`);
-    } else {
-      openFolder(folder.id);
-    }
-    // 只要存在 userId/session 就入队 outbox（不因 cloudReady=false 跳过）。
-    if (userId || state.session) {
-      queueFolderCloudUpload(folder.id);
-    }
-  } catch (error) {
-    console.error(error);
-    await recoverDatabaseIfWedged(error);
-    setStatus(getErrorMessage(error) || "保存文件夹失败，请稍后再试。", true);
-  } finally {
-    elements.saveFolderButton.disabled = false;
-    endUserWrite();
-  }
+  await runUserDataOperation(
+    "saveFolder",
+    async () => {
+      await putFolder(folder);
+      applyFolderInMemory(folder);
+      elements.searchInput.value = "";
+      closeFolderDialog();
+      if (existingFolder) {
+        renderScores();
+        setStatus(`《${folder.name}》文件夹名称已保存。`);
+      } else {
+        openFolder(folder.id);
+      }
+      // 只要存在 userId/session 就入队 outbox（不因 cloudReady=false 跳过）。
+      if (userId || state.session) {
+        queueFolderCloudUpload(folder.id);
+      }
+      return true;
+    },
+    {
+      actionLabel: "保存文件夹",
+      timeoutMs: 60000,
+      timeoutMessage: "保存文件夹耗时过长，请重试。",
+      onError: (error) => {
+        console.error(error);
+        setStatus(getStorageErrorMessage(error, "保存文件夹"), true);
+      },
+    },
+  );
+  elements.saveFolderButton.disabled = false;
 }
 
 async function claimLocalRecordsForUser(userId) {
   await ensureDatabaseReady();
-  const [scores, pages, folders, setlists, setlistItems] = await Promise.all([
+  const [scores, pages, folders, setlists, setlistItems, annotations] = await Promise.all([
     getAllScores(),
     getAllScorePages(),
     getAllFolders(),
     getAllSetlists(),
     getAllSetlistItems(),
+    getAllAnnotations(),
   ]);
   const now = new Date().toISOString();
   // 认领条件：无主数据，或 userId 是当前账号别名（手机号/邮箱/旧uid 等）且尚未写成当前规范 id。
   // 认领后统一写成当前 state.session.user.id 并标记 pending，避免旧数据因 userId 变化而消失。
   const shouldClaim = (record) => record.userId !== userId && (!record.userId || isCurrentAccountAlias(record.userId));
+  const currentScoreIds = new Set(
+    scores
+      .map(normalizeLocalScoreRecord)
+      .filter((score) => !score.deletedAt && (String(score.userId || "") === String(userId) || shouldClaim(score)))
+      .map((score) => String(score.id)),
+  );
+  const currentPageIds = new Set(
+    pages
+      .map(normalizeLocalPageRecord)
+      .filter((page) => !page.deletedAt && currentScoreIds.has(String(page.scoreId)))
+      .map((page) => String(page.id)),
+  );
   const claimedFolders = folders
     .filter(shouldClaim)
     .map((folder) => ({
@@ -8186,12 +9419,35 @@ async function claimLocalRecordsForUser(userId) {
       updatedAt: item.updatedAt || now,
       syncStatus: SYNC_STATUS_PENDING,
     }));
+  const claimedAnnotations = annotations
+    .map(normalizeAnnotationRecord)
+    .filter(
+      (annotation) =>
+        !annotation.deletedAt &&
+        annotation.userId !== userId &&
+        (shouldClaim(annotation) ||
+          currentScoreIds.has(String(annotation.scoreId || "")) ||
+          currentPageIds.has(String(annotation.pageId || ""))),
+    )
+    .map((annotation) => ({
+      ...annotation,
+      userId,
+      updatedAt: annotation.updatedAt || now,
+      syncStatus: SYNC_STATUS_PENDING,
+    }));
 
-  if (!claimedFolders.length && !claimedScores.length && !claimedPages.length && !claimedSetlists.length && !claimedSetlistItems.length) {
+  if (
+    !claimedFolders.length &&
+    !claimedScores.length &&
+    !claimedPages.length &&
+    !claimedSetlists.length &&
+    !claimedSetlistItems.length &&
+    !claimedAnnotations.length
+  ) {
     return;
   }
 
-  await putCloudReadyRecords(claimedFolders, claimedScores, claimedPages, claimedSetlists, claimedSetlistItems);
+  await putCloudReadyRecords(claimedFolders, claimedScores, claimedPages, claimedSetlists, claimedSetlistItems, claimedAnnotations);
   await loadScores();
 }
 
@@ -8243,26 +9499,77 @@ function setBackgroundSyncError(message) {
   updateOutboxIndicator();
 }
 
-function putCloudReadyRecords(folders, scores, pages, setlists = [], setlistItems = []) {
-  const total = folders.length + scores.length + pages.length + setlists.length + setlistItems.length;
-  // 后台同步写入：同样串行进入本地写队列，避免与用户操作并发抢事务。
-  return enqueueLocalWrite("putCloudReadyRecords", () =>
-    runIdbTransaction(
-      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
-      "readwrite",
-      ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore]) => {
-        folders.forEach((folder) => folderStore.put(folder));
-        scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
-        pages.forEach((page) => pageStore.put(page));
-        setlists.forEach((setlist) => setlistStore.put(setlist));
-        setlistItems.forEach((item) => setlistItemStore.put(item));
-      },
-      {
-        timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, total * 1500 + 5000),
-        timeoutMessage: "本地写入云端数据超时，请稍后重试同步。",
-      },
-    ),
+function putCloudReadyRecords(folders, scores, pages, setlists = [], setlistItems = [], annotations = []) {
+  const total = folders.length + scores.length + pages.length + setlists.length + setlistItems.length + annotations.length;
+  if (!total) {
+    return Promise.resolve();
+  }
+
+  const batches = createCloudReadyBatches(folders, scores, pages, setlists, setlistItems, annotations);
+  return batches.reduce(
+    (chain, batch, index) =>
+      chain.then(() =>
+        enqueueLocalWrite(
+          `putCloudReadyRecords:${index + 1}/${batches.length}`,
+          () =>
+            runIdbTransaction(
+              [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME, ANNOTATION_STORE_NAME],
+              "readwrite",
+              ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore, annotationStore]) => {
+                batch.folders.forEach((folder) => folderStore.put(folder));
+                batch.scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
+                batch.pages.forEach((page) => pageStore.put(page));
+                batch.setlists.forEach((setlist) => setlistStore.put(setlist));
+                batch.setlistItems.forEach((item) => setlistItemStore.put(item));
+                batch.annotations.forEach((annotation) => annotationStore.put(normalizeAnnotationRecord(annotation)));
+              },
+              {
+                timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, batch.total * 1500 + 5000),
+                timeoutMessage: "本地写入云端数据超时，请稍后重试同步。",
+              },
+            ),
+          {
+            priority: "background",
+            timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, batch.total * 2000 + 10000),
+          },
+        ),
+      ),
+    Promise.resolve(),
   );
+}
+
+function createCloudReadyBatches(folders, scores, pages, setlists, setlistItems, annotations) {
+  const queues = {
+    folders: folders.slice(),
+    scores: scores.slice(),
+    pages: pages.slice(),
+    setlists: setlists.slice(),
+    setlistItems: setlistItems.slice(),
+    annotations: annotations.slice(),
+  };
+  const batches = [];
+
+  while (Object.values(queues).some((items) => items.length)) {
+    const batch = {
+      folders: queues.folders.splice(0, LOCAL_WRITE_BATCH_SIZE),
+      scores: queues.scores.splice(0, LOCAL_WRITE_BATCH_SIZE),
+      pages: queues.pages.splice(0, LOCAL_WRITE_BATCH_SIZE),
+      setlists: queues.setlists.splice(0, LOCAL_WRITE_BATCH_SIZE),
+      setlistItems: queues.setlistItems.splice(0, LOCAL_WRITE_BATCH_SIZE),
+      annotations: queues.annotations.splice(0, LOCAL_WRITE_BATCH_SIZE),
+      total: 0,
+    };
+    batch.total =
+      batch.folders.length +
+      batch.scores.length +
+      batch.pages.length +
+      batch.setlists.length +
+      batch.setlistItems.length +
+      batch.annotations.length;
+    batches.push(batch);
+  }
+
+  return batches;
 }
 
 function queueSync() {
@@ -8310,7 +9617,9 @@ function getAllOutboxTasks() {
 }
 
 function putOutboxTask(task) {
-  return putStoreRecord(SYNC_OUTBOX_STORE_NAME, task, LOCAL_SAVE_TIMEOUT, "同步队列写入超时。");
+  return putStoreRecord(SYNC_OUTBOX_STORE_NAME, task, LOCAL_SAVE_TIMEOUT, "同步队列写入超时。", {
+    priority: "background",
+  });
 }
 
 function removeOutboxTask(id) {
@@ -8323,6 +9632,7 @@ function removeOutboxTask(id) {
       },
       { timeoutMessage: "同步队列写入超时。" },
     ),
+    { priority: "background" },
   );
 }
 
@@ -8434,50 +9744,15 @@ function scheduleOutboxRetry(tasks) {
   }, delay);
 }
 
-// 更新“我的”页里的同步队列状态面板（可观测：待同步 / 失败数量 + 重试入口）。
 function updateOutboxIndicator() {
-  if (!elements.syncOutboxPanel) {
-    return;
-  }
-  const pending = state.outboxCounts?.pending || 0;
-  const failed = state.outboxCounts?.failed || 0;
-  const backgroundError = state.backgroundSyncError || "";
-
-  if (!state.session) {
+  // The outbox still runs in the background, but the Mine page no longer shows
+  // the "pending sync / retry" panel because it was too noisy for daily use.
+  if (elements.syncOutboxPanel) {
     elements.syncOutboxPanel.hidden = true;
-    return;
-  }
-  // 没有待同步/失败任务，但后台全量同步出过错时，也要把问题显示出来（不静默）。
-  if (!pending && !failed && !backgroundError) {
-    elements.syncOutboxPanel.hidden = true;
-    return;
-  }
-
-  elements.syncOutboxPanel.hidden = false;
-  elements.syncOutboxPanel.classList.toggle("has-failed", failed > 0 || Boolean(backgroundError));
-  const parts = [];
-  if (pending) {
-    parts.push(`待同步 ${pending} 项`);
-  }
-  if (failed) {
-    parts.push(`同步失败 ${failed} 项`);
-  }
-  if (elements.syncOutboxState) {
-    let text = "";
-    if (parts.length) {
-      text = `${parts.join("，")}${state.outboxProcessing ? "（正在同步…）" : ""}`;
-      const detail = state.outboxLastError || backgroundError;
-      if (!state.outboxProcessing && detail) {
-        text += `：${detail}`;
-      }
-    } else if (backgroundError) {
-      // 仅有后台同步问题（无具体任务）时，直接显示原因并提供重试。
-      text = `云端同步暂时失败：${backgroundError}`;
-    }
-    elements.syncOutboxState.textContent = text;
   }
   if (elements.retryOutboxButton) {
-    elements.retryOutboxButton.hidden = !failed && !pending && !backgroundError;
+    elements.retryOutboxButton.hidden = true;
+    elements.retryOutboxButton.disabled = false;
   }
 }
 
@@ -8548,6 +9823,10 @@ async function processSyncOutbox(options = {}) {
     const now = Date.now();
 
     for (const task of tasks) {
+      if (shouldYieldToUserWrite(options)) {
+        kickOutbox(2000);
+        break;
+      }
       if (!options.force) {
         if (task.status === OUTBOX_STATUS_FAILED) {
           continue;
@@ -8673,12 +9952,65 @@ async function dispatchOutboxTask(task) {
       await uploadSetlistToCloud(task.entityId);
       return;
     case "UPSERT_ANNOTATION":
+      await uploadAnnotationToCloud(task.payload?.annotation, task.entityId);
+      return;
     case "DELETE_ANNOTATION":
-      console.info("标注云同步已预留，本版先保留本地标注。", task.type);
+      await deleteCloudAnnotation(task.payload?.annotation, task.payload?.deletedAt);
       return;
     default:
       console.warn("未知的同步任务类型", task.type);
   }
+}
+
+async function findLocalAnnotationById(annotationId) {
+  if (!annotationId) {
+    return null;
+  }
+  const records = await getAllAnnotations();
+  const found = records.find((record) => String(record.id) === String(annotationId));
+  return found ? normalizeAnnotationRecord(found) : null;
+}
+
+async function uploadAnnotationToCloud(annotation, annotationId = "") {
+  if (!state.cloudReady || !state.session) {
+    return;
+  }
+  const userId = state.session.user.id;
+  const record = normalizeAnnotationRecord(annotation || (await findLocalAnnotationById(annotationId)) || {});
+  if (!record.id || !record.pageId || !record.scoreId) {
+    return;
+  }
+  const readyRecord = {
+    ...record,
+    userId: record.userId || userId,
+    syncStatus: SYNC_STATUS_SYNCED,
+  };
+  const ok = await upsertOptionalCloud(CLOUD_TABLES.annotations, [toCloudAnnotation(readyRecord)]);
+  if (!ok) {
+    return;
+  }
+  await markLocalSynced([], [], [], [], [], [readyRecord]);
+  state.annotationRecords.set(readyRecord.pageId, readyRecord);
+}
+
+async function deleteCloudAnnotation(annotation, deletedAt = new Date().toISOString()) {
+  if (!state.cloudReady || !state.session || !annotation?.id) {
+    return;
+  }
+  const userId = state.session.user.id;
+  const tombstone = normalizeAnnotationRecord({
+    ...annotation,
+    userId: annotation.userId || userId,
+    deletedAt,
+    updatedAt: deletedAt,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
+  const ok = await upsertOptionalCloud(CLOUD_TABLES.annotations, [toCloudAnnotation(tombstone)]);
+  if (!ok) {
+    return;
+  }
+  await markLocalSynced([], [], [], [], [], [tombstone]);
+  state.annotationRecords.delete(tombstone.pageId);
 }
 
 // 上传单个歌单及其曲目到云端。本地记录若带 deletedAt（软删除），同一次上传即把墓碑推送到云端，
@@ -8895,7 +10227,7 @@ async function handleManualSync() {
       return;
     }
 
-    await performSync();
+    await performSync(options);
     setStatus("刷新完成。");
   } catch (error) {
     console.error(error);
@@ -8926,7 +10258,7 @@ async function syncNow(options = {}) {
 
   try {
     await ensureDatabaseReady();
-    await performSync();
+    await performSync(options);
     if (options.manual) {
       setStatus("同步完成。");
     }
@@ -8953,33 +10285,52 @@ async function syncNow(options = {}) {
 
 async function performSync(options = {}) {
   await ensureDatabaseReady();
+  if (shouldYieldToUserWrite(options)) {
+    requeueBackgroundSyncSoon();
+    return;
+  }
   await pullCloudDeletions();
+  if (shouldYieldToUserWrite(options)) {
+    requeueBackgroundSyncSoon();
+    return;
+  }
   await uploadLocalChanges();
+  if (shouldYieldToUserWrite(options)) {
+    requeueBackgroundSyncSoon();
+    return;
+  }
   await pullCloudChanges(options);
+  if (shouldYieldToUserWrite(options)) {
+    requeueBackgroundSyncSoon();
+    return;
+  }
   await loadScores();
 }
 
 async function pullCloudDeletions() {
   const userId = state.session.user.id;
-  const [folders, scores, setlists, setlistItems] = await Promise.all([
+  const [folders, scores, setlists, setlistItems, annotations] = await Promise.all([
     queryAccountCloudRows(CLOUD_TABLES.folders, userId),
     queryAccountCloudRows(CLOUD_TABLES.scores, userId),
     queryOptionalAccountCloudRows(CLOUD_TABLES.setlists, userId),
     queryOptionalAccountCloudRows(CLOUD_TABLES.setlistItems, userId),
+    queryOptionalAccountCloudRows(CLOUD_TABLES.annotations, userId),
   ]);
   const deletedFolderIds = folders.filter((folder) => folder.deleted_at).map((folder) => folder.id);
   const deletedScoreIds = scores.filter((score) => score.deleted_at).map((score) => score.id);
   const deletedSetlistIds = setlists.filter((setlist) => setlist.deleted_at).map((setlist) => setlist.id);
   const deletedSetlistItemIds = setlistItems.filter((item) => item.deleted_at).map((item) => item.id);
+  const deletedAnnotationIds = annotations.filter((annotation) => annotation.deleted_at).map((annotation) => annotation.id || annotation._id);
 
-  await purgeCloudDeletedLocalRecords(deletedFolderIds, deletedScoreIds, deletedSetlistIds, deletedSetlistItemIds);
+  await purgeCloudDeletedLocalRecords(deletedFolderIds, deletedScoreIds, deletedSetlistIds, deletedSetlistItemIds, deletedAnnotationIds);
 }
 
-async function purgeCloudDeletedLocalRecords(folderIds, scoreIds, setlistIds = [], setlistItemIds = []) {
+async function purgeCloudDeletedLocalRecords(folderIds, scoreIds, setlistIds = [], setlistItemIds = [], annotationIds = []) {
   const folderIdSet = new Set(folderIds.filter(Boolean).map(String));
   const scoreIdSet = new Set(scoreIds.filter(Boolean).map(String));
   const setlistIdSet = new Set(setlistIds.filter(Boolean).map(String));
   const setlistItemIdSet = new Set(setlistItemIds.filter(Boolean).map(String));
+  const annotationIdSet = new Set(annotationIds.filter(Boolean).map(String));
 
   if (folderIdSet.size) {
     const localScores = await getAllScores();
@@ -8999,7 +10350,16 @@ async function purgeCloudDeletedLocalRecords(folderIds, scoreIds, setlistIds = [
     });
   }
 
-  if (!folderIdSet.size && !scoreIdSet.size && !setlistIdSet.size && !setlistItemIdSet.size) {
+  if (scoreIdSet.size) {
+    const localAnnotations = await getAllAnnotations();
+    localAnnotations.forEach((annotation) => {
+      if (scoreIdSet.has(String(annotation.scoreId))) {
+        annotationIdSet.add(String(annotation.id));
+      }
+    });
+  }
+
+  if (!folderIdSet.size && !scoreIdSet.size && !setlistIdSet.size && !setlistItemIdSet.size && !annotationIdSet.size) {
     return;
   }
 
@@ -9009,34 +10369,41 @@ async function purgeCloudDeletedLocalRecords(folderIds, scoreIds, setlistIds = [
     scoreIdList.map((scoreId) => readKeysByIndex(PAGE_STORE_NAME, "scoreId", scoreId)),
   );
   const pageKeys = pageKeyGroups.flat();
-  const total = folderIdSet.size + setlistIdSet.size + setlistItemIdSet.size + scoreIdSet.size + pageKeys.length;
+  const total =
+    folderIdSet.size + setlistIdSet.size + setlistItemIdSet.size + scoreIdSet.size + pageKeys.length + annotationIdSet.size;
 
   await enqueueLocalWrite("purgeCloudDeletedLocalRecords", () =>
     runIdbTransaction(
-      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME],
+      [FOLDER_STORE_NAME, STORE_NAME, PAGE_STORE_NAME, SETLIST_STORE_NAME, SETLIST_ITEM_STORE_NAME, ANNOTATION_STORE_NAME],
       "readwrite",
-      ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore]) => {
+      ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore, annotationStore]) => {
         folderIdSet.forEach((folderId) => folderStore.delete(folderId));
         setlistIdSet.forEach((setlistId) => setlistStore.delete(setlistId));
         setlistItemIdSet.forEach((itemId) => setlistItemStore.delete(itemId));
         scoreIdSet.forEach((scoreId) => scoreStore.delete(scoreId));
         pageKeys.forEach((key) => pageStore.delete(key));
+        annotationIdSet.forEach((annotationId) => annotationStore.delete(annotationId));
       },
       {
         timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, total * 1500 + 5000),
         timeoutMessage: "清理云端已删除记录超时，请稍后重试同步。",
       },
     ),
+    {
+      priority: "background",
+      timeoutMs: Math.max(LOCAL_SAVE_TIMEOUT, total * 2000 + 10000),
+    },
   );
 }
 
 async function getSyncableLocalRecords(userId) {
-  const [folderRecords, scoreRecords, pageRecords, setlistRecords, setlistItemRecords] = await Promise.all([
+  const [folderRecords, scoreRecords, pageRecords, setlistRecords, setlistItemRecords, annotationRecords] = await Promise.all([
     getAllFolders(),
     getAllScores(),
     getAllScorePages(),
     getAllSetlists(),
     getAllSetlistItems(),
+    getAllAnnotations(),
   ]);
   const ownerMatches = createOwnerMatcher();
   const folders = folderRecords.map(normalizeLocalFolderRecord).filter(ownerMatches);
@@ -9050,8 +10417,17 @@ async function getSyncableLocalRecords(userId) {
   const setlistItems = setlistItemRecords
     .map(normalizeLocalSetlistItemRecord)
     .filter((item) => setlistIds.has(item.setlistId) && scoreIds.has(item.scoreId) && ownerMatches(item));
+  const pageIds = new Set(pages.map((page) => page.id));
+  const annotations = annotationRecords
+    .map(normalizeAnnotationRecord)
+    .filter(
+      (annotation) =>
+        ownerMatches(annotation) &&
+        scoreIds.has(String(annotation.scoreId || "")) &&
+        pageIds.has(String(annotation.pageId || "")),
+    );
 
-  return { folders, scores, pages, setlists, setlistItems };
+  return { folders, scores, pages, setlists, setlistItems, annotations };
 }
 
 async function uploadLocalChanges() {
@@ -9061,10 +10437,15 @@ async function uploadLocalChanges() {
   const allScores = localRecords.scores.map((score) => ({ ...toScoreRecord(score), userId }));
   const allSetlists = localRecords.setlists.map((setlist) => ({ ...setlist, userId }));
   const allSetlistItems = localRecords.setlistItems.map((item) => ({ ...item, userId: item.userId || userId }));
+  const allAnnotations = localRecords.annotations.map((annotation) => ({
+    ...normalizeAnnotationRecord(annotation),
+    userId: annotation.userId || userId,
+  }));
   const folders = allFolders.filter(needsCloudMetadataSync);
   const scores = allScores.filter(needsCloudMetadataSync);
   const setlists = allSetlists.filter(needsCloudMetadataSync);
   const setlistItems = allSetlistItems.filter(needsCloudMetadataSync);
+  const annotations = allAnnotations.filter(needsCloudMetadataSync);
   const scoreById = new Map(allScores.map((score) => [score.id, score]));
   const pages = localRecords.pages
     .filter((page) => scoreById.has(page.scoreId))
@@ -9072,6 +10453,10 @@ async function uploadLocalChanges() {
   const uploadedPages = [];
 
   for (const page of pages) {
+    if (isUserWriteActive()) {
+      requeueBackgroundSyncSoon();
+      break;
+    }
     const score = scoreById.get(page.scoreId);
     const pageDeleted = Boolean(page.deletedAt || score?.deletedAt);
     let storagePath = page.storagePath || null;
@@ -9122,6 +10507,10 @@ async function uploadLocalChanges() {
     setlistItems.length && (await upsertOptionalCloud(CLOUD_TABLES.setlistItems, setlistItems.map(toCloudSetlistItem)))
       ? setlistItems
       : [];
+  const syncedAnnotations =
+    annotations.length && (await upsertOptionalCloud(CLOUD_TABLES.annotations, annotations.map(toCloudAnnotation)))
+      ? annotations
+      : [];
 
   const deletedScoreIds = scores.filter((score) => score.deletedAt).map((score) => score.id);
   if (deletedScoreIds.length) {
@@ -9138,6 +10527,7 @@ async function uploadLocalChanges() {
     uploadedPages,
     syncedSetlists.map((setlist) => ({ ...setlist, syncStatus: SYNC_STATUS_SYNCED })),
     syncedSetlistItems.map((item) => ({ ...item, syncStatus: SYNC_STATUS_SYNCED })),
+    syncedAnnotations.map((annotation) => ({ ...annotation, syncStatus: SYNC_STATUS_SYNCED })),
   );
 }
 
@@ -9145,11 +10535,51 @@ function needsCloudMetadataSync(record) {
   return record?.syncStatus !== SYNC_STATUS_SYNCED;
 }
 
+function isLocalAnnotationNewerThanCloud(localRecord, cloudRecord) {
+  if (!localRecord || localRecord.deletedAt) {
+    return false;
+  }
+  const localHasDrawing =
+    (Array.isArray(localRecord.strokes) && localRecord.strokes.length > 0) || Boolean(localRecord.drawingDataBase64);
+  const cloudHasDrawing =
+    (Array.isArray(cloudRecord.strokes) && cloudRecord.strokes.length > 0) || Boolean(cloudRecord.drawingDataBase64);
+  if (localHasDrawing && !cloudHasDrawing) {
+    return true;
+  }
+  if (localRecord.syncStatus !== SYNC_STATUS_SYNCED) {
+    return true;
+  }
+  return String(localRecord.updatedAt || "").localeCompare(String(cloudRecord.updatedAt || "")) > 0;
+}
+
+async function mergeCloudAnnotationsWithLocal(cloudAnnotations) {
+  if (!cloudAnnotations.length) {
+    return [];
+  }
+  const localRecords = (await getAllAnnotations()).map(normalizeAnnotationRecord);
+  const localById = new Map(localRecords.map((record) => [String(record.id), record]));
+  const localByPage = new Map();
+  localRecords.forEach((record) => {
+    if (!record.pageId || record.deletedAt) {
+      return;
+    }
+    const previous = localByPage.get(record.pageId);
+    if (!previous || String(record.updatedAt || "").localeCompare(String(previous.updatedAt || "")) > 0) {
+      localByPage.set(record.pageId, record);
+    }
+  });
+
+  return cloudAnnotations.map((cloudRecord) => {
+    const localRecord = localById.get(String(cloudRecord.id)) || localByPage.get(String(cloudRecord.pageId));
+    return isLocalAnnotationNewerThanCloud(localRecord, cloudRecord) ? localRecord : cloudRecord;
+  });
+}
+
 async function pullCloudChanges(options = {}) {
   const downloadImages = Boolean(options.downloadImages);
   const userId = state.session.user.id;
   const deletionGuards = await getLocalDeletionGuards(userId);
-  const [folderRows, scoreRows, pageRows, setlistRows, setlistItemRows] = await Promise.all([
+  const [folderRows, scoreRows, pageRows, setlistRows, setlistItemRows, annotationRows] = await Promise.all([
     queryAccountCloudRows(CLOUD_TABLES.folders, userId),
     queryAccountCloudRows(CLOUD_TABLES.scores, userId),
     queryAccountCloudRows(CLOUD_TABLES.pages, userId, {
@@ -9159,6 +10589,7 @@ async function pullCloudChanges(options = {}) {
     queryOptionalAccountCloudRows(CLOUD_TABLES.setlistItems, userId, {
       orderBy: [["position", "asc"]],
     }),
+    queryOptionalAccountCloudRows(CLOUD_TABLES.annotations, userId),
   ]);
   // 诊断：云端拉取到多少条歌谱、它们的 user_id 是什么、当前账号别名是什么——用于排查登录后无歌谱。
   console.log(
@@ -9185,6 +10616,7 @@ async function pullCloudChanges(options = {}) {
         !deletionGuards.pageIds.has(String(row.id)) &&
         !deletionGuards.scoreIds.has(String(row.score_id || "")),
     );
+  const activePageIds = new Set(pages.map((row) => String(row.id)));
   const setlists = setlistRows
     .filter(isCloudRowActive)
     .filter((row) => !deletionGuards.setlistIds.has(String(row.id)));
@@ -9199,6 +10631,17 @@ async function pullCloudChanges(options = {}) {
         !deletionGuards.setlistIds.has(String(row.setlist_id || "")) &&
         !deletionGuards.scoreIds.has(String(row.score_id || "")),
     );
+  const cloudAnnotations = annotationRows
+    .filter(isCloudRowActive)
+    .filter(
+      (row) =>
+        activeScoreIds.has(String(row.score_id || "")) &&
+        activePageIds.has(String(row.page_id || "")) &&
+        !deletionGuards.annotationIds.has(String(row.id || row._id || "")) &&
+        !deletionGuards.pageIds.has(String(row.page_id || "")) &&
+        !deletionGuards.scoreIds.has(String(row.score_id || "")),
+    )
+    .map(fromCloudAnnotation);
 
   const localPageById = new Map(state.scorePages.map((page) => [page.id, page]));
   const cloudPages = [];
@@ -9247,21 +10690,23 @@ async function pullCloudChanges(options = {}) {
     cloudPages,
     setlists.map(fromCloudSetlist),
     setlistItems.map(fromCloudSetlistItem),
+    await mergeCloudAnnotationsWithLocal(cloudAnnotations),
   );
 }
 
-function markLocalSynced(folders, scores, pages, setlists = [], setlistItems = []) {
-  return putCloudReadyRecords(folders, scores, pages, setlists, setlistItems);
+function markLocalSynced(folders, scores, pages, setlists = [], setlistItems = [], annotations = []) {
+  return putCloudReadyRecords(folders, scores, pages, setlists, setlistItems, annotations);
 }
 
 async function getLocalDeletionGuards(userId) {
   await ensureDatabaseReady();
-  const [folderRecords, scoreRecords, pageRecords, setlistRecords, setlistItemRecords] = await Promise.all([
+  const [folderRecords, scoreRecords, pageRecords, setlistRecords, setlistItemRecords, annotationRecords] = await Promise.all([
     getAllFolders(),
     getAllScores(),
     getAllScorePages(),
     getAllSetlists(),
     getAllSetlistItems(),
+    getAllAnnotations(),
   ]);
   const ownerMatches = createOwnerMatcher();
   const folderIds = new Set(
@@ -9294,6 +10739,12 @@ async function getLocalDeletionGuards(userId) {
       .filter((item) => item.deletedAt && ownerMatches(item))
       .map((item) => String(item.id)),
   );
+  const annotationIds = new Set(
+    annotationRecords
+      .map(normalizeAnnotationRecord)
+      .filter((annotation) => annotation.deletedAt && ownerMatches(annotation))
+      .map((annotation) => String(annotation.id)),
+  );
 
   scoreRecords
     .map(normalizeLocalScoreRecord)
@@ -9311,8 +10762,16 @@ async function getLocalDeletionGuards(userId) {
         (setlistIds.has(String(item.setlistId || "")) || scoreIds.has(String(item.scoreId || ""))),
     )
     .forEach((item) => setlistItemIds.add(String(item.id)));
+  annotationRecords
+    .map(normalizeAnnotationRecord)
+    .filter(
+      (annotation) =>
+        ownerMatches(annotation) &&
+        (scoreIds.has(String(annotation.scoreId || "")) || pageIds.has(String(annotation.pageId || ""))),
+    )
+    .forEach((annotation) => annotationIds.add(String(annotation.id)));
 
-  return { folderIds, scoreIds, pageIds, setlistIds, setlistItemIds };
+  return { folderIds, scoreIds, pageIds, setlistIds, setlistItemIds, annotationIds };
 }
 
 function isCloudRowActive(row) {
@@ -9858,6 +11317,63 @@ function toCloudSetlistItem(item) {
     updated_at: item.updatedAt,
     deleted_at: item.deletedAt || null,
   };
+}
+
+function serializeCloudAnnotationStrokes(strokes) {
+  return cloneAnnotationStrokes(strokes);
+}
+
+function parseCloudAnnotationStrokes(value) {
+  if (Array.isArray(value)) {
+    return cloneAnnotationStrokes(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? cloneAnnotationStrokes(parsed) : [];
+    } catch (error) {
+      console.warn("Failed to parse cloud annotation strokes", error);
+    }
+  }
+  return [];
+}
+
+function toCloudAnnotation(annotation) {
+  const record = normalizeAnnotationRecord(annotation);
+  return {
+    id: record.id,
+    user_id: record.userId,
+    score_id: record.scoreId,
+    page_id: record.pageId,
+    base_width: record.baseWidth,
+    base_height: record.baseHeight,
+    strokes: serializeCloudAnnotationStrokes(record.strokes),
+    engine: record.engine || "",
+    drawing_data_base64: record.drawingDataBase64 || "",
+    native_drawing_updated_at: record.nativeDrawingUpdatedAt || "",
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+    deleted_at: record.deletedAt || null,
+  };
+}
+
+function fromCloudAnnotation(row) {
+  return normalizeAnnotationRecord({
+    id: row.id || row._id,
+    userId: row.user_id,
+    scoreId: row.score_id,
+    pageId: row.page_id,
+    baseWidth: row.base_width,
+    baseHeight: row.base_height,
+    strokes: parseCloudAnnotationStrokes(row.strokes),
+    engine: row.engine || "",
+    drawingDataBase64: row.drawing_data_base64 || row.drawingDataBase64 || "",
+    nativeDrawingUpdatedAt: row.native_drawing_updated_at || row.nativeDrawingUpdatedAt || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+    syncStatus: SYNC_STATUS_SYNCED,
+  });
 }
 
 function fromCloudFolder(row) {
@@ -10888,7 +12404,7 @@ async function importScoresByShareCode(code) {
     : [];
   const sharedPages = sharedPageRows.filter(isCloudRowActive);
 
-  const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
+  const existingScoreScopes = createScoreNameScopeMap();
   const sharedFolderById = new Map(sharedFolders.map((folder) => [folder.id, folder]));
   const folderTargetByName = createFolderTargetMap();
   const userId = state.session.user.id;
@@ -10901,10 +12417,12 @@ async function importScoresByShareCode(code) {
     }
 
     const sourceScores = folderScores.filter((score) => score.folder_id === folderId);
-    const hasImportableScores = sourceScores.some((score) => !existingNames.has(normalizeText(score.name)));
     const folderName = getSharedFolderName(sharedFolder.name);
     const normalizedFolderName = getSharedFolderNormalizedName(sharedFolder);
     let targetFolderId = folderTargetByName.get(normalizedFolderName) || null;
+    const hasImportableScores = targetFolderId
+      ? sourceScores.some((score) => !existingScoreScopes.has(getScoreNameScopeKey(score.name, targetFolderId)))
+      : sourceScores.length > 0;
     if (!targetFolderId) {
       if (sourceScores.length && !hasImportableScores) {
         continue;
@@ -10929,7 +12447,7 @@ async function importScoresByShareCode(code) {
     }
 
     for (const sharedScore of sourceScores) {
-      const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, targetFolderId, existingNames);
+      const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, targetFolderId, existingScoreScopes);
       if (imported) {
         result.scoreCount += 1;
       }
@@ -10940,7 +12458,7 @@ async function importScoresByShareCode(code) {
     if (folderScoreSourceIds.has(sharedScore.id)) {
       continue;
     }
-    const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, null, existingNames);
+    const imported = await importSharedScoreRow(sharedScore, sharedPages, userId, null, existingScoreScopes);
     if (imported) {
       result.scoreCount += 1;
     }
@@ -10968,7 +12486,7 @@ async function loadShareItems(batch) {
 async function importScoresFromShareSnapshot(items) {
   const folders = items.filter((item) => item.item_type === "folder");
   const scores = items.filter((item) => item.item_type === "score" && Array.isArray(item.pages));
-  const existingNames = new Set(state.scores.map((score) => normalizeText(score.name)));
+  const existingScoreScopes = createScoreNameScopeMap();
   const userId = state.session.user.id;
   const folderIdMap = new Map();
   const folderTargetByName = createFolderTargetMap();
@@ -10981,13 +12499,17 @@ async function importScoresFromShareSnapshot(items) {
     const existingSharedFolder = sourceShareId
       ? state.folders.find((folder) => folder.sourceShareId === sourceShareId && folder.sourceFolderId === sourceFolderId)
       : null;
-    const hasImportableScores = folderScores.some(
-      (score) => !existingNames.has(normalizeText(score.score_name || "未命名歌谱")) && shareScoreHasReadyPages(score),
-    );
     const folderName = getSharedFolderName(folderItem.folder_name);
     const normalizedFolderName = getSharedFolderNormalizedName(folderItem);
     const existingNamedFolderId = folderTargetByName.get(normalizedFolderName) || null;
     const targetFolderId = existingSharedFolder?.id || existingNamedFolderId;
+    const hasImportableScores = targetFolderId
+      ? folderScores.some(
+        (score) =>
+          !existingScoreScopes.has(getScoreNameScopeKey(score.score_name || "未命名歌谱", targetFolderId)) &&
+          shareScoreHasReadyPages(score),
+      )
+      : folderScores.some(shareScoreHasReadyPages);
     if (targetFolderId) {
       folderIdMap.set(folderItem.folder_id, targetFolderId);
       continue;
@@ -11018,7 +12540,7 @@ async function importScoresFromShareSnapshot(items) {
 
   for (const scoreItem of scores) {
     const targetFolderId = scoreItem.folder_id ? folderIdMap.get(scoreItem.folder_id) || null : null;
-    const imported = await importSharedScoreSnapshot(scoreItem, userId, targetFolderId, existingNames);
+    const imported = await importSharedScoreSnapshot(scoreItem, userId, targetFolderId, existingScoreScopes);
     if (imported) {
       result.scoreCount += 1;
     }
@@ -11027,7 +12549,7 @@ async function importScoresFromShareSnapshot(items) {
   return result;
 }
 
-async function importSharedScoreSnapshot(scoreItem, userId, folderId, existingNames) {
+async function importSharedScoreSnapshot(scoreItem, userId, folderId, existingScoreScopes) {
   return importSharedScoreRow(
     {
       id: scoreItem.score_id,
@@ -11049,7 +12571,7 @@ async function importSharedScoreSnapshot(scoreItem, userId, folderId, existingNa
     })),
     userId,
     folderId,
-    existingNames,
+    existingScoreScopes,
   );
 }
 
@@ -11057,15 +12579,16 @@ function shareScoreHasReadyPages(scoreItem) {
   return Array.isArray(scoreItem.pages) && scoreItem.pages.some((page) => page.storage_path);
 }
 
-async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, existingNames) {
+async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, existingScoreScopes) {
   const normalizedName = normalizeText(sharedScore.name || "未命名歌谱");
+  const scoreScopeKey = getScoreNameScopeKey(normalizedName, folderId);
   const sourceShareId = sharedScore.source_share_id || sharedScore.share_id || sharedScore.sourceShareId || null;
   const sourceScoreId = String(sharedScore.id || sharedScore.score_id || "");
   const existingSharedScore = sourceShareId
     ? state.scores.find((score) => score.sourceShareId === sourceShareId && score.sourceScoreId === sourceScoreId)
     : null;
 
-  if (existingNames.has(normalizedName) && !existingSharedScore) {
+  if (existingScoreScopes.has(scoreScopeKey) && !existingSharedScore) {
     return null;
   }
 
@@ -11136,7 +12659,7 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
     await Promise.all(newPages.map(putScorePage));
   } else {
     await putScoreWithPages(newScore, newPages);
-    existingNames.add(newScore.normalizedName);
+    existingScoreScopes.set(scoreScopeKey, newScore.id);
   }
   await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(newScore)]);
   await upsertCloud(CLOUD_TABLES.pages, newPages.map(toCloudPage));
@@ -11332,14 +12855,38 @@ function updateSaveState() {
     !state.pendingPages.length;
 }
 
-function hasDuplicateScoreName(name, excludeScoreId = "") {
+function normalizeScoreFolderScope(folderId) {
+  return folderId ? String(folderId) : "";
+}
+
+function getScoreNameScopeKey(name, folderId = null) {
   const normalizedName = normalizeText(name);
   if (!normalizedName) {
+    return "";
+  }
+  return `${normalizeScoreFolderScope(folderId)}\u0001${normalizedName}`;
+}
+
+function createScoreNameScopeMap(scores = state.scores) {
+  return new Map(
+    (scores || [])
+      .filter((score) => !score.deletedAt)
+      .map((score) => [getScoreNameScopeKey(score.name || score.normalizedName, score.folderId || null), score.id])
+      .filter(([key]) => Boolean(key)),
+  );
+}
+
+function hasDuplicateScoreName(name, folderId = null, excludeScoreId = "") {
+  const scopeKey = getScoreNameScopeKey(name, folderId);
+  if (!scopeKey) {
     return false;
   }
 
   return state.scores.some(
-    (score) => !score.deletedAt && score.id !== excludeScoreId && normalizeText(score.name || score.normalizedName) === normalizedName,
+    (score) =>
+      !score.deletedAt &&
+      score.id !== excludeScoreId &&
+      getScoreNameScopeKey(score.name || score.normalizedName, score.folderId || null) === scopeKey,
   );
 }
 
@@ -11453,11 +13000,56 @@ function getScoreTime(value) {
   return Number.isNaN(time) ? 0 : time;
 }
 
+function formatStorageShort(bytes) {
+  const mb = (Number(bytes) || 0) / 1048576;
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)}G`;
+  }
+  return `${Math.round(mb)}M`;
+}
+
+let lastStorageUsageCheckAt = 0;
+// 在谱夹筛选行右侧显示本地存储用量（弱化、不抢视觉重点）。轻度节流，避免频繁估算。
+async function updateLibraryStorageUsage(force = false) {
+  const el = elements.libraryStorageUsage;
+  if (!el) {
+    return;
+  }
+  if (!navigator.storage?.estimate) {
+    el.hidden = true;
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - lastStorageUsageCheckAt < 2000) {
+    return;
+  }
+  lastStorageUsageCheckAt = now;
+  try {
+    const estimate = await navigator.storage.estimate();
+    const quota = Number(estimate.quota) || 0;
+    const usage = Number(estimate.usage) || 0;
+    if (!quota) {
+      el.hidden = true;
+      return;
+    }
+    const percent = Math.min(100, Math.round((usage / quota) * 100));
+    el.textContent = `${formatStorageShort(usage)}/${formatStorageShort(quota)}`;
+    el.title = `本地存储：已用 ${formatStorageShort(usage)} / 配额 ${formatStorageShort(quota)}（约 ${percent}%）`;
+    el.classList.toggle("is-high", percent >= 85);
+    el.hidden = false;
+  } catch (error) {
+    console.warn(error);
+    el.hidden = true;
+  }
+}
+
 function renderScores() {
   if (isViewerActive()) {
     state.libraryRenderQueued = true;
     return;
   }
+
+  updateLibraryStorageUsage();
 
   const activeScores = state.scores.filter((score) => !score.deletedAt);
   const activeFolders = state.folders.filter((folder) => !folder.deletedAt);
@@ -11820,7 +13412,9 @@ async function persistScoreCoverFields(scoreId, fields) {
       return;
     }
     const merged = { ...current, ...fields };
-    await putStoreRecord(STORE_NAME, toScoreRecord(merged), LOCAL_SAVE_TIMEOUT, "封面写入超时，稍后重试。");
+    await putStoreRecord(STORE_NAME, toScoreRecord(merged), LOCAL_SAVE_TIMEOUT, "封面写入超时，稍后重试。", {
+      priority: "background",
+    });
   } catch (error) {
     console.warn("封面字段写入失败", error);
     return;
@@ -11832,6 +13426,9 @@ async function persistScoreCoverFields(scoreId, fields) {
 // 仅有 storagePath 则在云端就绪后取临时URL显示（完整下载由后台水合负责）。
 async function ensureScoreCoverThumb(score, options = {}) {
   if (!score?.id) {
+    return;
+  }
+  if (isUserWriteActive() && !options.force) {
     return;
   }
   if (score.coverThumbBlob && score.coverThumbBlob.size > 0) {
@@ -11898,6 +13495,10 @@ async function ensureScoreCoverThumb(score, options = {}) {
 
 // 启动 / 渲染后预加载全部歌谱封面（遍历当前 active scores，而非仅视口内）。
 async function preloadAllScoreCovers(options = {}) {
+  if (isUserWriteActive()) {
+    return;
+  }
+
   const scores = state.scores.slice();
   if (!scores.length) {
     return;
@@ -12463,21 +14064,29 @@ async function saveSetlist(event) {
   elements.saveSetlistButton.disabled = true;
   setSetlistDialogStatus("正在保存...");
 
-  beginUserWrite();
-  try {
-    await putSetlistWithItems(setlist, items, deletedItems);
-    closeSetlistDialog();
-    await loadScores();
-    setStatus(`《${setlist.name}》歌单已保存。`);
-    // 只要存在 session 就入队 outbox（queueSetlistCloudSync 内已按 session 判断，不依赖 cloudReady）。
-    queueSetlistCloudSync(setlistId);
-  } catch (error) {
-    console.error(error);
-    setSetlistDialogStatus(error.message || "保存歌单失败，请稍后再试。", true);
-  } finally {
-    elements.saveSetlistButton.disabled = false;
-    endUserWrite();
-  }
+  await runUserDataOperation(
+    "saveSetlist",
+    async () => {
+      await putSetlistWithItems(setlist, items, deletedItems);
+      applySetlistInMemory(setlist, items);
+      closeSetlistDialog();
+      renderSetlists();
+      setStatus(`《${setlist.name}》歌单已保存。`);
+      // 只要存在 session 就入队 outbox（queueSetlistCloudSync 内已按 session 判断，不依赖 cloudReady）。
+      queueSetlistCloudSync(setlistId);
+      return true;
+    },
+    {
+      actionLabel: "保存歌单",
+      timeoutMs: 60000,
+      timeoutMessage: "保存歌单耗时过长，请重试。",
+      onError: (error) => {
+        console.error(error);
+        setSetlistDialogStatus(getStorageErrorMessage(error, "保存歌单"), true);
+      },
+    },
+  );
+  elements.saveSetlistButton.disabled = false;
 }
 
 async function deleteSetlist(id) {
@@ -12509,50 +14118,58 @@ async function deleteSetlist(id) {
   elements.deleteSetlistButton.disabled = true;
   setSetlistDialogStatus("正在删除...");
 
-  beginUserWrite();
-  try {
-    const deletedAt = new Date().toISOString();
-    const userId = setlist.userId || state.session?.user?.id || null;
-    const setlistItems = state.setlistItems.filter((item) => item.setlistId === id);
+  await runUserDataOperation(
+    "deleteSetlist",
+    async () => {
+      const deletedAt = new Date().toISOString();
+      const userId = setlist.userId || state.session?.user?.id || null;
+      const setlistItems = state.setlistItems.filter((item) => item.setlistId === id);
 
-    if (shouldKeepDeleteTombstone(setlist)) {
-      await putSetlistWithItems(
-        {
-          ...setlist,
-          userId,
-          deletedAt,
-          updatedAt: deletedAt,
-          syncStatus: SYNC_STATUS_PENDING,
-        },
-        [],
-        setlistItems.map((item) => ({
-          ...item,
-          userId: item.userId || userId,
-          deletedAt,
-          updatedAt: deletedAt,
-          syncStatus: SYNC_STATUS_PENDING,
-        })),
-      );
-      queueSetlistCloudSync(id);
-    } else {
-      await deleteSetlistRecord(id);
-    }
+      if (shouldKeepDeleteTombstone(setlist)) {
+        await putSetlistWithItems(
+          {
+            ...setlist,
+            userId,
+            deletedAt,
+            updatedAt: deletedAt,
+            syncStatus: SYNC_STATUS_PENDING,
+          },
+          [],
+          setlistItems.map((item) => ({
+            ...item,
+            userId: item.userId || userId,
+            deletedAt,
+            updatedAt: deletedAt,
+            syncStatus: SYNC_STATUS_PENDING,
+          })),
+        );
+        queueSetlistCloudSync(id);
+      } else {
+        await deleteSetlistRecord(id);
+      }
 
-    if (state.currentViewerSetlistId === id && elements.viewerDialog.open) {
-      closeViewerUI();
-    }
-    closeSetlistDialog();
-    state.setlists = state.setlists.filter((item) => item.id !== id);
-    state.setlistItems = state.setlistItems.filter((item) => item.setlistId !== id);
-    renderSetlists();
-    setStatus(`《${setlist.name}》歌单已删除。`);
-  } catch (error) {
-    console.error(error);
-    setSetlistDialogStatus("删除歌单失败，请稍后再试。", true);
-  } finally {
-    elements.deleteSetlistButton.disabled = false;
-    endUserWrite();
-  }
+      if (state.currentViewerSetlistId === id && elements.viewerDialog.open) {
+        closeViewerUI();
+      }
+      closeSetlistDialog();
+      state.setlists = state.setlists.filter((item) => item.id !== id);
+      state.setlistItems = state.setlistItems.filter((item) => item.setlistId !== id);
+      renderSetlists();
+      setStatus(`《${setlist.name}》歌单已删除。`);
+      return true;
+    },
+    {
+      actionLabel: "删除歌单",
+      timeoutMs: 60000,
+      timeoutMessage: "删除歌单耗时过长，请重试。",
+      onError: (error) => {
+        console.error(error);
+        setSetlistDialogStatus(getStorageErrorMessage(error, "删除歌单"), true);
+        setStatus(getStorageErrorMessage(error, "删除歌单"), true);
+      },
+    },
+  );
+  elements.deleteSetlistButton.disabled = false;
 }
 
 function setSetlistDialogStatus(message, isError = false) {
@@ -14773,6 +16390,84 @@ function queueDeleteSyncForFolder(folder, folderScores, deletedAt) {
   kickOutbox(0);
 }
 
+function getDeleteRecoveryAction(scoreIds) {
+  return {
+    type: "deleteScores",
+    scoreIds: Array.from(new Set((scoreIds || []).filter(Boolean).map(String))),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function isSameDeleteRecoveryAction(action, scoreIds) {
+  if (action?.type !== "deleteScores") {
+    return false;
+  }
+  const left = Array.from(new Set((action.scoreIds || []).map(String))).sort().join(",");
+  const right = Array.from(new Set((scoreIds || []).map(String))).sort().join(",");
+  return Boolean(left && left === right);
+}
+
+function showDeleteRecoveryDialog(scoreIds, message) {
+  showDatabaseRecoveryDialog(
+    message ||
+      "本地存储仍未响应。点击“重试”会重置本地存储、从云端恢复数据，并继续执行删除。",
+    {
+      force: true,
+      pendingAction: getDeleteRecoveryAction(scoreIds),
+    },
+  );
+}
+
+async function retryDeleteScoresAfterLocalRecovery(scoreIds, originalError) {
+  const ids = Array.from(new Set((scoreIds || []).filter(Boolean).map(String)));
+  if (!ids.length) {
+    return false;
+  }
+
+  let settled = false;
+  const promptTimer = window.setTimeout(() => {
+    if (!settled) {
+      showDeleteRecoveryDialog(ids);
+    }
+  }, 3000);
+
+  try {
+    setStatus("本地存储短暂未响应，正在自动恢复并重试删除...");
+    await recoverDatabaseIfWedged(originalError);
+    const recovered = await recoverLocalDatabase();
+    if (!recovered) {
+      throw originalError || new Error("本地数据库恢复失败。");
+    }
+
+    const deleted = await deleteScoresStable(ids, {
+      skipConfirm: true,
+      autoRetried: true,
+      suppressRecoveryDialog: true,
+    });
+    settled = true;
+    if (deleted) {
+      if (isSameDeleteRecoveryAction(state.dbRecoveryPendingAction, ids)) {
+        state.dbRecoveryPendingAction = null;
+      }
+      hideDatabaseRecoveryDialog();
+    } else {
+      showDeleteRecoveryDialog(ids);
+    }
+    return deleted;
+  } catch (error) {
+    settled = true;
+    console.warn("自动恢复并重试删除失败", error);
+    if (isRecoverableDatabaseError(error) || isRecoverableDatabaseError(originalError)) {
+      showDeleteRecoveryDialog(ids);
+    } else {
+      setStatus(getStorageErrorMessage(error, "删除"), true);
+    }
+    return false;
+  } finally {
+    window.clearTimeout(promptTimer);
+  }
+}
+
 async function deleteScoresStable(scoreIds, options = {}) {
   if (!ensureAppReady()) {
     return false;
@@ -14811,8 +16506,13 @@ async function deleteScoresStable(scoreIds, options = {}) {
 
     setStatus("正在从本机删除...");
     // 删除前先把完整副本存入回收站，便于恢复（失败不阻断删除本身）。
+    // 但回收站会再复制一份图片：存储紧张时跳过备份，避免把本地库撑爆 / 删除写入失败。
     try {
-      await snapshotScoresToTrash(targets);
+      if (shouldAttemptTrashSnapshot(targets) && (await hasRoomForTrashSnapshot(targets))) {
+        await snapshotScoresToTrash(targets);
+      } else {
+        console.info("跳过回收站快照：歌谱图片较大或本地空间不足，优先保证删除完成。");
+      }
     } catch (snapshotError) {
       console.warn("写入回收站失败", snapshotError);
     }
@@ -14843,9 +16543,18 @@ async function deleteScoresStable(scoreIds, options = {}) {
       scoreIds: ids,
       pagesLength: state.scorePages.filter((page) => ids.includes(page.scoreId)).length,
     });
+    if (!options.autoRetried && !options.fromRecoveryDialog && isRecoverableDatabaseError(error)) {
+      return retryDeleteScoresAfterLocalRecovery(ids, error);
+    }
     // 删除超时/中断时连接可能已卡死，重连数据库，保证用户重试以及后续保存能恢复。
     await recoverDatabaseIfWedged(error);
     setStatus(error.message === "当前操作正在进行，请稍候。" ? error.message : getStorageErrorMessage(error, "删除"), true);
+    // 仅当删除“整体失败”且确属数据库卡死时，才弹恢复弹窗（避免中途事务抖动误弹）。
+    if (!options.suppressRecoveryDialog) {
+      showRecoveryDialogIfDbWedged(error, {
+        pendingAction: getDeleteRecoveryAction(ids),
+      });
+    }
     return false;
   });
 }
@@ -14873,61 +16582,71 @@ async function deleteFolder(id) {
     return;
   }
 
-  beginUserWrite();
-  try {
-    const deletedAt = new Date().toISOString();
-    const cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
-    const folderScoreIds = new Set(folderScores.map((score) => score.id));
-    const annotationsForDeleteSync = await readAnnotationsForScoreIds(Array.from(folderScoreIds));
+  await runUserDataOperation(
+    "deleteFolder",
+    async () => {
+      const deletedAt = new Date().toISOString();
+      const cloudDeleteQueued = shouldKeepDeleteTombstone(folder);
+      const folderScoreIds = new Set(folderScores.map((score) => score.id));
+      const annotationsForDeleteSync = await readAnnotationsForScoreIds(Array.from(folderScoreIds));
 
-    // 文件夹内的歌谱也先快照到回收站，便于单独恢复。
-    if (folderScores.length) {
-      try {
-        await snapshotScoresToTrash(folderScores);
-      } catch (snapshotError) {
-        console.warn("写入回收站失败", snapshotError);
+      // 文件夹内的歌谱也先快照到回收站，便于单独恢复。
+      if (folderScores.length) {
+        try {
+          if (shouldAttemptTrashSnapshot(folderScores) && (await hasRoomForTrashSnapshot(folderScores))) {
+            await snapshotScoresToTrash(folderScores);
+          } else {
+            console.info("跳过文件夹回收站快照：歌谱图片较大或本地空间不足，优先保证删除完成。");
+          }
+        } catch (snapshotError) {
+          console.warn("写入回收站失败", snapshotError);
+        }
       }
-    }
 
-    if (cloudDeleteQueued) {
-      await markFolderDeletedRecord(folder, folderScores, deletedAt);
-    } else {
-      await deleteFolderRecord(
-        id,
-        folderScores.map((score) => score.id),
+      if (cloudDeleteQueued) {
+        await markFolderDeletedRecord(folder, folderScores, deletedAt);
+      } else {
+        await deleteFolderRecord(
+          id,
+          folderScores.map((score) => score.id),
+        );
+      }
+      folderScores.forEach(revokeScoreUrls);
+      state.folders = state.folders.filter((item) => item.id !== id);
+      state.scores = state.scores.filter((score) => score.folderId !== id);
+      state.scorePages = state.scorePages.filter((page) => !folderScoreIds.has(page.scoreId));
+      state.setlistItems = state.setlistItems.filter((item) => !folderScoreIds.has(item.scoreId));
+      state.annotationRecords.forEach((record, pageId) => {
+        if (folderScoreIds.has(record.scoreId)) {
+          state.annotationRecords.delete(pageId);
+        }
+      });
+      if (state.currentFolderId === id) {
+        state.currentFolderId = null;
+      }
+      renderScores();
+      renderSetlists();
+      if (cloudDeleteQueued) {
+        queueDeleteSyncForFolder(folder, folderScores, deletedAt);
+        queueDeleteSyncForAnnotations(annotationsForDeleteSync, deletedAt);
+      }
+      setStatus(
+        cloudDeleteQueued
+          ? `已删除《${folder.name}》文件夹，正在后台同步到云端。`
+          : `已删除《${folder.name}》文件夹。`,
       );
-    }
-    folderScores.forEach(revokeScoreUrls);
-    state.folders = state.folders.filter((item) => item.id !== id);
-    state.scores = state.scores.filter((score) => score.folderId !== id);
-    state.scorePages = state.scorePages.filter((page) => !folderScoreIds.has(page.scoreId));
-    state.setlistItems = state.setlistItems.filter((item) => !folderScoreIds.has(item.scoreId));
-    state.annotationRecords.forEach((record, pageId) => {
-      if (folderScoreIds.has(record.scoreId)) {
-        state.annotationRecords.delete(pageId);
-      }
-    });
-    if (state.currentFolderId === id) {
-      state.currentFolderId = null;
-    }
-    renderScores();
-    renderSetlists();
-    if (cloudDeleteQueued) {
-      queueDeleteSyncForFolder(folder, folderScores, deletedAt);
-      queueDeleteSyncForAnnotations(annotationsForDeleteSync, deletedAt);
-    }
-    setStatus(
-      cloudDeleteQueued
-        ? `已删除《${folder.name}》文件夹，正在后台同步到云端。`
-        : `已删除《${folder.name}》文件夹。`,
-    );
-  } catch (error) {
-    console.error(error);
-    await recoverDatabaseIfWedged(error);
-    setStatus(getErrorMessage(error) || "删除文件夹失败，请稍后再试。", true);
-  } finally {
-    endUserWrite();
-  }
+      return true;
+    },
+    {
+      actionLabel: "删除文件夹",
+      timeoutMs: Math.max(OPERATION_LOCK_TIMEOUT, folderScores.length * 5000),
+      timeoutMessage: "删除文件夹耗时过长，请重试。",
+      onError: (error) => {
+        console.error(error);
+        setStatus(getStorageErrorMessage(error, "删除文件夹"), true);
+      },
+    },
+  );
 }
 
 async function deleteCloudScore(score, deletedAt = new Date().toISOString()) {
@@ -15653,6 +17372,10 @@ async function warmScorePageTempUrls(pages) {
 }
 
 function queueBackgroundPageHydration(delay = PAGE_BACKGROUND_HYDRATE_DELAY) {
+  if (isUserWriteActive()) {
+    state.pageHydrationQueued = true;
+    return;
+  }
   if (!state.cloudReady || !state.session || !state.scorePages.some(pageNeedsHydration)) {
     return;
   }
@@ -15675,6 +17398,11 @@ async function hydrateMissingScorePagesInBackground() {
     return;
   }
 
+  if (isUserWriteActive()) {
+    state.pageHydrationQueued = true;
+    return;
+  }
+
   if (!state.cloudReady || !state.session) {
     return;
   }
@@ -15687,6 +17415,11 @@ async function hydrateMissingScorePagesInBackground() {
   state.pageHydrationRunning = true;
   try {
     if (!(await ensureCloudMediaReady())) {
+      return;
+    }
+
+    if (isUserWriteActive()) {
+      state.pageHydrationQueued = true;
       return;
     }
 
@@ -15743,7 +17476,11 @@ async function hydrateScorePage(page) {
       storageUploadVersion: STORAGE_UPLOAD_VERSION,
       syncStatus: SYNC_STATUS_SYNCED,
     };
-    await putScorePage(updatedPage);
+    if (isUserWriteActive()) {
+      queueBackgroundPageHydration(2000);
+      return;
+    }
+    await putScorePage(updatedPage, { priority: "background" });
     replaceLocalPage(updatedPage);
     refreshPageImages(updatedPage);
 

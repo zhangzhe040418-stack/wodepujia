@@ -403,6 +403,29 @@ noscript {
   margin: -6px 0 18px;
 }
 
+/* 本地存储用量：放在筛选行最右侧，弱化处理、不抢视觉重点。 */
+.library-storage-usage {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  color: var(--muted);
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.library-storage-usage[hidden] {
+  display: none;
+}
+
+.library-storage-usage.is-high {
+  color: var(--danger, #dc2626);
+  opacity: 0.95;
+}
+
 .library-filter-tabs {
   display: inline-flex;
   align-items: center;
@@ -623,6 +646,8 @@ noscript {
 .mine-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   min-height: 40px;
 }
 
@@ -1136,7 +1161,9 @@ body.usage-screen-open .fab-button,
 body.recycle-bin-screen-open .bottom-nav,
 body.recycle-bin-screen-open .fab-button,
 body.backup-screen-open .bottom-nav,
-body.backup-screen-open .fab-button {
+body.backup-screen-open .fab-button,
+body.support-screen-open .bottom-nav,
+body.support-screen-open .fab-button {
   display: none;
 }
 
@@ -3657,13 +3684,14 @@ body.backup-screen-open .fab-button {
 
 @media (max-width: 520px) {
   .library-filter-bar {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
+    flex-direction: row;
     gap: 8px;
   }
 
   .library-filter-tabs {
-    width: 100%;
+    width: auto;
+    flex: 0 1 auto;
   }
 
   .library-filter-button {
@@ -6983,10 +7011,12 @@ body::before {
 }
 
 .app-version-tag {
-  margin: 18px 0 0;
+  margin: 0;
   color: var(--muted);
-  font-size: 0.74rem;
-  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  align-self: center;
 }
 
 /* ===== Annotation layer ===== */
@@ -7184,4 +7214,555 @@ body::before {
 
 :root[data-theme="dark"] .annotation-toolbar {
   box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
+}
+
+/* ---------- 生日祝福弹窗 ---------- */
+.birthday-dialog {
+  border: none;
+  padding: 0;
+  margin: auto;
+  max-width: min(92vw, 420px);
+  background: transparent;
+  overflow: visible;
+}
+
+.birthday-dialog::backdrop {
+  background: radial-gradient(circle at 50% 30%, rgba(255, 138, 101, 0.35), rgba(20, 10, 30, 0.66));
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+.birthday-surface {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 30px 26px 26px;
+  border-radius: 24px;
+  text-align: center;
+  color: #5a2a00;
+  background: radial-gradient(120% 80% at 50% -10%, #fff6e9 0%, #ffe6c7 45%, #ffd1e3 100%);
+  box-shadow: 0 24px 60px rgba(214, 92, 92, 0.32), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+  animation: birthday-pop 0.42s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+
+@keyframes birthday-pop {
+  0% {
+    transform: scale(0.8) translateY(12px);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+  }
+}
+
+.birthday-confetti {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  font-size: 20px;
+  pointer-events: none;
+}
+
+.birthday-confetti span {
+  animation: birthday-float 2.6s ease-in-out infinite;
+}
+
+.birthday-confetti span:nth-child(2) {
+  animation-delay: 0.3s;
+}
+.birthday-confetti span:nth-child(3) {
+  animation-delay: 0.6s;
+}
+.birthday-confetti span:nth-child(4) {
+  animation-delay: 0.9s;
+}
+.birthday-confetti span:nth-child(5) {
+  animation-delay: 1.2s;
+}
+.birthday-confetti span:nth-child(6) {
+  animation-delay: 1.5s;
+}
+
+@keyframes birthday-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-6deg);
+  }
+  50% {
+    transform: translateY(-7px) rotate(6deg);
+  }
+}
+
+.birthday-cake {
+  font-size: 46px;
+  line-height: 1;
+  animation: birthday-bounce 1.6s ease-in-out infinite;
+  filter: drop-shadow(0 6px 10px rgba(214, 92, 92, 0.3));
+}
+
+@keyframes birthday-bounce {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-6px) scale(1.05);
+  }
+}
+
+.birthday-title {
+  margin: 0;
+  font-size: clamp(1.5rem, 6vw, 1.9rem);
+  font-weight: 900;
+  letter-spacing: 1px;
+  background: linear-gradient(90deg, #ff6f61, #ff9e43, #ff5fa2);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.birthday-message {
+  margin: 0;
+  max-width: 30ch;
+  font-size: 1rem;
+  line-height: 1.7;
+  font-weight: 600;
+  color: #6b3b1a;
+}
+
+.birthday-close-button {
+  margin-top: 6px;
+  min-height: 46px;
+  padding: 0 30px;
+  border: none;
+  border-radius: 999px;
+  font-size: 1rem;
+  font-weight: 800;
+  color: #ffffff;
+  background: linear-gradient(135deg, #ff7a59, #ff4f8b);
+  box-shadow: 0 10px 22px rgba(255, 79, 139, 0.4);
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
+}
+
+.birthday-close-button:active {
+  transform: scale(0.95);
+}
+
+:root[data-theme="dark"] .birthday-surface {
+  color: #ffe9d6;
+  background: radial-gradient(120% 80% at 50% -10%, #3a2a1e 0%, #4a2733 55%, #3a2036 100%);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="dark"] .birthday-message {
+  color: #ffd9c2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .birthday-surface,
+  .birthday-confetti span,
+  .birthday-cake {
+    animation: none;
+  }
+}
+
+/* ---------- 支持作者 ---------- */
+/* “使用说明”order:1，“支持作者”排在其后。 */
+.mine-menu #supportAuthorButton {
+  order: 2;
+}
+
+/* 账号管理整体下移：与上方菜单留出明显间距，并尽量贴到面板底部。 */
+.mine-auth-panel {
+  margin-top: auto;
+  padding-top: 18px;
+}
+
+.support-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.support-content {
+  display: grid;
+  gap: 12px;
+  color: var(--ink);
+  line-height: 1.85;
+  font-size: 0.96rem;
+}
+
+.support-content p {
+  margin: 0;
+}
+
+.support-hero {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 4px 0 2px;
+  font-size: 40px;
+  line-height: 1;
+}
+
+.support-hero-heart {
+  animation: support-heart 1.6s ease-in-out infinite;
+}
+
+@keyframes support-heart {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.18);
+  }
+}
+
+.support-lead {
+  font-size: 1.06rem;
+  font-weight: 800;
+  text-align: center;
+  color: var(--ink);
+}
+
+.support-closing {
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.support-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
+.support-decline-button,
+.support-accept-button {
+  flex: 1 1 0;
+  min-height: 50px;
+  border-radius: 14px;
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.support-decline-button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.support-decline-button:active {
+  transform: scale(0.97);
+  background: var(--accent-soft);
+}
+
+.support-accept-button {
+  border: none;
+  color: #ffffff;
+  background: linear-gradient(135deg, #ff7a59, #ff4f8b);
+  box-shadow: 0 12px 24px rgba(255, 79, 139, 0.34);
+}
+
+.support-accept-button:active {
+  transform: scale(0.97);
+  box-shadow: 0 6px 14px rgba(255, 79, 139, 0.34);
+}
+
+/* ---------- 收款码弹窗 ---------- */
+.support-pay-dialog {
+  border: none;
+  padding: 0;
+  margin: auto;
+  max-width: min(92vw, 380px);
+  background: transparent;
+  overflow: visible;
+}
+
+.support-pay-dialog::backdrop {
+  background: rgba(15, 18, 24, 0.55);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+.support-pay-surface {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 22px 22px;
+  border-radius: 22px;
+  text-align: center;
+  color: #ffffff;
+  background: linear-gradient(160deg, #2ba24a 0%, #1f8f3f 100%);
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.34);
+  transition: background 0.25s ease;
+  animation: birthday-pop 0.36s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+
+.support-pay-surface[data-pay="alipay"] {
+  background: linear-gradient(160deg, #2f9bff 0%, #1677ff 100%);
+}
+
+.support-pay-close,
+.support-pay-save {
+  position: absolute;
+  top: 8px;
+  width: 38px;
+  height: 38px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.support-pay-close {
+  right: 8px;
+}
+
+.support-pay-save {
+  left: 8px;
+}
+
+.support-pay-close:hover,
+.support-pay-close:focus-visible,
+.support-pay-save:hover,
+.support-pay-save:focus-visible {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.support-pay-title {
+  margin: 2px 0 0;
+  font-size: 1.15rem;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: #ffffff;
+}
+
+.support-pay-tabs {
+  display: inline-flex;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.support-pay-tab {
+  min-width: 88px;
+  min-height: 38px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.support-pay-tab.is-active {
+  background: #ffffff;
+  color: #1f8f3f;
+}
+
+.support-pay-surface[data-pay="alipay"] .support-pay-tab.is-active {
+  color: #1677ff;
+}
+
+.support-pay-qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(74vw, 260px);
+  aspect-ratio: 1 / 1;
+  padding: 12px;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+.support-pay-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+}
+
+.support-pay-img[hidden] {
+  display: none;
+}
+
+.support-pay-hint {
+  /* 整块在弹窗内居中，但两行左边缘对齐（第二行与第一行起点对齐）。 */
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.6;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.support-pay-hint-line {
+  display: block;
+}
+
+/* 正文内“加粗一点点”的强调（颜色不变）。 */
+.support-content strong {
+  font-weight: 600;
+  color: inherit;
+}
+
+/* 支持作者页面：禁止上下橡皮筋拖动，边缘固定。 */
+.support-screen {
+  overscroll-behavior: none;
+}
+
+:root[data-theme="dark"] .support-decline-button {
+  background: #25221b;
+  border-color: #3a352b;
+  color: var(--muted);
+}
+
+/* ---------- 本地存储恢复弹窗 ---------- */
+.db-recovery-dialog {
+  border: none;
+  padding: 0;
+  margin: auto;
+  max-width: min(92vw, 380px);
+  background: transparent;
+  overflow: visible;
+}
+
+.db-recovery-dialog::backdrop {
+  background: rgba(15, 18, 24, 0.58);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+.db-recovery-surface {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 26px 24px 22px;
+  border-radius: 20px;
+  text-align: center;
+  color: var(--ink);
+  background: var(--surface-strong);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.32);
+  animation: birthday-pop 0.34s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+
+.db-recovery-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  color: #ffffff;
+  background: linear-gradient(135deg, #ff9e43, #ff5f6d);
+  box-shadow: 0 10px 22px rgba(255, 95, 109, 0.34);
+}
+
+.db-recovery-icon .lucide,
+.db-recovery-icon [data-lucide] {
+  width: 26px;
+  height: 26px;
+}
+
+.db-recovery-title {
+  margin: 2px 0 0;
+  font-size: 1.16rem;
+  font-weight: 900;
+  color: var(--ink);
+}
+
+.db-recovery-text {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.db-recovery-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 6px;
+}
+
+.db-recovery-later,
+.db-recovery-retry {
+  flex: 1 1 0;
+  min-height: 46px;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.db-recovery-later {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.db-recovery-later:active {
+  transform: scale(0.97);
+  background: var(--accent-soft);
+}
+
+.db-recovery-retry {
+  border: none;
+  color: #ffffff;
+  background: linear-gradient(135deg, #ff7a59, #ff4f6d);
+  box-shadow: 0 10px 22px rgba(255, 79, 109, 0.36);
+}
+
+.db-recovery-retry:active {
+  transform: scale(0.97);
+}
+
+.db-recovery-retry:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.db-recovery-reset {
+  margin-top: 4px;
+  padding: 6px 4px;
+  border: none;
+  background: transparent;
+  color: var(--danger, #dc2626);
+  font-size: 0.86rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.db-recovery-reset:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+:root[data-theme="dark"] .db-recovery-later {
+  background: #25221b;
+  border-color: #3a352b;
+  color: var(--muted);
 }
