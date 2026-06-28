@@ -1,8 +1,9 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 10;
+const DB_VERSION = 11;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
+const ASSET_STORE_NAME = "assets";
 const SETLIST_STORE_NAME = "setlists";
 const SETLIST_ITEM_STORE_NAME = "setlist_items";
 const TRASH_STORE_NAME = "trash";
@@ -10,9 +11,9 @@ const ANNOTATION_STORE_NAME = "annotations";
 const SYNC_OUTBOX_STORE_NAME = "sync_outbox";
 const LOCAL_OP_STORE_NAME = "local_ops";
 const BACKUP_FORMAT = "my-score-folder-backup";
-const BACKUP_VERSION = 1;
+const BACKUP_VERSION = 2;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v222";
+const APP_BUILD = "v224";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -142,6 +143,7 @@ const state = {
   pendingUrls: new Map(),
   pageThumbUrls: new Map(),
   pageThumbRequests: new Map(),
+  pageAssetUrlRequests: new Map(),
   // 列表封面 objectURL 缓存：scoreId -> { sig, url }，按内容签名复用，避免每次 loadScores 误回收正在显示的 URL。
   scoreCoverUrls: new Map(),
   // 已显示封面的粘性缓存：scoreId -> url。进入 app 解析一次后，后续渲染直接复用，不再重载、不回退占位。
@@ -158,6 +160,8 @@ const state = {
   pageHydrationTimer: 0,
   pageHydrationRunning: false,
   pageHydrationQueued: false,
+  legacyPageAssetMigrationTimer: 0,
+  legacyPageAssetMigrationRunning: false,
   outboxProcessing: false,
   outboxTimer: 0,
   outboxCounts: { pending: 0, failed: 0 },
@@ -4947,7 +4951,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=238");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=240");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -5814,9 +5818,11 @@ async function loadScores() {
   renderScores();
   renderSetlists();
   refreshVisibleScoreImages();
+  preloadAllScoreCovers({ includeCloud: state.cloudReady && Boolean(state.session) }).catch((error) => console.warn(error));
   // 列表封面优先加载：立即显示已有缩略图、为缺失的本地封面后台生成，云端就绪时取临时URL。
   preloadAllScoreCovers({ includeCloud: state.cloudReady && Boolean(state.session) }).catch((error) => console.warn(error));
     queueBackgroundPageHydration();
+    scheduleLegacyPageAssetMigration();
   } catch (error) {
     console.warn("读取本地谱夹失败，已保留当前页面数据。", error);
     if (isLocalDatabaseNotReadyError(error)) {
@@ -5944,6 +5950,40 @@ function openDatabase() {
         }
         if (!pageStore.indexNames.contains("deletedAt")) {
           pageStore.createIndex("deletedAt", "deletedAt", { unique: false });
+        }
+      }
+
+      if (!db.objectStoreNames.contains(ASSET_STORE_NAME)) {
+        const assetStore = db.createObjectStore(ASSET_STORE_NAME, { keyPath: "id" });
+        assetStore.createIndex("by_score", "scoreId", { unique: false });
+        assetStore.createIndex("by_page", "pageId", { unique: false });
+        assetStore.createIndex("by_kind", "kind", { unique: false });
+        assetStore.createIndex("by_hash", "hash", { unique: false });
+        assetStore.createIndex("by_localState", "localState", { unique: false });
+        assetStore.createIndex("by_cloudPath", "cloudPath", { unique: false });
+        assetStore.createIndex("by_updatedAt", "updatedAt", { unique: false });
+      } else {
+        const assetStore = request.transaction.objectStore(ASSET_STORE_NAME);
+        if (!assetStore.indexNames.contains("by_score")) {
+          assetStore.createIndex("by_score", "scoreId", { unique: false });
+        }
+        if (!assetStore.indexNames.contains("by_page")) {
+          assetStore.createIndex("by_page", "pageId", { unique: false });
+        }
+        if (!assetStore.indexNames.contains("by_kind")) {
+          assetStore.createIndex("by_kind", "kind", { unique: false });
+        }
+        if (!assetStore.indexNames.contains("by_hash")) {
+          assetStore.createIndex("by_hash", "hash", { unique: false });
+        }
+        if (!assetStore.indexNames.contains("by_localState")) {
+          assetStore.createIndex("by_localState", "localState", { unique: false });
+        }
+        if (!assetStore.indexNames.contains("by_cloudPath")) {
+          assetStore.createIndex("by_cloudPath", "cloudPath", { unique: false });
+        }
+        if (!assetStore.indexNames.contains("by_updatedAt")) {
+          assetStore.createIndex("by_updatedAt", "updatedAt", { unique: false });
         }
       }
 
@@ -6631,6 +6671,226 @@ async function readStoreRecord(storeName, id) {
   return result.record || null;
 }
 
+function createAssetId(prefix = "asset") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getAssetIdForPage(page) {
+  return page?.assetId || page?.imageAssetId || "";
+}
+
+function stripPageBlob(page) {
+  if (!page) {
+    return page;
+  }
+  const { blob, file, dataUrl, blobData, blobType, displayUrl, objectUrl, previewUrl, tempUrl, ...rest } = page;
+  return rest;
+}
+
+function normalizePageForStore(page) {
+  if (!page) {
+    return page;
+  }
+  const clean = stripPageBlob(page);
+  return {
+    ...clean,
+    id: String(clean.id || createId()),
+    scoreId: String(clean.scoreId || ""),
+    userId: clean.userId || null,
+    pageIndex: Number.isInteger(clean.pageIndex) ? clean.pageIndex : 0,
+    name: clean.name || "歌谱图片",
+    type: clean.type || clean.mimeType || "image/jpeg",
+    size: Number(clean.size) || 0,
+    width: Number(clean.width) || 0,
+    height: Number(clean.height) || 0,
+    assetId: clean.assetId || clean.imageAssetId || "",
+    thumbnailAssetId: clean.thumbnailAssetId || "",
+    storagePath: clean.storagePath || null,
+    storageSyncedAt: clean.storageSyncedAt || null,
+    storageUploadVersion: Number(clean.storageUploadVersion) || 0,
+    createdAt: clean.createdAt || new Date().toISOString(),
+    updatedAt: clean.updatedAt || clean.createdAt || new Date().toISOString(),
+    deletedAt: clean.deletedAt || null,
+    syncStatus: clean.syncStatus || SYNC_STATUS_LOCAL,
+  };
+}
+
+function buildPageAssetRecord(page, blob, options = {}) {
+  const now = new Date().toISOString();
+  const mimeType = blob?.type || page?.type || options.mimeType || "image/jpeg";
+  return {
+    id: options.assetId || page?.assetId || createAssetId("asset"),
+    kind: options.kind || "page-image",
+    scoreId: page?.scoreId || options.scoreId || "",
+    pageId: page?.id || options.pageId || "",
+    userId: page?.userId || options.userId || state.session?.user?.id || "",
+    blob: blob || null,
+    mimeType,
+    size: Number(blob?.size || page?.size || options.size) || 0,
+    width: Number(page?.width || options.width) || 0,
+    height: Number(page?.height || options.height) || 0,
+    hash: options.hash || page?.hash || "",
+    localState: blob ? "ready" : "missing",
+    cloudPath: page?.storagePath || options.cloudPath || "",
+    storagePath: page?.storagePath || options.storagePath || "",
+    storageSyncedAt: page?.storageSyncedAt || "",
+    storageUploadVersion: Number(page?.storageUploadVersion || options.storageUploadVersion) || 0,
+    createdAt: page?.createdAt || now,
+    updatedAt: now,
+    deletedAt: page?.deletedAt || "",
+    error: "",
+  };
+}
+
+function getAllAssets() {
+  return readStoreAll(ASSET_STORE_NAME);
+}
+
+function putAsset(asset, options = {}) {
+  return enqueueLocalWrite(
+    "putAsset",
+    () =>
+      runIdbTransaction(
+        ASSET_STORE_NAME,
+        "readwrite",
+        (store) => {
+          store.put(asset);
+        },
+        {
+          timeoutMs: options.timeoutMs || getBlobWriteTimeout(asset?.blob?.size || asset?.size),
+          timeoutMessage: "保存页面资源超时，请稍后重试。",
+        },
+      ),
+    {
+      priority: options.priority || getInheritedLocalWritePriority(),
+      label: "putAsset",
+      timeoutMs: options.timeoutMs || getBlobWriteTimeout(asset?.blob?.size || asset?.size),
+    },
+  );
+}
+
+function getAsset(assetId) {
+  if (!assetId) {
+    return Promise.resolve(null);
+  }
+  return readStoreRecord(ASSET_STORE_NAME, String(assetId));
+}
+
+async function getAssetByPageId(pageId) {
+  if (!pageId) {
+    return null;
+  }
+  const result = await runIdbTransaction(
+    ASSET_STORE_NAME,
+    "readonly",
+    (store, transaction) => {
+      const output = { rows: [] };
+      const request = store.index("by_page").getAll(String(pageId));
+      request.onsuccess = () => {
+        output.rows = request.result || [];
+      };
+      request.onerror = () => {
+        try {
+          transaction.abort();
+        } catch (error) {
+          console.warn(error);
+        }
+      };
+      return output;
+    },
+    { timeoutMessage: "读取页面资源超时，请重试。" },
+  );
+  return (result.rows || [])
+    .filter((asset) => !asset.deletedAt && asset.kind === "page-image")
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
+}
+
+async function getPageAsset(page) {
+  const assetId = getAssetIdForPage(page);
+  if (assetId) {
+    return getAsset(assetId);
+  }
+  return getAssetByPageId(page?.id);
+}
+
+async function getPageBlob(page) {
+  if (page?.blob instanceof Blob && page.blob.size > 0) {
+    return page.blob;
+  }
+
+  const asset = await getPageAsset(page);
+  if (asset?.blob instanceof Blob && asset.blob.size > 0) {
+    return asset.blob;
+  }
+
+  // Legacy fallback: older score_pages records may still contain blob until lazy migration finishes.
+  if (page?.id) {
+    const legacy = await readStoreRecord(PAGE_STORE_NAME, page.id).catch(() => null);
+    if (legacy?.blob instanceof Blob && legacy.blob.size > 0) {
+      return legacy.blob;
+    }
+  }
+
+  return null;
+}
+
+function cachePageObjectUrl(page, blob) {
+  if (!page?.id || !(blob instanceof Blob) || blob.size <= 0) {
+    return "";
+  }
+  const existing = state.scoreUrls.get(page.id);
+  if (existing) {
+    return existing;
+  }
+  const url = URL.createObjectURL(blob);
+  state.scoreUrls.set(page.id, url);
+  return url;
+}
+
+function ensurePageAssetDisplayUrl(page) {
+  if (!page?.id || state.scoreUrls.has(page.id) || state.pageAssetUrlRequests.has(page.id)) {
+    return;
+  }
+  const request = getPageBlob(page)
+    .then((blob) => {
+      if (!(blob instanceof Blob) || blob.size <= 0) {
+        return "";
+      }
+      const url = cachePageObjectUrl(page, blob);
+      refreshPageImages({ ...page, blob });
+      return url;
+    })
+    .catch((error) => {
+      console.warn("读取页面资源失败", error);
+      return "";
+    })
+    .finally(() => {
+      state.pageAssetUrlRequests.delete(page.id);
+    });
+  state.pageAssetUrlRequests.set(page.id, request);
+}
+
+async function markPageAssetStorageSynced(page, metadata = {}, options = {}) {
+  const asset = await getPageAsset(page);
+  if (!asset) {
+    return;
+  }
+  await putAsset(
+    {
+      ...asset,
+      storagePath: metadata.storagePath || asset.storagePath || "",
+      cloudPath: metadata.storagePath || asset.cloudPath || "",
+      storageSyncedAt: metadata.storageSyncedAt || asset.storageSyncedAt || "",
+      storageUploadVersion: Number(metadata.storageUploadVersion || asset.storageUploadVersion) || 0,
+      size: Number(metadata.size || asset.size) || 0,
+      localState: asset.blob ? "ready" : asset.localState || "missing",
+      error: "",
+      updatedAt: new Date().toISOString(),
+    },
+    { priority: options.priority || "low" },
+  );
+}
+
 function deleteStoreRecord(storeName, id, timeoutMessage = "本地删除超时，请重试。") {
   return enqueueLocalWrite(`delete:${storeName}`, () =>
     runIdbTransaction(
@@ -6771,9 +7031,9 @@ async function migrateNestedScorePages(scores) {
   }
 
   await runIdbTransaction(
-    [STORE_NAME, PAGE_STORE_NAME],
+    [STORE_NAME, PAGE_STORE_NAME, ASSET_STORE_NAME],
     "readwrite",
-    ([scoreStore, pageStore]) => {
+    ([scoreStore, pageStore, assetStore]) => {
       nestedScores.forEach((score) => {
         const pages = score.pages.map((page, index) => ({
           id: page.id || createId(),
@@ -6783,6 +7043,7 @@ async function migrateNestedScorePages(scores) {
           name: page.name || `第 ${index + 1} 页`,
           type: page.type || page.blob?.type || "image/jpeg",
           size: Number(page.size) || page.blob?.size || 0,
+          assetId: page.assetId || (page.blob ? createAssetId("asset") : ""),
           blob: page.blob,
           storagePath: page.storagePath || null,
           storageSyncedAt: page.storageSyncedAt || null,
@@ -6798,8 +7059,13 @@ async function migrateNestedScorePages(scores) {
         });
 
         scoreStore.put(record);
-        pages.forEach((page) => pageStore.put(page));
-        score.__migratedPages = pages;
+        pages.forEach((page) => {
+          if (page.blob instanceof Blob && page.blob.size > 0) {
+            assetStore.put(buildPageAssetRecord(page, page.blob, { assetId: page.assetId }));
+          }
+          pageStore.put(normalizePageForStore(page));
+        });
+        score.__migratedPages = pages.map(normalizePageForStore);
       });
     },
     { timeoutMessage: "迁移本地歌谱页面超时，请重试。" },
@@ -6858,24 +7124,12 @@ function normalizeLocalFolderRecord(folder) {
 }
 
 function normalizeLocalPageRecord(page) {
-  return {
+  return normalizePageForStore({
     ...page,
-    id: String(page.id || createId()),
-    scoreId: String(page.scoreId || ""),
-    userId: page.userId || null,
-    pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : 0,
     name: page.name || "歌谱图片",
     type: page.type || page.blob?.type || "image/jpeg",
     size: Number(page.size) || page.blob?.size || 0,
-    blob: page.blob,
-    storagePath: page.storagePath || null,
-    storageSyncedAt: page.storageSyncedAt || null,
-    storageUploadVersion: Number(page.storageUploadVersion) || 0,
-    createdAt: page.createdAt || new Date().toISOString(),
-    updatedAt: page.updatedAt || page.createdAt || new Date().toISOString(),
-    deletedAt: page.deletedAt || null,
-    syncStatus: page.syncStatus || SYNC_STATUS_LOCAL,
-  };
+  });
 }
 
 function normalizeLocalSetlistRecord(setlist) {
@@ -7045,16 +7299,24 @@ async function saveScoreLocalAtomic(score, pages, options = {}) {
   const requireBlobs = options.requireBlobs !== false;
   const preparedScore = normalizeLocalScoreRecord(score);
   const preparedPages = pages.map((page, index) => {
-    const normalizedPage = normalizeLocalPageRecord({
+    const preparedPage = {
       ...page,
+      id: String(page.id || createId()),
       scoreId: preparedScore.id,
+      userId: page.userId || preparedScore.userId || null,
       pageIndex: Number.isInteger(page.pageIndex) ? page.pageIndex : index,
+      name: page.name || "姝岃氨鍥剧墖",
+      type: page.type || page.blob?.type || "image/jpeg",
+      size: Number(page.size) || page.blob?.size || 0,
+      createdAt: page.createdAt || new Date().toISOString(),
+      updatedAt: page.updatedAt || page.createdAt || new Date().toISOString(),
+      deletedAt: page.deletedAt || null,
       syncStatus: page.syncStatus || preparedScore.syncStatus || SYNC_STATUS_LOCAL,
-    });
-    if (requireBlobs || normalizedPage.blob) {
-      return normalizePageBlob(normalizedPage);
+    };
+    if (requireBlobs || preparedPage.blob) {
+      return normalizePageBlob(preparedPage);
     }
-    return normalizedPage;
+    return normalizeLocalPageRecord(preparedPage);
   });
 
   // 生成持久封面缩略图并写入 score（失败不影响保存，仅影响封面缓存，之后可重试）。
@@ -7065,27 +7327,49 @@ async function saveScoreLocalAtomic(score, pages, options = {}) {
   // iOS Safari 的 IndexedDB 在单事务存多个大 Blob 时容易卡死/超时，分开写更可靠，
   // 也能给出“正在保存第 N 页”的进度，并在失败时精确清理。
   const writtenPageIds = [];
+  const writtenAssetIds = [];
+  const storedPages = [];
   try {
     for (let index = 0; index < preparedPages.length; index += 1) {
       const page = preparedPages[index];
       options.onProgress?.(index + 1, preparedPages.length);
+      const blob = page.blob instanceof Blob && page.blob.size > 0 ? page.blob : null;
+      let pageForStore = page;
+      if (blob) {
+        const assetId = page.assetId || createAssetId("asset");
+        const asset = buildPageAssetRecord({ ...page, assetId }, blob, { assetId });
+        await putAsset(asset, {
+          timeoutMs: getBlobWriteTimeout(blob.size),
+        });
+        writtenAssetIds.push(asset.id);
+        pageForStore = normalizePageForStore({
+          ...page,
+          assetId,
+          type: blob.type || page.type,
+          size: blob.size,
+        });
+        cachePageObjectUrl(pageForStore, blob);
+      } else {
+        pageForStore = normalizePageForStore(page);
+      }
       await putStoreRecord(
         PAGE_STORE_NAME,
-        page,
-        getBlobWriteTimeout(page.blob?.size || page.size),
+        pageForStore,
+        LOCAL_SAVE_TIMEOUT,
         `第 ${index + 1} 页图片保存较慢，请重试，或减小图片体积 / 减少单次添加数量。`,
       );
-      writtenPageIds.push(page.id);
+      writtenPageIds.push(pageForStore.id);
+      storedPages.push(pageForStore);
       await nextFrame();
     }
     // 元数据最后写入，作为“提交点”：歌谱记录写成功，这份歌谱才算存在。
     await putStoreRecord(STORE_NAME, toScoreRecord(preparedScore), LOCAL_SAVE_TIMEOUT);
   } catch (error) {
     // 失败清理：删除本次已写入的页，避免留下孤立页；新歌谱记录尚未写入故不会出现在列表中。
-    await cleanupPartialScoreSave(preparedScore.id, writtenPageIds);
+    await cleanupPartialScoreSave(preparedScore.id, writtenPageIds, writtenAssetIds);
     throw error;
   }
-  return { score: preparedScore, pages: preparedPages };
+  return { score: preparedScore, pages: storedPages };
 }
 
 // 按 Blob 大小给出写入超时：小图给基础时长，大图按每 MB 递增，避免大图在慢设备上被误判为超时。
@@ -7108,18 +7392,19 @@ function toDeletedPageTombstone(page, userId, deletedAt) {
 }
 
 // 清理一次未完成的保存：删除已写入的页与（可能尚未写入的）歌谱记录，尽力而为、不抛错。
-function cleanupPartialScoreSave(scoreId, pageIds) {
-  if (!scoreId && !(pageIds && pageIds.length)) {
+function cleanupPartialScoreSave(scoreId, pageIds, assetIds = []) {
+  if (!scoreId && !(pageIds && pageIds.length) && !(assetIds && assetIds.length)) {
     return Promise.resolve();
   }
   // 清理尽力而为：失败也不抛错，避免影响主流程。
   return enqueueLocalWrite("cleanupPartialScoreSave", () =>
     runIdbTransaction(
-      [STORE_NAME, PAGE_STORE_NAME],
+      [STORE_NAME, PAGE_STORE_NAME, ASSET_STORE_NAME],
       "readwrite",
-      ([scoreStore, pageStore]) => {
+      ([scoreStore, pageStore, assetStore]) => {
         scoreStore.delete(scoreId);
         (pageIds || []).forEach((id) => pageStore.delete(id));
+        (assetIds || []).forEach((id) => assetStore.delete(id));
       },
       { timeoutMessage: "清理未完成的保存超时。" },
     ),
@@ -7547,13 +7832,14 @@ function triggerFileDownload(filename, blob) {
 }
 
 async function exportFullBackup() {
-  const [scoreRecords, pageRecords, folderRecords, setlistRecords, setlistItemRecords, annotationRecords] = await Promise.all([
+  const [scoreRecords, pageRecords, folderRecords, setlistRecords, setlistItemRecords, annotationRecords, assetRecords] = await Promise.all([
     getAllScores(),
     getAllScorePages(),
     getAllFolders(),
     getAllSetlists(),
     getAllSetlistItems(),
     getAllAnnotations(),
+    getAllAssets(),
   ]);
 
   const activeScores = scoreRecords.filter((score) => !score.deletedAt);
@@ -7573,21 +7859,44 @@ async function exportFullBackup() {
       activePageIdSet.has(String(annotation.pageId)),
   );
 
-  const encodedPages = [];
-  for (const page of activePages) {
-    let blobData = null;
-    let blobType = page.type || "";
-    if (page.blob && page.blob.size > 0) {
-      try {
-        const encoded = await blobToBase64(page.blob);
-        blobData = encoded.data;
-        blobType = encoded.type || blobType;
-      } catch (error) {
-        console.warn("图片编码失败，已跳过该页图片数据。", error);
-      }
+  const assetById = new Map((assetRecords || []).map((asset) => [String(asset.id), asset]));
+  const assetByPageId = new Map();
+  (assetRecords || []).forEach((asset) => {
+    if (asset.pageId && !asset.deletedAt && asset.kind === "page-image") {
+      assetByPageId.set(String(asset.pageId), asset);
     }
-    const { blob, ...rest } = page;
-    encodedPages.push({ ...rest, blobData, blobType });
+  });
+
+  const encodedPages = [];
+  const encodedAssets = [];
+  const exportedAssetIds = new Set();
+  for (const page of activePages) {
+    const pageMeta = normalizePageForStore(page);
+    let asset = pageMeta.assetId ? assetById.get(String(pageMeta.assetId)) : assetByPageId.get(String(page.id));
+    let assetId = pageMeta.assetId || asset?.id || "";
+    let blob = asset?.blob instanceof Blob ? asset.blob : null;
+    if (!blob && page.blob instanceof Blob && page.blob.size > 0) {
+      assetId = assetId || createAssetId("backup-asset");
+      blob = page.blob;
+      asset = buildPageAssetRecord({ ...pageMeta, assetId }, blob, { assetId });
+    }
+    if (asset && !exportedAssetIds.has(String(asset.id))) {
+      let blobData = null;
+      let blobType = asset.mimeType || page.type || "";
+      try {
+        if (blob) {
+          const encoded = await blobToBase64(blob);
+          blobData = encoded.data;
+          blobType = encoded.type || blobType;
+        }
+      } catch (error) {
+        console.warn("图片资源编码失败，已跳过该资源数据。", error);
+      }
+      const { blob: ignoredBlob, ...assetRest } = asset;
+      encodedAssets.push({ ...assetRest, id: asset.id, blobData, blobType });
+      exportedAssetIds.add(String(asset.id));
+    }
+    encodedPages.push({ ...pageMeta, assetId });
   }
 
   const backup = {
@@ -7597,6 +7906,7 @@ async function exportFullBackup() {
     folders: activeFolders.map(({ blob, ...rest }) => rest),
     scores: activeScores.map(({ blob, pages, ...rest }) => rest),
     pages: encodedPages,
+    assets: encodedAssets,
     setlists: activeSetlists,
     setlistItems: activeItems,
     annotations: activeAnnotations,
@@ -7659,6 +7969,7 @@ async function importFullBackup(file) {
     list.push(page);
     pagesByScore.set(key, list);
   });
+  const backupAssetById = new Map((data.assets || []).map((asset) => [String(asset.id), asset]));
   const pageIdMap = new Map();
 
   // 歌谱按“所在文件夹 + 名称”去重：同一位置同名才跳过，不同文件夹允许同名。
@@ -7693,8 +8004,13 @@ async function importFullBackup(file) {
     };
     const sourcePages = (pagesByScore.get(String(score.id)) || []).slice().sort((a, b) => a.pageIndex - b.pageIndex);
     const newPages = sourcePages.map((page, index) => {
-      const restoredBlob = page.blobData ? base64ToBlob(page.blobData, page.blobType || page.type) : null;
-      const { blobData, blobType, blob: ignoredBlob, ...pageRest } = page;
+      const sourceAsset = page.assetId ? backupAssetById.get(String(page.assetId)) : null;
+      const restoredBlob = sourceAsset?.blobData
+        ? base64ToBlob(sourceAsset.blobData, sourceAsset.blobType || sourceAsset.mimeType || page.type)
+        : page.blobData
+          ? base64ToBlob(page.blobData, page.blobType || page.type)
+          : null;
+      const { blobData, blobType, blob: ignoredBlob, assetId: ignoredAssetId, thumbnailAssetId: ignoredThumbAssetId, ...pageRest } = page;
       const newPageId = createId();
       pageIdMap.set(String(page.id), newPageId);
       return {
@@ -7706,9 +8022,11 @@ async function importFullBackup(file) {
         blob: restoredBlob,
         type: restoredBlob ? restoredBlob.type : page.type,
         size: restoredBlob ? restoredBlob.size : page.size,
-        storagePath: null,
-        storageSyncedAt: null,
-        storageUploadVersion: 0,
+        assetId: "",
+        thumbnailAssetId: "",
+        storagePath: restoredBlob ? null : page.storagePath || sourceAsset?.storagePath || null,
+        storageSyncedAt: restoredBlob ? null : page.storageSyncedAt || sourceAsset?.storageSyncedAt || null,
+        storageUploadVersion: restoredBlob ? 0 : Number(page.storageUploadVersion || sourceAsset?.storageUploadVersion) || 0,
         deletedAt: null,
         createdAt: now,
         updatedAt: now,
@@ -8238,7 +8556,7 @@ async function putScoreWithPages(score, pages, options = {}) {
 function putScorePage(page, options = {}) {
   return putStoreRecord(
     PAGE_STORE_NAME,
-    page,
+    normalizePageForStore(page),
     options.timeoutMs || LOCAL_SAVE_TIMEOUT,
     options.timeoutMessage || "页面写入超时，请重试。",
     options,
@@ -8252,7 +8570,7 @@ function putScorePageChanges(score, activePages, deletedPages = []) {
       "readwrite",
       ([scoreStore, pageStore]) => {
         scoreStore.put(toScoreRecord(score));
-        [...activePages, ...deletedPages].forEach((page) => pageStore.put(page));
+        [...activePages, ...deletedPages].forEach((page) => pageStore.put(normalizePageForStore(page)));
       },
       { timeoutMessage: "页面保存超时，请重试。" },
     ),
@@ -8363,13 +8681,13 @@ async function markScoreDeletedRecord(score, deletedAt) {
           syncStatus: SYNC_STATUS_PENDING,
         });
         pages.forEach((page) => {
-          pageStore.put({
+          pageStore.put(normalizePageForStore({
             ...page,
             userId: page.userId || userId,
             deletedAt,
             updatedAt: deletedAt,
             syncStatus: SYNC_STATUS_PENDING,
-          });
+          }));
         });
         annotations.forEach((annotation) => {
           annotationStore.put({
@@ -8419,13 +8737,13 @@ async function markFolderDeletedRecord(folder, folderScores, deletedAt) {
             syncStatus: SYNC_STATUS_PENDING,
           });
           (score.pages || []).forEach((page) => {
-            pageStore.put({
+            pageStore.put(normalizePageForStore({
               ...page,
               userId: page.userId || scoreUserId,
               deletedAt,
               updatedAt: deletedAt,
               syncStatus: SYNC_STATUS_PENDING,
-            });
+            }));
           });
           (annotationsByScore.get(String(score.id)) || []).forEach((annotation) => {
             annotationStore.put({
@@ -8998,7 +9316,8 @@ function getPageManagerPages() {
       return {
         ...latestPage,
         ...page,
-        blob: page.blob?.size > 0 ? page.blob : latestPage.blob,
+        assetId: page.assetId || latestPage.assetId || "",
+        thumbnailAssetId: page.thumbnailAssetId || latestPage.thumbnailAssetId || "",
         storagePath: Object.prototype.hasOwnProperty.call(page, "storagePath") ? page.storagePath : latestPage.storagePath,
         storageSyncedAt: Object.prototype.hasOwnProperty.call(page, "storageSyncedAt")
           ? page.storageSyncedAt
@@ -9170,28 +9489,52 @@ async function persistManagedPages(activePages, deletedPages = [], message = "�
   const now = new Date().toISOString();
   const userId = score.userId || state.session?.user?.id || null;
   const previousPageById = new Map(state.scorePages.map((page) => [page.id, page]));
-  const normalizedPages = activePages.map((page, index) => ({
-    ...page,
-    userId: page.userId || userId,
-    pageIndex: index,
-    deletedAt: null,
-  })).map((page) => {
+  const preparedActivePages = [];
+  for (const [index, page] of activePages.entries()) {
+    let preparedPage = {
+      ...page,
+      userId: page.userId || userId,
+      pageIndex: index,
+      deletedAt: null,
+    };
+    const blob = page.blob instanceof Blob && page.blob.size > 0 ? page.blob : null;
+    if (blob) {
+      const assetId = page.assetId || createAssetId("asset");
+      await putAsset(buildPageAssetRecord({ ...preparedPage, assetId }, blob, { assetId }), {
+        timeoutMs: getBlobWriteTimeout(blob.size),
+      });
+      preparedPage = {
+        ...preparedPage,
+        assetId,
+        type: blob.type || page.type || "image/jpeg",
+        size: blob.size,
+        storagePath: null,
+        storageSyncedAt: null,
+        storageUploadVersion: 0,
+      };
+      cachePageObjectUrl(preparedPage, blob);
+    }
+    preparedActivePages.push(preparedPage);
+  }
+  const normalizedPages = preparedActivePages.map((page) => {
     const previousPage = previousPageById.get(page.id);
     const changed = managedPageChanged(page, previousPage);
 
     return {
-      ...page,
+      ...normalizePageForStore(page),
       updatedAt: changed ? now : page.updatedAt || previousPage?.updatedAt || now,
       syncStatus: changed && userId ? SYNC_STATUS_PENDING : page.syncStatus || previousPage?.syncStatus || SYNC_STATUS_LOCAL,
     };
   });
-  const normalizedDeletedPages = deletedPages.map((page) => ({
-    ...page,
-    userId: page.userId || userId,
-    deletedAt: now,
-    updatedAt: now,
-    syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
-  }));
+  const normalizedDeletedPages = deletedPages.map((page) =>
+    normalizePageForStore({
+      ...page,
+      userId: page.userId || userId,
+      deletedAt: now,
+      updatedAt: now,
+      syncStatus: userId ? SYNC_STATUS_PENDING : SYNC_STATUS_LOCAL,
+    }),
+  );
   const updatedScore = {
     ...toScoreRecord(score),
     userId,
@@ -9228,11 +9571,14 @@ function managedPageChanged(page, previousPage) {
     page.name !== previousPage.name ||
     page.type !== previousPage.type ||
     page.size !== previousPage.size ||
+    page.width !== previousPage.width ||
+    page.height !== previousPage.height ||
+    (page.assetId || "") !== (previousPage.assetId || "") ||
+    (page.thumbnailAssetId || "") !== (previousPage.thumbnailAssetId || "") ||
     page.storagePath !== previousPage.storagePath ||
     page.storageSyncedAt !== previousPage.storageSyncedAt ||
     page.storageUploadVersion !== previousPage.storageUploadVersion ||
-    page.deletedAt !== previousPage.deletedAt ||
-    page.blob !== previousPage.blob
+    page.deletedAt !== previousPage.deletedAt
   );
 }
 
@@ -9313,7 +9659,7 @@ function queueManagedPageSave(updatedScore, pagesToSave, deletedPages, userId, s
 }
 
 function pageBlobNeedsCloudUpload(page, pageDeleted = false) {
-  if (pageDeleted || !page?.blob || page.blob.size <= 0) {
+  if (pageDeleted || !page) {
     return false;
   }
 
@@ -9697,7 +10043,7 @@ async function putCloudReadyRecords(folders, scores, pages, setlists = [], setli
           ([folderStore, scoreStore, pageStore, setlistStore, setlistItemStore, annotationStore]) => {
             batch.folders.forEach((folder) => folderStore.put(folder));
             batch.scores.forEach((score) => scoreStore.put(toScoreRecord(score)));
-            batch.pages.forEach((page) => pageStore.put(page));
+            batch.pages.forEach((page) => pageStore.put(normalizePageForStore(page)));
             batch.setlists.forEach((setlist) => setlistStore.put(setlist));
             batch.setlistItems.forEach((item) => setlistItemStore.put(item));
             batch.annotations.forEach((annotation) => annotationStore.put(normalizeAnnotationRecord(annotation)));
@@ -10303,8 +10649,12 @@ async function uploadScoreToCloud(scoreId) {
         let storagePath = page.storagePath || null;
         let storageSyncedAt = page.storageSyncedAt || null;
         let pageSize = page.size;
-        const hasBlob = Boolean(page.blob && page.blob.size > 0);
-        const shouldUploadBlob = pageBlobNeedsCloudUpload(page);
+        let shouldUploadBlob = pageBlobNeedsCloudUpload(page);
+        const blob = shouldUploadBlob ? await getPageBlob(page) : null;
+        const hasBlob = Boolean(blob && blob.size > 0);
+        if (shouldUploadBlob && !hasBlob && storagePath) {
+          shouldUploadBlob = false;
+        }
         const shouldSyncMetadata = page.syncStatus !== SYNC_STATUS_SYNCED || shouldUploadBlob || !storagePath;
 
         if (!shouldSyncMetadata) {
@@ -10323,9 +10673,15 @@ async function uploadScoreToCloud(scoreId) {
             setShareDialogStatus(message);
           }
           const cloudPath = getPageUploadPath(userId, page, storagePath);
-          storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
+          storagePath = await uploadCloudFile(cloudPath, blob, `${page.id}.${getExtensionFromType(page.type)}`);
           storageSyncedAt = new Date().toISOString();
-          pageSize = page.blob.size;
+          pageSize = blob.size;
+          await markPageAssetStorageSynced(page, {
+            storagePath,
+            storageSyncedAt,
+            storageUploadVersion: STORAGE_UPLOAD_VERSION,
+            size: pageSize,
+          });
         }
 
         return {
@@ -10621,8 +10977,12 @@ async function uploadLocalChanges() {
     let storagePath = page.storagePath || null;
     let storageSyncedAt = page.storageSyncedAt || null;
     let pageSize = page.size;
-    const hasBlob = Boolean(page.blob && page.blob.size > 0);
-    const shouldUploadBlob = pageBlobNeedsCloudUpload(page, pageDeleted);
+    let shouldUploadBlob = pageBlobNeedsCloudUpload(page, pageDeleted);
+    const blob = shouldUploadBlob ? await getPageBlob(page) : null;
+    const hasBlob = Boolean(blob && blob.size > 0);
+    if (shouldUploadBlob && !hasBlob && storagePath) {
+      shouldUploadBlob = false;
+    }
     const shouldSyncMetadata = page.syncStatus !== SYNC_STATUS_SYNCED || shouldUploadBlob || (!pageDeleted && !storagePath);
 
     if (!shouldSyncMetadata) {
@@ -10636,9 +10996,15 @@ async function uploadLocalChanges() {
 
     if (shouldUploadBlob) {
       const cloudPath = getPageUploadPath(userId, page, storagePath);
-      storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
+      storagePath = await uploadCloudFile(cloudPath, blob, `${page.id}.${getExtensionFromType(page.type)}`);
       storageSyncedAt = new Date().toISOString();
-      pageSize = page.blob.size;
+      pageSize = blob.size;
+      await markPageAssetStorageSynced(page, {
+        storagePath,
+        storageSyncedAt,
+        storageUploadVersion: STORAGE_UPLOAD_VERSION,
+        size: pageSize,
+      });
     }
     uploadedPages.push({
       ...page,
@@ -11444,7 +11810,11 @@ function toCloudPage(page) {
     name: page.name,
     type: page.type,
     size: page.size,
+    asset_id: page.assetId || null,
+    thumbnail_asset_id: page.thumbnailAssetId || null,
     storage_path: page.storagePath,
+    storage_synced_at: page.storageSyncedAt || null,
+    storage_upload_version: Number(page.storageUploadVersion) || 0,
     created_at: page.createdAt,
     updated_at: page.updatedAt,
     deleted_at: page.deletedAt || null,
@@ -11577,7 +11947,11 @@ function fromCloudPage(row) {
     name: row.name,
     type: row.type,
     size: row.size,
+    assetId: row.asset_id || row.assetId || "",
+    thumbnailAssetId: row.thumbnail_asset_id || row.thumbnailAssetId || "",
     storagePath: row.storage_path,
+    storageSyncedAt: row.storage_synced_at || row.storageSyncedAt || null,
+    storageUploadVersion: Number(row.storage_upload_version || row.storageUploadVersion) || 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -11941,8 +12315,12 @@ async function ensureShareTargetsReady(targets) {
     let storagePath = page.storagePath || null;
     let storageSyncedAt = page.storageSyncedAt || null;
     let pageSize = page.size;
-    const hasBlob = Boolean(page.blob && page.blob.size > 0);
-    const shouldUploadBlob = pageNeedsUpload(page);
+    let shouldUploadBlob = pageNeedsUpload(page);
+    const blob = shouldUploadBlob ? await getPageBlob(page) : null;
+    const hasBlob = Boolean(blob && blob.size > 0);
+    if (shouldUploadBlob && !hasBlob && storagePath) {
+      shouldUploadBlob = false;
+    }
 
     if (!storagePath && !hasBlob) {
       const score = state.scores.find((item) => item.id === page.scoreId);
@@ -11957,9 +12335,15 @@ async function ensureShareTargetsReady(targets) {
         setShareDialogStatus(message);
       }
       const cloudPath = getPageUploadPath(userId, page, storagePath);
-      storagePath = await uploadCloudFile(cloudPath, page.blob, `${page.id}.${getExtensionFromType(page.type)}`);
+      storagePath = await uploadCloudFile(cloudPath, blob, `${page.id}.${getExtensionFromType(page.type)}`);
       storageSyncedAt = new Date().toISOString();
-      pageSize = page.blob.size;
+      pageSize = blob.size;
+      await markPageAssetStorageSynced(page, {
+        storagePath,
+        storageSyncedAt,
+        storageUploadVersion: STORAGE_UPLOAD_VERSION,
+        size: pageSize,
+      });
     }
 
     const readyPage = {
@@ -13398,11 +13782,12 @@ function getCoverPage(score, pages) {
 
 // 由页面 blob 生成小封面缩略图；失败返回 null（不抛错，不影响保存/导入）。
 async function createCoverThumbBlobFromPage(page) {
-  if (!page?.blob || page.blob.size === 0) {
+  const blob = await getPageBlob(page).catch(() => null);
+  if (!(blob instanceof Blob) || blob.size === 0) {
     return null;
   }
   try {
-    return await createThumbnailBlob(page.blob);
+    return await createThumbnailBlob(blob);
   } catch (error) {
     console.warn("封面缩略图生成失败", error);
     return null;
@@ -13416,7 +13801,7 @@ async function buildScoreCoverFields(score, pages, options = {}) {
     coverPageId: coverPage?.id || null,
     coverPageUpdatedAt: coverPage?.updatedAt || null,
     coverStoragePath: coverPage?.storagePath || null,
-    coverHasLocalBlob: Boolean(coverPage?.blob && coverPage.blob.size > 0),
+    coverHasLocalBlob: Boolean((coverPage?.blob && coverPage.blob.size > 0) || getAssetIdForPage(coverPage)),
   };
   if (!coverPage) {
     return fields;
@@ -13497,7 +13882,7 @@ function getScoreCoverUrl(score) {
       const thumbUrl = state.pageThumbUrls.get(coverPage.id);
       if (thumbUrl) {
         resolved = thumbUrl;
-      } else if (coverPage.blob && coverPage.blob.size > 0) {
+      } else if ((coverPage.blob && coverPage.blob.size > 0) || getAssetIdForPage(coverPage) || state.scoreUrls.has(coverPage.id)) {
         resolved = getScoreUrl(coverPage, { hydrate: false });
       } else {
         resolved = state.pageTempUrls.get(coverPage.id) || "";
@@ -13601,7 +13986,9 @@ async function ensureScoreCoverThumb(score, options = {}) {
   }
 
   // 本地有 blob：后台生成缩略图并写回。
-  if (coverPage.blob && coverPage.blob.size > 0) {
+  const coverBlob = await getPageBlob(coverPage);
+
+  if (coverBlob && coverBlob.size > 0) {
     if (state.coverThumbRequests.has(score.id)) {
       return;
     }
@@ -13625,7 +14012,7 @@ async function ensureScoreCoverThumb(score, options = {}) {
         }
       } else {
         // 生成失败也先用本地 blob 直接显示封面。
-        refreshScoreCoverImage(score.id, getScoreUrl(coverPage, { hydrate: false }));
+        refreshScoreCoverImage(score.id, cachePageObjectUrl(coverPage, coverBlob));
       }
     } finally {
       state.coverThumbRequests.delete(score.id);
@@ -13676,7 +14063,7 @@ async function preloadAllScoreCovers(options = {}) {
       return false;
     }
     const coverPage = getCoverPage(score, score.pages);
-    return Boolean(coverPage?.blob && coverPage.blob.size > 0);
+    return Boolean(coverPage && (coverPage.blob?.size > 0 || getAssetIdForPage(coverPage)));
   });
   if (needLocal.length) {
     await runWithConcurrency(needLocal, 4, (score) => ensureScoreCoverThumb(score));
@@ -15387,7 +15774,28 @@ function getCurrentViewerPageId() {
       }
     });
   }
+  const boundaryIndex = getViewerBoundaryPageIndex(pages, horizontal);
+  if (boundaryIndex !== null) {
+    currentIndex = boundaryIndex;
+  }
   return pages[currentIndex]?.dataset.pageId || state.currentViewerPages[currentIndex]?.id || "";
+}
+
+function getViewerBoundaryPageIndex(pages, horizontal) {
+  const container = elements.viewerPages;
+  if (!container || !pages.length) {
+    return null;
+  }
+
+  const reachedStart = horizontal ? container.scrollLeft <= 2 : container.scrollTop <= 2;
+  if (reachedStart) {
+    return 0;
+  }
+
+  const reachedEnd = horizontal
+    ? container.scrollLeft + container.clientWidth >= container.scrollWidth - 2
+    : container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+  return reachedEnd ? pages.length - 1 : null;
 }
 
 function scheduleAnnotationCanvasResize(options = {}) {
@@ -16341,12 +16749,9 @@ function updateViewerPageIndicator() {
 
   // 滚动到末端时直接判定为最后一页：当最后一页图片较矮时，仅靠上述阈值无法选中它，
   // 会卡在“倒数第二页”，导致末页页码和调号都显示不出来。
-  const container = elements.viewerPages;
-  const reachedEnd = horizontal
-    ? container.scrollLeft + container.clientWidth >= container.scrollWidth - 2
-    : container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
-  if (reachedEnd) {
-    currentIndex = pages.length - 1;
+  const boundaryIndex = getViewerBoundaryPageIndex(pages, horizontal);
+  if (boundaryIndex !== null) {
+    currentIndex = boundaryIndex;
   }
 
   setViewerPageIndicator(currentIndex + 1, pages.length);
@@ -17179,7 +17584,8 @@ async function refreshScorePagesFromCloud(scoreId) {
     const localPage = localPageById.get(page.id);
     return {
       ...page,
-      blob: localPage?.blob,
+      assetId: localPage?.assetId || page.assetId || "",
+      thumbnailAssetId: localPage?.thumbnailAssetId || page.thumbnailAssetId || "",
       storageSyncedAt: localPage?.storageSyncedAt || page.updatedAt || null,
       storageUploadVersion: localPage?.storageUploadVersion || STORAGE_UPLOAD_VERSION,
     };
@@ -17197,7 +17603,7 @@ function upsertLocalPagesInMemory(pages) {
 
   const pageById = new Map(state.scorePages.map((page) => [page.id, page]));
   pages.forEach((page) => {
-    pageById.set(page.id, page);
+    pageById.set(page.id, normalizeLocalPageRecord(page));
   });
   state.scorePages = Array.from(pageById.values());
   if (state.currentViewerPages.length) {
@@ -17219,22 +17625,28 @@ function upsertLocalPagesInMemory(pages) {
 }
 
 function getScoreUrl(page, options = {}) {
+  if (page?.id && state.scoreUrls.has(page.id)) {
+    return state.scoreUrls.get(page.id);
+  }
+
+  if (page?.blob instanceof Blob && page.blob.size > 0) {
+    return cachePageObjectUrl(page, page.blob);
+  }
+
   if (!page?.blob || page.blob.size === 0) {
     const tempUrl = page?.id ? state.pageTempUrls.get(page.id) : "";
     if (tempUrl) {
       return tempUrl;
     }
 
+    ensurePageAssetDisplayUrl(page);
     if (options.hydrate !== false) {
       hydrateScorePage(page);
     }
     return SCORE_IMAGE_PLACEHOLDER;
   }
 
-  if (!state.scoreUrls.has(page.id)) {
-    state.scoreUrls.set(page.id, URL.createObjectURL(page.blob));
-  }
-  return state.scoreUrls.get(page.id);
+  return SCORE_IMAGE_PLACEHOLDER;
 }
 
 function bindScorePageImage(image, page, options = {}) {
@@ -17273,7 +17685,7 @@ function bindScoreThumbnailImage(image, page) {
 
   // 先显示占位/已有原图链接，再在卡片进入视口时按需生成缩略图。
   updateScorePageImageSource(image, page);
-  if (page.blob && page.blob.size > 0) {
+  if ((page.blob && page.blob.size > 0) || getAssetIdForPage(page) || state.scoreUrls.has(page.id)) {
     observeThumbnailTarget(image);
   } else {
     scheduleScorePageHydration(page);
@@ -17312,7 +17724,7 @@ function observeThumbnailTarget(image) {
 }
 
 async function ensureThumbnailUrl(page) {
-  if (!page?.id || !page.blob || page.blob.size === 0) {
+  if (!page?.id) {
     return "";
   }
   if (state.pageThumbUrls.has(page.id)) {
@@ -17322,7 +17734,13 @@ async function ensureThumbnailUrl(page) {
     return state.pageThumbRequests.get(page.id);
   }
 
-  const request = createThumbnailBlob(page.blob)
+  const request = getPageBlob(page)
+    .then((blob) => {
+      if (!(blob instanceof Blob) || blob.size <= 0) {
+        return null;
+      }
+      return createThumbnailBlob(blob);
+    })
     .then((thumbBlob) => {
       if (!thumbBlob) {
         return "";
@@ -17605,6 +18023,63 @@ function queueBackgroundPageHydration(delay = PAGE_BACKGROUND_HYDRATE_DELAY) {
   }, delay);
 }
 
+function scheduleLegacyPageAssetMigration(delay = 3000) {
+  window.clearTimeout(state.legacyPageAssetMigrationTimer);
+  state.legacyPageAssetMigrationTimer = window.setTimeout(() => {
+    state.legacyPageAssetMigrationTimer = 0;
+    migrateLegacyPageBlobsToAssetsBatch().catch((error) => console.warn(error));
+  }, delay);
+}
+
+async function migrateLegacyPageBlobsToAssetsBatch() {
+  if (state.legacyPageAssetMigrationRunning) {
+    return;
+  }
+  if (shouldDeferBackgroundWork()) {
+    scheduleLegacyPageAssetMigration(5000);
+    return;
+  }
+
+  state.legacyPageAssetMigrationRunning = true;
+  try {
+    const rawPages = await getAllScorePages();
+    const candidates = rawPages
+      .filter((page) => page?.blob instanceof Blob && page.blob.size > 0 && !getAssetIdForPage(page))
+      .slice(0, 4);
+
+    if (!candidates.length) {
+      console.info("旧页面资源迁移完成");
+      return;
+    }
+
+    for (const page of candidates) {
+      if (shouldDeferBackgroundWork()) {
+        scheduleLegacyPageAssetMigration(5000);
+        return;
+      }
+      const assetId = createAssetId("asset");
+      const asset = buildPageAssetRecord({ ...page, assetId }, page.blob, { assetId });
+      const metadata = normalizePageForStore({
+        ...page,
+        assetId,
+        type: page.blob.type || page.type,
+        size: page.blob.size || page.size,
+      });
+      await putAsset(asset, { priority: "low" });
+      await putScorePage(metadata, { priority: "low" });
+      replaceLocalPage(metadata);
+      await nextFrame();
+    }
+
+    scheduleLegacyPageAssetMigration(1500);
+  } catch (error) {
+    console.warn("旧页面资源迁移失败", error);
+    scheduleLegacyPageAssetMigration(10000);
+  } finally {
+    state.legacyPageAssetMigrationRunning = false;
+  }
+}
+
 async function hydrateMissingScorePagesInBackground() {
   if (state.pageHydrationRunning) {
     state.pageHydrationQueued = true;
@@ -17660,7 +18135,7 @@ function getMissingLocalImagePages() {
 }
 
 function pageNeedsHydration(page) {
-  return Boolean(page?.storagePath && (!page.blob || page.blob.size === 0));
+  return Boolean(page?.storagePath && !state.scoreUrls.has(page.id) && (!page.blob || page.blob.size === 0));
 }
 
 async function hydrateScorePage(page) {
@@ -17681,14 +18156,21 @@ async function hydrateScorePage(page) {
     refreshPageImages(page);
 
     const blob = await downloadCloudFileFromUrl(tempUrl, page.size, page.type);
+    const assetId = page.assetId || createAssetId("asset");
+    await putAsset(buildPageAssetRecord({ ...page, assetId }, blob, {
+      assetId,
+      storagePath: page.storagePath,
+      storageUploadVersion: STORAGE_UPLOAD_VERSION,
+    }), { priority: "low" });
     const updatedPage = {
       ...page,
-      blob,
+      assetId,
       size: page.size || blob.size,
       storageSyncedAt: new Date().toISOString(),
       storageUploadVersion: STORAGE_UPLOAD_VERSION,
       syncStatus: SYNC_STATUS_SYNCED,
     };
+    cachePageObjectUrl(updatedPage, blob);
     await putScorePage(updatedPage, { priority: "low" });
     replaceLocalPage(updatedPage);
     refreshPageImages(updatedPage);
@@ -17709,23 +18191,24 @@ async function hydrateScorePage(page) {
 }
 
 function replaceLocalPage(updatedPage) {
-  const existingPage = state.scorePages.some((page) => page.id === updatedPage.id);
+  const nextPage = normalizeLocalPageRecord(updatedPage);
+  const existingPage = state.scorePages.some((page) => page.id === nextPage.id);
   state.scorePages = existingPage
-    ? state.scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page))
-    : [...state.scorePages, updatedPage];
-  if (state.currentViewerPages.some((page) => page.id === updatedPage.id)) {
-    state.currentViewerPages = state.currentViewerPages.map((page) => (page.id === updatedPage.id ? updatedPage : page));
+    ? state.scorePages.map((page) => (page.id === nextPage.id ? nextPage : page))
+    : [...state.scorePages, nextPage];
+  if (state.currentViewerPages.some((page) => page.id === nextPage.id)) {
+    state.currentViewerPages = state.currentViewerPages.map((page) => (page.id === nextPage.id ? nextPage : page));
   }
   state.scores = state.scores.map((score) => {
-    if (score.id !== updatedPage.scoreId) {
+    if (score.id !== nextPage.scoreId) {
       return score;
     }
 
     const scorePages = score.pages || [];
-    const existingScorePage = scorePages.some((page) => page.id === updatedPage.id);
+    const existingScorePage = scorePages.some((page) => page.id === nextPage.id);
     const pages = existingScorePage
-      ? scorePages.map((page) => (page.id === updatedPage.id ? updatedPage : page))
-      : [...scorePages, updatedPage];
+      ? scorePages.map((page) => (page.id === nextPage.id ? nextPage : page))
+      : [...scorePages, nextPage];
 
     return {
       ...score,
@@ -17783,6 +18266,7 @@ function revokeScoreUrls(score) {
     revokeScoreUrlForPage(page.id);
     state.pageTempUrls.delete(page.id);
     state.pageTempUrlRequests.delete(page.id);
+    state.pageAssetUrlRequests.delete(page.id);
   });
   const cover = state.scoreCoverUrls.get(score.id);
   if (cover) {
@@ -17806,6 +18290,7 @@ function revokeScoreUrlForPage(pageId) {
   }
   state.pageThumbRequests.delete(pageId);
   state.pageTempUrlRequests.delete(pageId);
+  state.pageAssetUrlRequests.delete(pageId);
 }
 
 function revokePendingUrl(id) {
@@ -17827,6 +18312,7 @@ function revokeAllUrls() {
   state.pageThumbUrls.forEach((url) => URL.revokeObjectURL(url));
   state.pageThumbUrls.clear();
   state.pageThumbRequests.clear();
+  state.pageAssetUrlRequests.clear();
   state.scoreCoverUrls.forEach((entry) => URL.revokeObjectURL(entry.url));
   state.scoreCoverUrls.clear();
   state.coverDisplayUrls.clear();
