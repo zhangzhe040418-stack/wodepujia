@@ -1,5 +1,5 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 11;
+const DB_VERSION = 12;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
@@ -10,14 +10,28 @@ const TRASH_STORE_NAME = "trash";
 const ANNOTATION_STORE_NAME = "annotations";
 const SYNC_OUTBOX_STORE_NAME = "sync_outbox";
 const LOCAL_OP_STORE_NAME = "local_ops";
+const SYNC_STATE_STORE_NAME = "sync_state";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 2;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v224";
+const APP_BUILD = "v225";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
 const OUTBOX_MAX_ATTEMPTS = 6;
+const LOCAL_OP_STATUS_PENDING = "pending";
+const LOCAL_OP_STATUS_SYNCING = "syncing";
+const LOCAL_OP_STATUS_SYNCED = "synced";
+const LOCAL_OP_STATUS_FAILED = "failed";
+const LOCAL_OP_STATUS_SUPERSEDED = "superseded";
+const LOCAL_OP_STATUS_CANCELLED = "cancelled";
+const LOCAL_OP_STATUS_CONFLICT = "conflict";
+const SYNC_STATE_DIRTY = "dirty";
+const SYNC_STATE_SYNCING = "syncing";
+const SYNC_STATE_SYNCED = "synced";
+const SYNC_STATE_FAILED = "failed";
+const SYNC_STATE_CONFLICT = "conflict";
+const SYNC_STATE_DELETED = "deleted";
 // 指数退避（毫秒），超出长度用最后一个值。
 const OUTBOX_BACKOFF_MS = [0, 5000, 15000, 60000, 300000, 900000];
 const SYNC_STATUS_LOCAL = "local";
@@ -166,6 +180,13 @@ const state = {
   outboxTimer: 0,
   outboxCounts: { pending: 0, failed: 0 },
   outboxLastError: "",
+  syncStateCounts: { dirty: 0, syncing: 0, failed: 0, conflict: 0 },
+  localOpCounts: { pending: 0, syncing: 0, failed: 0, conflict: 0 },
+  syncEngineTimer: 0,
+  syncEngineScheduled: false,
+  syncEngineLastReason: "",
+  syncEngineLastRunAt: 0,
+  syncEngineLastError: "",
   // 用户正在进行的本地写操作计数：>0 时暂停后台 sync/outbox，避免与用户操作抢事务。
   userWriteActive: 0,
   userCommandPending: 0,
@@ -1701,7 +1722,11 @@ function bindEvents() {
     } else {
       // 回到前台时尝试重连/自检本地数据库，避免退后台后连接卡死导致写操作失效。
       handleForegroundDatabaseRecovery().catch((error) => console.warn(error));
+      SyncEngine?.schedule?.({ reason: "foreground", delay: 1200 });
     }
+  });
+  window.addEventListener("online", () => {
+    SyncEngine?.schedule?.({ reason: "online", delay: 800 });
   });
   // 自定义“边缘返回”手势（替代不可靠的浏览器历史手势）。capture 阶段记录，passive 观察，不打断内容滚动。
   document.addEventListener("touchstart", handleEdgeBackTouchStart, { passive: true, capture: true });
@@ -2513,6 +2538,9 @@ async function restoreStartupAuthSession() {
     renderScores();
   } catch (error) {
     console.warn(error);
+  }
+  if (state.session?.user?.id) {
+    SyncEngine?.schedule?.({ reason: "startup-auth", delay: STARTUP_SYNC_DELAY });
   }
 }
 
@@ -4951,7 +4979,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=240");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=241");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -6086,6 +6114,9 @@ function openDatabase() {
         localOpStore.createIndex("by_priority_createdAt", ["priority", "createdAt"], { unique: false });
         localOpStore.createIndex("by_entity", ["entityType", "entityId"], { unique: false });
         localOpStore.createIndex("by_createdAt", "createdAt", { unique: false });
+        localOpStore.createIndex("by_user_status", ["userId", "status"], { unique: false });
+        localOpStore.createIndex("by_nextRetryAt", "nextRetryAt", { unique: false });
+        localOpStore.createIndex("by_batchKey", "batchKey", { unique: false });
       } else {
         const localOpStore = request.transaction.objectStore(LOCAL_OP_STORE_NAME);
         if (!localOpStore.indexNames.contains("by_status")) {
@@ -6099,6 +6130,45 @@ function openDatabase() {
         }
         if (!localOpStore.indexNames.contains("by_createdAt")) {
           localOpStore.createIndex("by_createdAt", "createdAt", { unique: false });
+        }
+        if (!localOpStore.indexNames.contains("by_user_status")) {
+          localOpStore.createIndex("by_user_status", ["userId", "status"], { unique: false });
+        }
+        if (!localOpStore.indexNames.contains("by_nextRetryAt")) {
+          localOpStore.createIndex("by_nextRetryAt", "nextRetryAt", { unique: false });
+        }
+        if (!localOpStore.indexNames.contains("by_batchKey")) {
+          localOpStore.createIndex("by_batchKey", "batchKey", { unique: false });
+        }
+      }
+
+      if (!db.objectStoreNames.contains(SYNC_STATE_STORE_NAME)) {
+        const syncStateStore = db.createObjectStore(SYNC_STATE_STORE_NAME, { keyPath: "id" });
+        syncStateStore.createIndex("by_status", "status", { unique: false });
+        syncStateStore.createIndex("by_dirty", "dirty", { unique: false });
+        syncStateStore.createIndex("by_entity", ["entityType", "entityId"], { unique: false });
+        syncStateStore.createIndex("by_user_status", ["userId", "status"], { unique: false });
+        syncStateStore.createIndex("by_updatedAt", "updatedAt", { unique: false });
+        syncStateStore.createIndex("by_lastLocalAt", "lastLocalAt", { unique: false });
+      } else {
+        const syncStateStore = request.transaction.objectStore(SYNC_STATE_STORE_NAME);
+        if (!syncStateStore.indexNames.contains("by_status")) {
+          syncStateStore.createIndex("by_status", "status", { unique: false });
+        }
+        if (!syncStateStore.indexNames.contains("by_dirty")) {
+          syncStateStore.createIndex("by_dirty", "dirty", { unique: false });
+        }
+        if (!syncStateStore.indexNames.contains("by_entity")) {
+          syncStateStore.createIndex("by_entity", ["entityType", "entityId"], { unique: false });
+        }
+        if (!syncStateStore.indexNames.contains("by_user_status")) {
+          syncStateStore.createIndex("by_user_status", ["userId", "status"], { unique: false });
+        }
+        if (!syncStateStore.indexNames.contains("by_updatedAt")) {
+          syncStateStore.createIndex("by_updatedAt", "updatedAt", { unique: false });
+        }
+        if (!syncStateStore.indexNames.contains("by_lastLocalAt")) {
+          syncStateStore.createIndex("by_lastLocalAt", "lastLocalAt", { unique: false });
         }
       }
     };
@@ -6488,31 +6558,37 @@ function sanitizeLocalOperationPayload(value, depth = 0) {
 
 async function recordLocalOperation(operation = {}) {
   const now = Date.now();
-  const record = {
-    id: operation.id || `op-${now}-${Math.random().toString(16).slice(2)}`,
-    type: operation.type || "unknown",
-    entityType: operation.entityType || "",
-    entityId: operation.entityId ? String(operation.entityId) : "",
-    payload: sanitizeLocalOperationPayload(operation.payload || null),
-    status: operation.status || "localCommitted",
-    priority: operation.priority || "high",
+  const record = normalizeLocalOperationRecord({
+    ...operation,
+    status: operation.status || LOCAL_OP_STATUS_PENDING,
     createdAt: operation.createdAt || now,
     updatedAt: now,
-    startedAt: operation.startedAt || now,
-    finishedAt: operation.finishedAt || now,
-    error: "",
-    retryCount: 0,
-  };
+  });
+  const syncTargets = getSyncTargetsForOperation(record);
 
   try {
     await enqueueLocalWrite(
       "recordLocalOperation",
       () =>
         runIdbTransaction(
-          LOCAL_OP_STORE_NAME,
+          [LOCAL_OP_STORE_NAME, SYNC_STATE_STORE_NAME],
           "readwrite",
-          (store) => {
-            store.put(record);
+          ([localOpStore, syncStateStore]) => {
+            localOpStore.put(record);
+            syncTargets.forEach((target) => {
+              mutateSyncStateStore(syncStateStore, target, {
+                status: SYNC_STATE_DIRTY,
+                dirty: true,
+                deleted: /delete/i.test(record.type),
+                incrementLocalRevision: true,
+                lastLocalAt: now,
+                updatedAt: now,
+                userId: record.userId || state.session?.user?.id || "",
+                pendingOpIds: [record.id],
+                lastError: "",
+                conflict: null,
+              });
+            });
           },
           { timeoutMs: 8000, timeoutMessage: "记录本地操作超时。" },
         ),
@@ -6521,6 +6597,7 @@ async function recordLocalOperation(operation = {}) {
   } catch (error) {
     console.warn("记录本地操作失败", error);
   }
+  SyncEngine?.schedule?.({ reason: "local-op", delay: 1000 });
   return record;
 }
 
@@ -6574,10 +6651,10 @@ async function runUserCommand(type, callback, options = {}) {
       setStatus(successMessage);
     }
 
-    kickOutbox?.(1200);
+    SyncEngine?.schedule?.({ reason: `user-command:${type}`, delay: 1200 });
     const userId = state.session?.user?.id;
     if (userId) {
-      window.setTimeout(() => queueAccountBackgroundSync?.(userId, "", { immediate: true }), 3000);
+      window.setTimeout(() => SyncEngine?.schedule?.({ reason: "user-command-account", delay: 0 }), 3000);
     }
 
     return result;
@@ -6670,6 +6747,641 @@ async function readStoreRecord(storeName, id) {
   );
   return result.record || null;
 }
+
+function buildSyncStateId(entityType, entityId) {
+  return `${String(entityType || "").trim()}:${String(entityId || "").trim()}`;
+}
+
+function normalizeLocalOpStatus(status) {
+  const value = String(status || "").trim();
+  if (!value || value === "localCommitted") {
+    return LOCAL_OP_STATUS_PENDING;
+  }
+  if (
+    [
+      LOCAL_OP_STATUS_PENDING,
+      LOCAL_OP_STATUS_SYNCING,
+      LOCAL_OP_STATUS_SYNCED,
+      LOCAL_OP_STATUS_FAILED,
+      LOCAL_OP_STATUS_SUPERSEDED,
+      LOCAL_OP_STATUS_CANCELLED,
+      LOCAL_OP_STATUS_CONFLICT,
+    ].includes(value)
+  ) {
+    return value;
+  }
+  return LOCAL_OP_STATUS_PENDING;
+}
+
+function buildLocalOpBatchKey(operation = {}) {
+  const entityType = operation.entityType || String(operation.type || "").split(".")[0] || "unknown";
+  const entityId = operation.entityId || operation.payload?.scoreId || operation.payload?.folderId || operation.payload?.setlistId || "";
+  return operation.batchKey || `${operation.type || "unknown"}:${entityType}:${entityId}`;
+}
+
+function normalizeLocalOperationRecord(operation = {}) {
+  const now = Date.now();
+  const createdAt = Number(operation.createdAt) || now;
+  return {
+    id: operation.id || `op-${now}-${Math.random().toString(16).slice(2)}`,
+    type: operation.type || "unknown",
+    entityType: operation.entityType || String(operation.type || "").split(".")[0] || "",
+    entityId: operation.entityId ? String(operation.entityId) : "",
+    payload: sanitizeLocalOperationPayload(operation.payload || null),
+    status: normalizeLocalOpStatus(operation.status),
+    priority: operation.priority || "high",
+    createdAt,
+    updatedAt: Number(operation.updatedAt) || now,
+    startedAt: operation.startedAt || null,
+    finishedAt: operation.finishedAt || null,
+    error: operation.error || operation.lastError || "",
+    retryCount: Number(operation.retryCount) || 0,
+    nextRetryAt: Number(operation.nextRetryAt) || 0,
+    syncedAt: operation.syncedAt || "",
+    supersededBy: operation.supersededBy || "",
+    batchKey: buildLocalOpBatchKey(operation),
+    userId: operation.userId || state.session?.user?.id || "",
+  };
+}
+
+function getSyncTargetsForOperation(operation = {}) {
+  const targets = [];
+  const add = (entityType, entityId) => {
+    if (!entityType || !entityId) {
+      return;
+    }
+    const key = buildSyncStateId(entityType, entityId);
+    if (!targets.some((target) => target.id === key)) {
+      targets.push({ id: key, entityType, entityId: String(entityId) });
+    }
+  };
+
+  add(operation.entityType, operation.entityId);
+  const payload = operation.payload || {};
+  (payload.scoreIds || []).forEach((id) => add("score", id));
+  (payload.activePageIds || []).forEach((id) => add("page", id));
+  (payload.deletedPageIds || []).forEach((id) => add("page", id));
+  if (payload.scoreId) {
+    add("score", payload.scoreId);
+  }
+  if (payload.folderId) {
+    add("folder", payload.folderId);
+  }
+  if (payload.setlistId) {
+    add("setlist", payload.setlistId);
+  }
+  if (payload.annotation?.id) {
+    add("annotation", payload.annotation.id);
+  }
+  return targets;
+}
+
+function buildNextSyncState(previous, target, patch = {}) {
+  const now = patch.now || Date.now();
+  const pendingSource = patch.replacePendingOpIds
+    ? patch.pendingOpIds || []
+    : [...(previous?.pendingOpIds || []), ...(patch.pendingOpIds || [])];
+  const pendingOpIds = Array.from(new Set(pendingSource.filter(Boolean).map(String)));
+  const localRevision = Number(previous?.localRevision) || 0;
+  return {
+    id: buildSyncStateId(target.entityType, target.entityId),
+    entityType: target.entityType,
+    entityId: String(target.entityId),
+    userId: patch.userId ?? previous?.userId ?? state.session?.user?.id ?? "",
+    status: patch.status || previous?.status || SYNC_STATE_SYNCED,
+    dirty: patch.dirty ?? previous?.dirty ?? false,
+    deleted: patch.deleted ?? previous?.deleted ?? false,
+    localRevision: patch.incrementLocalRevision ? localRevision + 1 : Number(patch.localRevision ?? localRevision),
+    serverRevision: patch.serverRevision ?? previous?.serverRevision ?? "",
+    lastLocalAt: patch.lastLocalAt ?? previous?.lastLocalAt ?? "",
+    lastSyncedAt: patch.lastSyncedAt ?? previous?.lastSyncedAt ?? "",
+    lastPulledAt: patch.lastPulledAt ?? previous?.lastPulledAt ?? "",
+    lastError: patch.lastError ?? previous?.lastError ?? "",
+    pendingOpIds,
+    conflict: patch.conflict ?? previous?.conflict ?? null,
+    updatedAt: patch.updatedAt || now,
+  };
+}
+
+function mutateSyncStateStore(store, target, patch = {}) {
+  if (!target?.entityType || !target?.entityId) {
+    return;
+  }
+  const id = buildSyncStateId(target.entityType, target.entityId);
+  const request = store.get(id);
+  request.onsuccess = () => {
+    const previous = request.result || null;
+    store.put(buildNextSyncState(previous, target, patch));
+  };
+}
+
+function getAllSyncStates() {
+  return readStoreAll(SYNC_STATE_STORE_NAME);
+}
+
+function getAllLocalOps() {
+  return readStoreAll(LOCAL_OP_STORE_NAME).then((ops) => ops.map(normalizeLocalOperationRecord));
+}
+
+function markEntityDirty(entityType, entityId, options = {}) {
+  if (!entityType || !entityId) {
+    return Promise.resolve(null);
+  }
+  const now = Date.now();
+  return enqueueLocalWrite(
+    "markEntityDirty",
+    () =>
+      runIdbTransaction(
+        SYNC_STATE_STORE_NAME,
+        "readwrite",
+        (store) => {
+          mutateSyncStateStore(store, { entityType, entityId }, {
+            status: options.status || SYNC_STATE_DIRTY,
+            dirty: true,
+            deleted: Boolean(options.deleted),
+            incrementLocalRevision: true,
+            lastLocalAt: options.lastLocalAt || now,
+            updatedAt: now,
+            userId: options.userId || state.session?.user?.id || "",
+            pendingOpIds: options.opId ? [options.opId] : [],
+            lastError: "",
+          });
+        },
+        { timeoutMessage: "同步状态写入超时，请稍后重试。" },
+      ),
+    { priority: options.priority || "high" },
+  ).catch((error) => console.warn("markEntityDirty failed", error));
+}
+
+function markEntitySyncing(entityType, entityId, options = {}) {
+  return updateEntitySyncState(entityType, entityId, {
+    status: SYNC_STATE_SYNCING,
+    dirty: true,
+    lastError: "",
+    ...options,
+  });
+}
+
+function markEntitySynced(entityType, entityId, options = {}) {
+  const now = Date.now();
+  return updateEntitySyncState(entityType, entityId, {
+    status: SYNC_STATE_SYNCED,
+    dirty: false,
+    deleted: Boolean(options.deleted),
+    pendingOpIds: [],
+    replacePendingOpIds: true,
+    lastSyncedAt: options.lastSyncedAt || now,
+    lastError: "",
+    conflict: null,
+    ...options,
+  });
+}
+
+function markEntityFailed(entityType, entityId, error, options = {}) {
+  return updateEntitySyncState(entityType, entityId, {
+    status: SYNC_STATE_FAILED,
+    dirty: true,
+    lastError: getErrorMessage(error) || String(error || ""),
+    ...options,
+  });
+}
+
+function markEntityConflict(entityType, entityId, conflict, options = {}) {
+  return updateEntitySyncState(entityType, entityId, {
+    status: SYNC_STATE_CONFLICT,
+    dirty: true,
+    conflict: conflict || true,
+    lastError: "同步冲突",
+    ...options,
+  });
+}
+
+function updateEntitySyncState(entityType, entityId, patch = {}) {
+  if (!entityType || !entityId) {
+    return Promise.resolve(null);
+  }
+  const now = Date.now();
+  return enqueueLocalWrite(
+    "updateEntitySyncState",
+    () =>
+      runIdbTransaction(
+        SYNC_STATE_STORE_NAME,
+        "readwrite",
+        (store) => {
+          mutateSyncStateStore(store, { entityType, entityId }, {
+            now,
+            updatedAt: now,
+            userId: patch.userId || state.session?.user?.id || "",
+            ...patch,
+          });
+        },
+        { timeoutMessage: "同步状态写入超时，请稍后重试。" },
+      ),
+    { priority: patch.priority || "low" },
+  ).catch((error) => console.warn("updateEntitySyncState failed", error));
+}
+
+function getLocalOpRetryDelay(retryCount = 0) {
+  const index = Math.min(Math.max(Number(retryCount) || 0, 0), OUTBOX_BACKOFF_MS.length - 1);
+  return OUTBOX_BACKOFF_MS[index] || 0;
+}
+
+async function updateLocalOperationStatus(operationId, status, patch = {}) {
+  if (!operationId) {
+    return null;
+  }
+  const now = Date.now();
+  return enqueueLocalWrite(
+    "updateLocalOperationStatus",
+    () =>
+      runIdbTransaction(
+        LOCAL_OP_STORE_NAME,
+        "readwrite",
+        (store) => {
+          const request = store.get(String(operationId));
+          request.onsuccess = () => {
+            const previous = request.result ? normalizeLocalOperationRecord(request.result) : null;
+            if (!previous) {
+              return;
+            }
+            store.put({
+              ...previous,
+              ...patch,
+              status: normalizeLocalOpStatus(status),
+              updatedAt: now,
+            });
+          };
+        },
+        { timeoutMessage: "Local operation status update timed out." },
+      ),
+    { priority: patch.priority || "low" },
+  ).catch((error) => console.warn("updateLocalOperationStatus failed", error));
+}
+
+function markLocalOpSyncing(operation) {
+  return updateLocalOperationStatus(operation?.id, LOCAL_OP_STATUS_SYNCING, {
+    startedAt: Date.now(),
+    error: "",
+    nextRetryAt: 0,
+  });
+}
+
+function markLocalOpSynced(operation) {
+  const now = Date.now();
+  return updateLocalOperationStatus(operation?.id, LOCAL_OP_STATUS_SYNCED, {
+    finishedAt: now,
+    syncedAt: now,
+    error: "",
+    nextRetryAt: 0,
+  });
+}
+
+function markLocalOpFailed(operation, error) {
+  const retryCount = (Number(operation?.retryCount) || 0) + 1;
+  return updateLocalOperationStatus(operation?.id, LOCAL_OP_STATUS_FAILED, {
+    finishedAt: Date.now(),
+    error: getErrorMessage(error) || String(error || ""),
+    retryCount,
+    nextRetryAt: Date.now() + getLocalOpRetryDelay(retryCount),
+  });
+}
+
+function markLocalOpSuperseded(operation, supersededBy = "") {
+  return updateLocalOperationStatus(operation?.id, LOCAL_OP_STATUS_SUPERSEDED, {
+    finishedAt: Date.now(),
+    supersededBy,
+    error: "",
+    nextRetryAt: 0,
+  });
+}
+
+function getLocalOpPriorityWeight(priority) {
+  switch (priority) {
+    case "high":
+      return 0;
+    case "normal":
+    case "medium":
+      return 1;
+    case "low":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function isLocalOpRunnable(operation, now = Date.now()) {
+  const status = normalizeLocalOpStatus(operation?.status);
+  if (status === LOCAL_OP_STATUS_PENDING) {
+    return true;
+  }
+  if (status === LOCAL_OP_STATUS_FAILED) {
+    return !operation.nextRetryAt || operation.nextRetryAt <= now;
+  }
+  if (status === LOCAL_OP_STATUS_SYNCING) {
+    return !operation.startedAt || now - Number(operation.startedAt) > 120000;
+  }
+  return false;
+}
+
+async function getRunnableLocalOperations(limit = 24) {
+  const now = Date.now();
+  const userId = state.session?.user?.id || "";
+  const operations = (await getAllLocalOps())
+    .filter((operation) => isLocalOpRunnable(operation, now))
+    .filter((operation) => !userId || !operation.userId || operation.userId === userId)
+    .sort((a, b) => {
+      const priorityDelta = getLocalOpPriorityWeight(a.priority) - getLocalOpPriorityWeight(b.priority);
+      if (priorityDelta) {
+        return priorityDelta;
+      }
+      return (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0);
+    });
+  return operations.slice(0, limit);
+}
+
+async function compactLocalOperationsForSync(operations = []) {
+  const grouped = new Map();
+  operations.forEach((operation) => {
+    const key = operation.batchKey || `${operation.entityType}:${operation.entityId}:${operation.type}`;
+    const list = grouped.get(key) || [];
+    list.push(operation);
+    grouped.set(key, list);
+  });
+
+  const compacted = [];
+  for (const list of grouped.values()) {
+    list.sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0));
+    const deleteOp = [...list].reverse().find((operation) => /delete/i.test(operation.type));
+    const keep = deleteOp || list[list.length - 1];
+    compacted.push(keep);
+    for (const operation of list) {
+      if (operation.id !== keep.id && normalizeLocalOpStatus(operation.status) !== LOCAL_OP_STATUS_SUPERSEDED) {
+        await markLocalOpSuperseded(operation, keep.id);
+      }
+    }
+  }
+  return compacted.sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0));
+}
+
+async function scheduleLocalOperationRetry() {
+  if (!state.session || SyncEngine.running || state.syncEngineTimer) {
+    return;
+  }
+  let operations = [];
+  try {
+    operations = await getAllLocalOps();
+  } catch (error) {
+    if (!isLocalDatabaseNotReadyError(error)) {
+      console.warn(error);
+    }
+    return;
+  }
+  const retryable = operations.filter((operation) => {
+    const status = normalizeLocalOpStatus(operation.status);
+    return status === LOCAL_OP_STATUS_PENDING || status === LOCAL_OP_STATUS_FAILED || status === LOCAL_OP_STATUS_SYNCING;
+  });
+  if (!retryable.length) {
+    return;
+  }
+  const now = Date.now();
+  const nextRetryAt = Math.min(...retryable.map((operation) => Number(operation.nextRetryAt) || now));
+  SyncEngine.schedule({ reason: "local-op-retry", delay: Math.max(1000, nextRetryAt - now) });
+}
+
+const CloudBaseAdapter = {
+  async ensureReady() {
+    if (!state.cloudReady) {
+      await initializeCloud();
+    }
+    if (state.cloudReady && !state.session) {
+      await restoreCloudSession({ reason: "sync-engine" });
+    }
+    if (!state.cloudReady || !state.session) {
+      return false;
+    }
+    return await ensureCloudMediaReady();
+  },
+
+  async uploadScore(scoreId) {
+    if (scoreId) {
+      await uploadScoreToCloud(String(scoreId));
+    }
+  },
+
+  async uploadFolder(folderId) {
+    if (folderId) {
+      await uploadFolderToCloud(String(folderId));
+    }
+  },
+
+  async uploadPage(pageId, payload = {}) {
+    const scoreId = payload.scoreId || payload.score?.id || payload.page?.scoreId;
+    if (scoreId) {
+      await uploadScoreToCloud(String(scoreId));
+      return;
+    }
+    const pages = await getAllScorePages();
+    const page = pages.find((item) => String(item.id) === String(pageId));
+    if (page?.scoreId) {
+      await uploadScoreToCloud(String(page.scoreId));
+    }
+  },
+
+  async uploadPageAsset(pageId, payload = {}) {
+    await this.uploadPage(pageId, payload);
+  },
+
+  async uploadSetlist(setlistId) {
+    if (setlistId) {
+      await uploadSetlistToCloud(String(setlistId));
+    }
+  },
+
+  async uploadAnnotation(annotationId, payload = {}) {
+    await uploadAnnotationToCloud(payload.annotation, annotationId);
+  },
+
+  async deleteEntity(operation) {
+    if (!operation?.type) {
+      return;
+    }
+    if (operation.type === "score.delete" && operation.payload?.score) {
+      await deleteCloudScore(operation.payload.score, operation.payload.deletedAt);
+    } else if (operation.type === "folder.delete" && operation.payload?.folder) {
+      await deleteCloudFolder(operation.payload.folder, operation.payload.folderScores || [], operation.payload.deletedAt);
+    } else if (operation.type === "DELETE_ANNOTATION" || operation.type === "annotation.delete") {
+      await deleteCloudAnnotation(operation.payload?.annotation, operation.payload?.deletedAt);
+    }
+  },
+
+  async pullChangedSince() {
+    await pullCloudMetadataForCurrentAccount({ fromSyncEngine: true });
+  },
+};
+
+async function dispatchLocalOperationToCloud(operation) {
+  if (!operation || /delete/i.test(operation.type)) {
+    await CloudBaseAdapter.deleteEntity(operation);
+    return;
+  }
+  switch (operation.entityType) {
+    case "score":
+      await CloudBaseAdapter.uploadScore(operation.entityId || operation.payload?.scoreId);
+      return;
+    case "folder":
+      await CloudBaseAdapter.uploadFolder(operation.entityId || operation.payload?.folderId);
+      return;
+    case "page":
+      await CloudBaseAdapter.uploadPage(operation.entityId, operation.payload || {});
+      return;
+    case "pageAsset":
+      await CloudBaseAdapter.uploadPageAsset(operation.entityId, operation.payload || {});
+      return;
+    case "setlist":
+      await CloudBaseAdapter.uploadSetlist(operation.entityId || operation.payload?.setlistId);
+      return;
+    case "annotation":
+      await CloudBaseAdapter.uploadAnnotation(operation.entityId || operation.payload?.annotation?.id, operation.payload || {});
+      return;
+    default:
+      if (operation.payload?.scoreId) {
+        await CloudBaseAdapter.uploadScore(operation.payload.scoreId);
+      }
+  }
+}
+
+const SyncEngine = {
+  running: false,
+  rerunRequested: false,
+
+  schedule(options = {}) {
+    const delay = Number(options.delay ?? 1000);
+    state.syncEngineScheduled = true;
+    state.syncEngineLastReason = options.reason || state.syncEngineLastReason || "scheduled";
+    window.clearTimeout(state.syncEngineTimer);
+    state.syncEngineTimer = window.setTimeout(() => {
+      state.syncEngineTimer = 0;
+      this.run({ reason: state.syncEngineLastReason }).catch((error) => console.warn("SyncEngine run failed", error));
+    }, Math.max(0, delay));
+  },
+
+  shouldPause(options = {}) {
+    if (options.manual || options.force) {
+      return false;
+    }
+    if (!state.session) {
+      return true;
+    }
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      return true;
+    }
+    if (typeof document !== "undefined" && document.hidden) {
+      return true;
+    }
+    return shouldDeferBackgroundWork();
+  },
+
+  pauseForUserWork(delay = 2500) {
+    this.schedule({ reason: "user-work", delay });
+  },
+
+  async run(options = {}) {
+    if (this.running) {
+      this.rerunRequested = true;
+      return;
+    }
+    if (!state.session) {
+      await refreshOutboxCounts();
+      return;
+    }
+    if (this.shouldPause(options)) {
+      this.schedule({ reason: options.reason || "paused", delay: 2500 });
+      return;
+    }
+
+    this.running = true;
+    state.syncEngineScheduled = false;
+    state.syncing = true;
+    state.syncEngineLastRunAt = Date.now();
+    state.syncEngineLastError = "";
+    updateAccountUi();
+
+    try {
+      await ensureDatabaseReady();
+      await claimLocalRecordsForUser(state.session.user.id);
+      const ready = await CloudBaseAdapter.ensureReady();
+      if (!ready) {
+        await refreshOutboxCounts();
+        return;
+      }
+      await this.uploadPendingOps(options);
+      if (this.shouldPause(options)) {
+        this.pauseForUserWork();
+        return;
+      }
+      await this.processLegacyOutbox(options);
+      if (this.shouldPause(options)) {
+        this.pauseForUserWork();
+        return;
+      }
+      await this.pullRemoteChanges(options);
+      setBackgroundSyncError("");
+    } catch (error) {
+      if (isLocalDatabaseNotReadyError(error)) {
+        console.warn("Local database is recovering; SyncEngine will retry.", error);
+        setBackgroundSyncError("");
+        this.schedule({ reason: "local-db-recover", delay: 1500 });
+      } else {
+        console.warn("SyncEngine failed.", error);
+        state.syncEngineLastError = getErrorMessage(error) || String(error || "");
+        setBackgroundSyncError(state.syncEngineLastError);
+      }
+    } finally {
+      this.running = false;
+      state.syncing = false;
+      await refreshOutboxCounts();
+      await scheduleLocalOperationRetry();
+      updateAccountUi();
+      if (this.rerunRequested) {
+        this.rerunRequested = false;
+        this.schedule({ reason: "rerun", delay: 1000 });
+      }
+    }
+  },
+
+  async uploadPendingOps(options = {}) {
+    const batch = await compactLocalOperationsForSync(await getRunnableLocalOperations(options.limit || 24));
+    for (const operation of batch) {
+      if (this.shouldPause(options)) {
+        this.pauseForUserWork();
+        break;
+      }
+      await markLocalOpSyncing(operation);
+      const targets = getSyncTargetsForOperation(operation);
+      await Promise.all(targets.map((target) => markEntitySyncing(target.entityType, target.entityId)));
+      try {
+        await dispatchLocalOperationToCloud(operation);
+        await markLocalOpSynced(operation);
+        await Promise.all(targets.map((target) => markEntitySynced(target.entityType, target.entityId)));
+      } catch (error) {
+        await markLocalOpFailed(operation, error);
+        await Promise.all(targets.map((target) => markEntityFailed(target.entityType, target.entityId, error)));
+      }
+    }
+  },
+
+  async processLegacyOutbox(options = {}) {
+    await processSyncOutbox({
+      force: Boolean(options.manual || options.force),
+      ensureConnection: true,
+      fromSyncEngine: true,
+    });
+  },
+
+  async pullRemoteChanges(options = {}) {
+    await CloudBaseAdapter.pullChangedSince(options.since || 0);
+  },
+};
 
 function createAssetId(prefix = "asset") {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -10000,7 +10712,7 @@ function queueAccountBackgroundSync(userId, message = "", options = {}) {
     try {
       await ensureDatabaseReady();
       await claimLocalRecordsForUser(userId);
-      await syncNow();
+      await SyncEngine.run({ reason: "account-background", force: Boolean(options.immediate) });
       setBackgroundSyncError("");
     } catch (error) {
       if (isLocalDatabaseNotReadyError(error)) {
@@ -10094,7 +10806,7 @@ function queueSync() {
     return;
   }
 
-  window.setTimeout(() => syncNow(), 3500);
+  SyncEngine?.schedule?.({ reason: "queue-sync", delay: 3500 });
 }
 
 function queueScoreCloudUpload(scoreId, message = "") {
@@ -10240,7 +10952,7 @@ function kickOutbox(delay = 600) {
       window.setTimeout(() => kickOutbox(0), 1500);
       return;
     }
-    processSyncOutbox({ ensureConnection: true }).catch((error) => console.warn(error));
+    SyncEngine?.run?.({ reason: "outbox", ensureConnection: true }).catch((error) => console.warn(error));
   }, delay);
 }
 
@@ -10256,18 +10968,45 @@ function scheduleOutboxRetry(tasks) {
   window.clearTimeout(state.outboxTimer);
   state.outboxTimer = window.setTimeout(() => {
     state.outboxTimer = 0;
-    processSyncOutbox().catch((error) => console.warn(error));
+    SyncEngine?.run?.({ reason: "outbox-retry" }).catch((error) => console.warn(error));
   }, delay);
 }
 
 function updateOutboxIndicator() {
-  // The outbox still runs in the background, but the Mine page no longer shows
-  // the "pending sync / retry" panel because it was too noisy for daily use.
+  const outboxPending = state.outboxCounts?.pending || 0;
+  const outboxFailed = state.outboxCounts?.failed || 0;
+  const localPending = state.localOpCounts?.pending || 0;
+  const localSyncing = state.localOpCounts?.syncing || 0;
+  const localFailed = state.localOpCounts?.failed || 0;
+  const localConflict = state.localOpCounts?.conflict || 0;
+  const dirty = state.syncStateCounts?.dirty || 0;
+  const syncing = state.syncStateCounts?.syncing || 0;
+  const failed = state.syncStateCounts?.failed || 0;
+  const conflict = state.syncStateCounts?.conflict || 0;
+  const totalPending = outboxPending + localPending + dirty;
+  const totalSyncing = localSyncing + syncing + (state.syncing ? 1 : 0);
+  const totalFailed = outboxFailed + localFailed + failed;
+  const totalConflict = localConflict + conflict;
+  const hasVisibleState = Boolean(totalPending || totalSyncing || totalFailed || totalConflict || state.backgroundSyncError);
+
   if (elements.syncOutboxPanel) {
-    elements.syncOutboxPanel.hidden = true;
+    elements.syncOutboxPanel.hidden = !hasVisibleState;
+  }
+  if (elements.syncOutboxState) {
+    if (totalFailed || totalConflict || state.backgroundSyncError) {
+      elements.syncOutboxState.textContent = totalConflict
+        ? `同步冲突 ${totalConflict} 项，请稍后重试`
+        : `同步失败 ${totalFailed || 1} 项，点击重试`;
+    } else if (totalSyncing) {
+      elements.syncOutboxState.textContent = "正在同步...";
+    } else if (totalPending) {
+      elements.syncOutboxState.textContent = `待同步 ${totalPending} 项`;
+    } else {
+      elements.syncOutboxState.textContent = "";
+    }
   }
   if (elements.retryOutboxButton) {
-    elements.retryOutboxButton.hidden = true;
+    elements.retryOutboxButton.hidden = !(totalFailed || totalConflict || state.backgroundSyncError);
     elements.retryOutboxButton.disabled = false;
   }
 }
@@ -10275,7 +11014,12 @@ function updateOutboxIndicator() {
 async function refreshOutboxCounts() {
   try {
     await ensureDatabaseReady();
-    applyOutboxCounts(await getAllOutboxTasks());
+    const [tasks, localOps, syncStates] = await Promise.all([
+      getAllOutboxTasks(),
+      getAllLocalOps().catch(() => []),
+      getAllSyncStates().catch(() => []),
+    ]);
+    applyOutboxCounts(tasks, localOps, syncStates);
   } catch (error) {
     if (!isLocalDatabaseNotReadyError(error)) {
       console.warn(error);
@@ -10381,20 +11125,36 @@ async function processSyncOutbox(options = {}) {
         console.warn(error);
       }
     }
-    applyOutboxCounts(remaining);
+    await refreshOutboxCounts();
     scheduleOutboxRetry(remaining);
   }
 }
 
 // 根据任务列表更新计数与最近的失败原因，并刷新面板。
-function applyOutboxCounts(tasks) {
+function applyOutboxCounts(tasks, localOps = [], syncStates = []) {
   const list = tasks || [];
   state.outboxCounts = {
     pending: list.filter((task) => task.status === OUTBOX_STATUS_PENDING).length,
     failed: list.filter((task) => task.status === OUTBOX_STATUS_FAILED).length,
   };
+  const ops = (localOps || []).map(normalizeLocalOperationRecord);
+  state.localOpCounts = {
+    pending: ops.filter((operation) => normalizeLocalOpStatus(operation.status) === LOCAL_OP_STATUS_PENDING).length,
+    syncing: ops.filter((operation) => normalizeLocalOpStatus(operation.status) === LOCAL_OP_STATUS_SYNCING).length,
+    failed: ops.filter((operation) => normalizeLocalOpStatus(operation.status) === LOCAL_OP_STATUS_FAILED).length,
+    conflict: ops.filter((operation) => normalizeLocalOpStatus(operation.status) === LOCAL_OP_STATUS_CONFLICT).length,
+  };
+  const states = syncStates || [];
+  state.syncStateCounts = {
+    dirty: states.filter((item) => item.dirty || item.status === SYNC_STATE_DIRTY).length,
+    syncing: states.filter((item) => item.status === SYNC_STATE_SYNCING).length,
+    failed: states.filter((item) => item.status === SYNC_STATE_FAILED).length,
+    conflict: states.filter((item) => item.status === SYNC_STATE_CONFLICT).length,
+  };
   const withError = list.find((task) => task.lastError);
-  state.outboxLastError = withError?.lastError || "";
+  const failedOp = ops.find((operation) => operation.error);
+  const failedState = states.find((item) => item.lastError);
+  state.outboxLastError = withError?.lastError || failedOp?.error || failedState?.lastError || "";
   updateOutboxIndicator();
 }
 
@@ -10416,7 +11176,7 @@ async function retryFailedOutboxTasks() {
       }
     }
   }
-  await processSyncOutbox({ force: true, ensureConnection: true });
+  await SyncEngine.run({ manual: true, force: true, reason: "retry-outbox" });
 
   // 同时重试后台全量同步（清除“云端同步暂时失败”的提示）。
   if (state.session) {
@@ -10425,7 +11185,7 @@ async function retryFailedOutboxTasks() {
         await initializeCloud();
       }
       await ensureDatabaseReady();
-      await syncNow();
+      await SyncEngine.run({ manual: true, force: true, reason: "retry-background" });
       setBackgroundSyncError("");
     } catch (error) {
       if (isLocalDatabaseNotReadyError(error)) {
@@ -10753,7 +11513,8 @@ async function handleManualSync() {
       return;
     }
 
-    await performSync(options);
+    await SyncEngine.run({ manual: true, force: true, reason: "manual" });
+    await loadScores();
     setStatus("刷新完成。");
   } catch (error) {
     console.error(error);
