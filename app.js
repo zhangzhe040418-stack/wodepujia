@@ -1,5 +1,5 @@
 const DB_NAME = "my-score-folder";
-const DB_VERSION = 12;
+const DB_VERSION = 13;
 const STORE_NAME = "scores";
 const FOLDER_STORE_NAME = "folders";
 const PAGE_STORE_NAME = "score_pages";
@@ -14,7 +14,7 @@ const SYNC_STATE_STORE_NAME = "sync_state";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 2;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v225";
+const APP_BUILD = "v227";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -34,6 +34,7 @@ const SYNC_STATE_CONFLICT = "conflict";
 const SYNC_STATE_DELETED = "deleted";
 // 指数退避（毫秒），超出长度用最后一个值。
 const OUTBOX_BACKOFF_MS = [0, 5000, 15000, 60000, 300000, 900000];
+const DEXIE_INIT_TIMEOUT = 2000;
 const SYNC_STATUS_LOCAL = "local";
 const SYNC_STATUS_PENDING = "pending";
 const SYNC_STATUS_SYNCED = "synced";
@@ -329,6 +330,9 @@ const state = {
 
 const elements = {};
 const operationLocks = new Set();
+let dbx = null;
+let dexieInitPromise = null;
+let startupVisibilityWatchdogInstalled = false;
 
 // 返回手势：不依赖浏览器历史（iOS 的历史手势会缓存/预览页面，导致右滑“撞回”查看器）。
 // 改为自行识别“从屏幕左边缘向右滑”的手势，仅在有返回键的界面（文件夹 / 查看器）里当返回键用；
@@ -445,6 +449,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   registerServiceWorker();
   renderPending();
   refreshIcons();
+  installStartupVisibilityWatchdog();
 
   try {
     state.db = await openDatabase();
@@ -467,6 +472,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setStatus("");
   updateAccountUi();
   refreshOutboxCounts();
+  initializeDexieDatabaseInBackground(300);
   // 明确的启动账号恢复流程：自动恢复登录 + 必要时轻量拉取云端歌谱。
   restoreStartupAuthSession();
   // 每月 1 号自动弹出“支持作者”页面（稍延迟，等首屏稳定）。
@@ -494,6 +500,20 @@ function setAppReady(ready) {
       button.disabled = !state.appReady;
     }
   });
+}
+
+function installStartupVisibilityWatchdog() {
+  if (startupVisibilityWatchdogInstalled) {
+    return;
+  }
+  startupVisibilityWatchdogInstalled = true;
+  window.setTimeout(() => {
+    if (!state.appReady) {
+      console.warn("[startup] appReady timeout, forcing shell visible");
+      setAppReady(true);
+      setStatus("启动较慢，正在继续加载本地谱夹...");
+    }
+  }, 4000);
 }
 
 function ensureAppReady(message = "正在读取谱夹，请稍后再试。") {
@@ -687,6 +707,7 @@ async function resetDatabaseAndReplayDelete(action) {
 
 // 彻底删除本地数据库（连接卡死/损坏到“怎么都救不回”时使用）。带超时与 onblocked 兜底，绝不悬挂。
 async function deleteLocalDatabase() {
+  closeDexieDatabase();
   try {
     state.db?.close();
   } catch (error) {
@@ -743,6 +764,7 @@ function clearInMemoryDataState() {
 async function resetLocalDatabaseAndResync() {
   await deleteLocalDatabase();
   state.db = await openDatabase();
+  initializeDexieDatabaseInBackground(0);
   setAppReady(true);
   clearInMemoryDataState();
 
@@ -4979,7 +5001,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=241");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=243");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -5860,6 +5882,103 @@ async function loadScores() {
   }
 }
 
+function ensureStoreIndex(store, name, keyPath) {
+  if (!store || store.indexNames.contains(name)) {
+    return;
+  }
+  store.createIndex(name, keyPath, { unique: false });
+}
+
+function ensureDexieCompatibleIndexes(db, transaction) {
+  if (!db || !transaction) {
+    return;
+  }
+
+  const ensure = (storeName, indexes) => {
+    if (!db.objectStoreNames.contains(storeName)) {
+      return;
+    }
+    const store = transaction.objectStore(storeName);
+    indexes.forEach(([name, keyPath]) => ensureStoreIndex(store, name, keyPath));
+  };
+
+  ensure(STORE_NAME, [
+    ["name", "name"],
+    ["createdAt", "createdAt"],
+  ]);
+  ensure(FOLDER_STORE_NAME, [
+    ["name", "name"],
+    ["createdAt", "createdAt"],
+  ]);
+  ensure(PAGE_STORE_NAME, [
+    ["assetId", "assetId"],
+    ["pageIndex", "pageIndex"],
+    ["updatedAt", "updatedAt"],
+    ["storagePath", "storagePath"],
+  ]);
+  ensure(ASSET_STORE_NAME, [
+    ["scoreId", "scoreId"],
+    ["pageId", "pageId"],
+    ["userId", "userId"],
+    ["kind", "kind"],
+    ["hash", "hash"],
+    ["localState", "localState"],
+    ["cloudPath", "cloudPath"],
+    ["storagePath", "storagePath"],
+    ["updatedAt", "updatedAt"],
+    ["deletedAt", "deletedAt"],
+  ]);
+  ensure(SETLIST_STORE_NAME, [
+    ["name", "name"],
+    ["createdAt", "createdAt"],
+  ]);
+  ensure(SETLIST_ITEM_STORE_NAME, [
+    ["sortOrder", "sortOrder"],
+    ["updatedAt", "updatedAt"],
+  ]);
+  ensure(TRASH_STORE_NAME, [
+    ["type", "type"],
+    ["originalId", "originalId"],
+    ["userId", "userId"],
+    ["deletedAt", "deletedAt"],
+    ["expiresAt", "expiresAt"],
+  ]);
+  ensure(SYNC_OUTBOX_STORE_NAME, [
+    ["userId", "userId"],
+    ["type", "type"],
+    ["entityId", "entityId"],
+    ["updatedAt", "updatedAt"],
+    ["nextRetryAt", "nextRetryAt"],
+  ]);
+  ensure(LOCAL_OP_STORE_NAME, [
+    ["status", "status"],
+    ["priority", "priority"],
+    ["createdAt", "createdAt"],
+    ["updatedAt", "updatedAt"],
+    ["userId", "userId"],
+    ["type", "type"],
+    ["entityType", "entityType"],
+    ["entityId", "entityId"],
+    ["nextRetryAt", "nextRetryAt"],
+    ["batchKey", "batchKey"],
+    ["[priority+createdAt]", ["priority", "createdAt"]],
+    ["[entityType+entityId]", ["entityType", "entityId"]],
+    ["[userId+status]", ["userId", "status"]],
+  ]);
+  ensure(SYNC_STATE_STORE_NAME, [
+    ["status", "status"],
+    ["dirty", "dirty"],
+    ["userId", "userId"],
+    ["entityType", "entityType"],
+    ["entityId", "entityId"],
+    ["updatedAt", "updatedAt"],
+    ["lastLocalAt", "lastLocalAt"],
+    ["lastSyncedAt", "lastSyncedAt"],
+    ["[entityType+entityId]", ["entityType", "entityId"]],
+    ["[userId+status]", ["userId", "status"]],
+  ]);
+}
+
 function openDatabase() {
   return new Promise((resolve, reject) => {
     if (!("indexedDB" in window)) {
@@ -6171,6 +6290,8 @@ function openDatabase() {
           syncStateStore.createIndex("by_lastLocalAt", "lastLocalAt", { unique: false });
         }
       }
+
+      ensureDexieCompatibleIndexes(db, request.transaction);
     };
 
     request.onsuccess = () => finish(() => resolve(request.result));
@@ -6196,6 +6317,7 @@ function reopenDatabase() {
       console.warn("关闭数据库连接失败", error);
     }
     state.db = await openDatabase();
+    initializeDexieDatabaseInBackground(0);
     return state.db;
   })();
   reopenDatabasePromise.finally(() => {
@@ -6213,12 +6335,426 @@ async function ensureDatabaseReady() {
   }
   try {
     state.db = await openDatabase();
+    initializeDexieDatabaseInBackground(0);
     return state.db;
   } catch (error) {
     const readyError = createNamedError("LocalDatabaseNotReadyError", "本地数据库未准备好，请重新打开 App 后重试。");
     readyError.cause = error;
     throw readyError;
   }
+}
+
+function createDexieDatabase() {
+  if (!window.Dexie) {
+    console.warn("[dexie] Dexie 未加载，跳过 Dexie 初始化。");
+    return null;
+  }
+
+  const db = new window.Dexie(DB_NAME);
+  const dexieStores = {
+    [STORE_NAME]: "id, folderId, userId, name, updatedAt, createdAt, deletedAt, syncStatus",
+    [FOLDER_STORE_NAME]: "id, userId, name, updatedAt, createdAt, deletedAt, syncStatus",
+    [PAGE_STORE_NAME]: "id, scoreId, assetId, userId, pageIndex, updatedAt, deletedAt, storagePath",
+    [ASSET_STORE_NAME]: "id, scoreId, pageId, userId, kind, hash, localState, cloudPath, storagePath, updatedAt, deletedAt",
+    [SETLIST_STORE_NAME]: "id, userId, name, updatedAt, createdAt, deletedAt, syncStatus",
+    [SETLIST_ITEM_STORE_NAME]: "id, setlistId, scoreId, userId, sortOrder, updatedAt, deletedAt",
+    [TRASH_STORE_NAME]: "id, type, originalId, userId, deletedAt, expiresAt",
+    [ANNOTATION_STORE_NAME]: "id, scoreId, pageId, userId, updatedAt, deletedAt",
+    [SYNC_OUTBOX_STORE_NAME]: "id, status, userId, type, entityId, updatedAt, nextRetryAt, nextAttemptAt",
+    [LOCAL_OP_STORE_NAME]:
+      "id, status, priority, createdAt, updatedAt, userId, type, entityType, entityId, nextRetryAt, batchKey, [priority+createdAt], [entityType+entityId], [userId+status]",
+    [SYNC_STATE_STORE_NAME]:
+      "id, status, dirty, userId, entityType, entityId, updatedAt, lastLocalAt, lastSyncedAt, [entityType+entityId], [userId+status]",
+  };
+  db.version(DB_VERSION).stores(dexieStores);
+  db.on("blocked", () => {
+    console.warn("[dexie] open blocked，Dexie 将回退到原 IndexedDB。");
+  });
+  db.on("versionchange", () => {
+    console.warn("[dexie] versionchange，关闭 Dexie 连接。");
+    closeDexieDatabase();
+  });
+  return db;
+}
+
+async function initializeDexieDatabase() {
+  if (!window.Dexie) {
+    console.warn("[dexie] Dexie 未加载，跳过 Dexie 初始化。");
+    closeDexieDatabase();
+    installDexieDebugTools();
+    return false;
+  }
+  if (dbx?.isOpen?.()) {
+    return true;
+  }
+  if (dexieInitPromise) {
+    return dexieInitPromise;
+  }
+  dexieInitPromise = (async () => {
+    try {
+      closeDexieDatabase();
+      dbx = createDexieDatabase();
+      if (!dbx) {
+        installDexieDebugTools();
+        return false;
+      }
+      await dbx.open();
+      console.log("[dexie] opened");
+      installDexieDebugTools();
+      return true;
+    } catch (error) {
+      console.warn("[dexie] open failed，回退到原 IndexedDB。", error);
+      closeDexieDatabase();
+      installDexieDebugTools();
+      return false;
+    } finally {
+      dexieInitPromise = null;
+    }
+  })();
+  return dexieInitPromise;
+}
+
+function initializeDexieDatabaseInBackground(delay = 0) {
+  window.setTimeout(async () => {
+    try {
+      await withTimeout(
+        initializeDexieDatabase(),
+        DEXIE_INIT_TIMEOUT,
+        "Dexie 初始化超时，已回退到原 IndexedDB。",
+      );
+      console.log("[dexie] background init complete");
+    } catch (error) {
+      console.warn("[dexie] background init skipped:", error);
+      closeDexieDatabase();
+      installDexieDebugTools();
+    }
+  }, Math.max(0, Number(delay) || 0));
+}
+
+function closeDexieDatabase() {
+  try {
+    if (dbx) {
+      dbx.close();
+    }
+  } catch (error) {
+    console.warn("[dexie] close failed:", error);
+  } finally {
+    dbx = null;
+    dexieInitPromise = null;
+  }
+}
+
+function isDexieReady() {
+  return Boolean(dbx && dbx.isOpen());
+}
+
+function getDexieTable(storeName) {
+  if (!isDexieReady()) {
+    return null;
+  }
+  try {
+    return dbx.table(storeName);
+  } catch (error) {
+    console.warn("[dexie] table not found:", storeName, error);
+    return null;
+  }
+}
+
+function getFallbackIndexKeyPath(storeName, indexName) {
+  const maps = {
+    [ASSET_STORE_NAME]: {
+      by_score: "scoreId",
+      by_page: "pageId",
+      by_kind: "kind",
+      by_hash: "hash",
+      by_localState: "localState",
+      by_cloudPath: "cloudPath",
+      by_updatedAt: "updatedAt",
+    },
+    [LOCAL_OP_STORE_NAME]: {
+      by_status: "status",
+      by_priority_createdAt: ["priority", "createdAt"],
+      by_entity: ["entityType", "entityId"],
+      by_createdAt: "createdAt",
+      by_user_status: ["userId", "status"],
+      by_nextRetryAt: "nextRetryAt",
+      by_batchKey: "batchKey",
+    },
+    [SYNC_STATE_STORE_NAME]: {
+      by_status: "status",
+      by_dirty: "dirty",
+      by_entity: ["entityType", "entityId"],
+      by_user_status: ["userId", "status"],
+      by_updatedAt: "updatedAt",
+      by_lastLocalAt: "lastLocalAt",
+    },
+  };
+  return maps[storeName]?.[indexName] || indexName;
+}
+
+function recordMatchesIndexValue(record, keyPath, value) {
+  const actual = Array.isArray(keyPath)
+    ? keyPath.map((key) => record?.[key])
+    : record?.[keyPath];
+  if (Array.isArray(keyPath)) {
+    const expected = Array.isArray(value) ? value : [value];
+    return expected.length === actual.length && expected.every((item, index) => String(item ?? "") === String(actual[index] ?? ""));
+  }
+  return actual === value || String(actual ?? "") === String(value ?? "");
+}
+
+async function dexieGet(storeName, id) {
+  const table = getDexieTable(storeName);
+  if (!table) {
+    return readStoreRecord(storeName, id);
+  }
+  try {
+    return (await table.get(String(id))) || null;
+  } catch (error) {
+    console.warn("[dexie] get failed; falling back.", storeName, error);
+    return readStoreRecord(storeName, id);
+  }
+}
+
+async function dexieToArray(storeName) {
+  const table = getDexieTable(storeName);
+  if (!table) {
+    return readStoreAll(storeName);
+  }
+  try {
+    return await table.toArray();
+  } catch (error) {
+    console.warn("[dexie] toArray failed; falling back.", storeName, error);
+    return readStoreAll(storeName);
+  }
+}
+
+async function dexieWhereEquals(storeName, indexName, value) {
+  const table = getDexieTable(storeName);
+  if (table) {
+    try {
+      return await table.where(indexName).equals(value).toArray();
+    } catch (error) {
+      console.warn("[dexie] indexed query failed; falling back.", storeName, indexName, error);
+    }
+  }
+  const rows = await readStoreAll(storeName);
+  const keyPath = getFallbackIndexKeyPath(storeName, indexName);
+  return rows.filter((row) => recordMatchesIndexValue(row, keyPath, value));
+}
+
+function dexiePut(storeName, record, options = {}) {
+  const table = getDexieTable(storeName);
+  if (!table) {
+    return putStoreRecord(storeName, record, options.timeoutMs || LOCAL_SAVE_TIMEOUT, options.timeoutMessage, options);
+  }
+  return enqueueLocalWrite(
+    `dexie-put:${storeName}`,
+    () => table.put(record),
+    { priority: options.priority || "low", timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT },
+  );
+}
+
+function dexieBulkPut(storeName, records = [], options = {}) {
+  const list = (records || []).filter(Boolean);
+  if (!list.length) {
+    return Promise.resolve();
+  }
+  const table = getDexieTable(storeName);
+  if (!table) {
+    return enqueueLocalWrite(
+      `bulk-put:${storeName}`,
+      () =>
+        runIdbTransaction(
+          storeName,
+          "readwrite",
+          (store) => {
+            list.forEach((record) => store.put(record));
+          },
+          { timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT, timeoutMessage: options.timeoutMessage },
+        ),
+      { priority: options.priority || "low", timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT },
+    );
+  }
+  return enqueueLocalWrite(
+    `dexie-bulk-put:${storeName}`,
+    () => table.bulkPut(list),
+    { priority: options.priority || "low", timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT },
+  );
+}
+
+function dexieDelete(storeName, id, options = {}) {
+  const table = getDexieTable(storeName);
+  if (!table) {
+    return deleteStoreRecord(storeName, id, options.timeoutMessage);
+  }
+  return enqueueLocalWrite(
+    `dexie-delete:${storeName}`,
+    () => table.delete(String(id)),
+    { priority: options.priority || "low", timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT },
+  );
+}
+
+function dexieBulkDelete(storeName, ids = [], options = {}) {
+  const list = (ids || []).filter(Boolean).map(String);
+  if (!list.length) {
+    return Promise.resolve();
+  }
+  const table = getDexieTable(storeName);
+  if (!table) {
+    return enqueueLocalWrite(
+      `bulk-delete:${storeName}`,
+      () =>
+        runIdbTransaction(
+          storeName,
+          "readwrite",
+          (store) => {
+            list.forEach((id) => store.delete(id));
+          },
+          { timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT, timeoutMessage: options.timeoutMessage },
+        ),
+      { priority: options.priority || "low", timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT },
+    );
+  }
+  return enqueueLocalWrite(
+    `dexie-bulk-delete:${storeName}`,
+    () => table.bulkDelete(list),
+    { priority: options.priority || "low", timeoutMs: options.timeoutMs || LOCAL_SAVE_TIMEOUT },
+  );
+}
+
+function filterActiveRows(rows = []) {
+  return rows.filter((row) => !row?.deletedAt);
+}
+
+const Repositories = {
+  scores: {
+    get: (id) => dexieGet(STORE_NAME, id),
+    put: (score, options = {}) => dexiePut(STORE_NAME, toScoreRecord(score), options),
+    bulkPut: (scores, options = {}) => dexieBulkPut(STORE_NAME, (scores || []).map(toScoreRecord), options),
+    getAll: () => dexieToArray(STORE_NAME),
+    getAllActive: async () => filterActiveRows(await dexieToArray(STORE_NAME)),
+    getByFolder: async (folderId) => filterActiveRows(await dexieWhereEquals(STORE_NAME, "folderId", folderId || "")),
+    markDeleted: async (id, deletedAt, options = {}) => {
+      const score = await dexieGet(STORE_NAME, id);
+      return score ? dexiePut(STORE_NAME, { ...score, deletedAt, updatedAt: deletedAt || new Date().toISOString() }, options) : null;
+    },
+  },
+  pages: {
+    get: (id) => dexieGet(PAGE_STORE_NAME, id),
+    put: (page, options = {}) => dexiePut(PAGE_STORE_NAME, normalizePageForStore(page), options),
+    bulkPut: (pages, options = {}) => dexieBulkPut(PAGE_STORE_NAME, (pages || []).map(normalizePageForStore), options),
+    getAll: () => dexieToArray(PAGE_STORE_NAME),
+    getByScore: (scoreId) => dexieWhereEquals(PAGE_STORE_NAME, "scoreId", scoreId),
+    getActiveByScore: async (scoreId) => filterActiveRows(await dexieWhereEquals(PAGE_STORE_NAME, "scoreId", scoreId)),
+    markDeleted: async (id, deletedAt, options = {}) => {
+      const page = await dexieGet(PAGE_STORE_NAME, id);
+      return page ? dexiePut(PAGE_STORE_NAME, normalizePageForStore({ ...page, deletedAt, updatedAt: deletedAt || new Date().toISOString() }), options) : null;
+    },
+  },
+  assets: {
+    get: (id) => dexieGet(ASSET_STORE_NAME, id),
+    put: (asset, options = {}) => dexiePut(ASSET_STORE_NAME, asset, options),
+    getAll: () => dexieToArray(ASSET_STORE_NAME),
+    getByPage: async (pageId) => (await dexieToArray(ASSET_STORE_NAME)).filter((asset) => String(asset.pageId || "") === String(pageId || "")),
+    markDeleted: async (id, deletedAt, options = {}) => {
+      const asset = await dexieGet(ASSET_STORE_NAME, id);
+      return asset ? dexiePut(ASSET_STORE_NAME, { ...asset, deletedAt, updatedAt: deletedAt || new Date().toISOString() }, options) : null;
+    },
+  },
+  folders: {
+    get: (id) => dexieGet(FOLDER_STORE_NAME, id),
+    put: (folder, options = {}) => dexiePut(FOLDER_STORE_NAME, folder, options),
+    bulkPut: (folders, options = {}) => dexieBulkPut(FOLDER_STORE_NAME, folders || [], options),
+    getAll: () => dexieToArray(FOLDER_STORE_NAME),
+    getAllActive: async () => filterActiveRows(await dexieToArray(FOLDER_STORE_NAME)),
+  },
+  setlists: {
+    get: (id) => dexieGet(SETLIST_STORE_NAME, id),
+    put: (setlist, options = {}) => dexiePut(SETLIST_STORE_NAME, setlist, options),
+    getAll: () => dexieToArray(SETLIST_STORE_NAME),
+    getAllActive: async () => filterActiveRows(await dexieToArray(SETLIST_STORE_NAME)),
+  },
+  setlistItems: {
+    getAll: () => dexieToArray(SETLIST_ITEM_STORE_NAME),
+    getBySetlist: (setlistId) => dexieWhereEquals(SETLIST_ITEM_STORE_NAME, "setlistId", setlistId),
+    bulkPut: (items, options = {}) => dexieBulkPut(SETLIST_ITEM_STORE_NAME, items || [], options),
+  },
+  trash: {
+    getAll: () => dexieToArray(TRASH_STORE_NAME),
+    get: (id) => dexieGet(TRASH_STORE_NAME, id),
+  },
+  annotations: {
+    getAll: () => dexieToArray(ANNOTATION_STORE_NAME),
+    getByScore: (scoreId) => dexieWhereEquals(ANNOTATION_STORE_NAME, "scoreId", scoreId),
+    getByPage: (pageId) => dexieWhereEquals(ANNOTATION_STORE_NAME, "pageId", pageId),
+  },
+  syncOutbox: {
+    getAll: () => dexieToArray(SYNC_OUTBOX_STORE_NAME),
+  },
+  localOps: {
+    getAll: () => dexieToArray(LOCAL_OP_STORE_NAME),
+    getPendingBatch: async (limit = 20) => {
+      const now = Date.now();
+      const rows = (await dexieToArray(LOCAL_OP_STORE_NAME)).map(normalizeLocalOperationRecord);
+      return rows
+        .filter((operation) => isLocalOpRunnable(operation, now))
+        .sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0))
+        .slice(0, limit);
+    },
+    markSyncing: (id) => updateLocalOperationStatus(id, LOCAL_OP_STATUS_SYNCING, { startedAt: Date.now(), error: "", nextRetryAt: 0 }),
+    markSynced: (id) => updateLocalOperationStatus(id, LOCAL_OP_STATUS_SYNCED, { finishedAt: Date.now(), syncedAt: Date.now(), error: "", nextRetryAt: 0 }),
+    markFailed: (id, error) => updateLocalOperationStatus(id, LOCAL_OP_STATUS_FAILED, { error: getErrorMessage(error) || String(error || "") }),
+  },
+  syncState: {
+    getAll: () => dexieToArray(SYNC_STATE_STORE_NAME),
+    get: (entityType, entityId) => dexieGet(SYNC_STATE_STORE_NAME, buildSyncStateId(entityType, entityId)),
+    put: (record, options = {}) => dexiePut(SYNC_STATE_STORE_NAME, record, options),
+    getDirtyBatch: async (limit = 20) =>
+      (await dexieToArray(SYNC_STATE_STORE_NAME)).filter((item) => item.dirty || item.status === SYNC_STATE_DIRTY).slice(0, limit),
+    getFailedBatch: async (limit = 20) =>
+      (await dexieToArray(SYNC_STATE_STORE_NAME)).filter((item) => item.status === SYNC_STATE_FAILED).slice(0, limit),
+  },
+};
+
+function subscribeDexieQuery(queryFactory, callback) {
+  if (!window.Dexie?.liveQuery || !isDexieReady()) {
+    return null;
+  }
+  try {
+    return window.Dexie.liveQuery(queryFactory).subscribe({
+      next: callback,
+      error: (error) => console.warn("[dexie] liveQuery failed", error),
+    });
+  } catch (error) {
+    console.warn("[dexie] liveQuery subscribe failed", error);
+    return null;
+  }
+}
+
+function installDexieDebugTools() {
+  window.__debugDexie = {
+    isReady: () => isDexieReady(),
+    count: async () => {
+      if (!isDexieReady()) {
+        return { ready: false };
+      }
+      return {
+        scores: await dbx.table(STORE_NAME).count(),
+        pages: await dbx.table(PAGE_STORE_NAME).count(),
+        assets: await dbx.table(ASSET_STORE_NAME).count(),
+        localOps: await dbx.table(LOCAL_OP_STORE_NAME).count(),
+        syncOutbox: await dbx.table(SYNC_OUTBOX_STORE_NAME).count(),
+        syncState: await dbx.table(SYNC_STATE_STORE_NAME).count(),
+      };
+    },
+    sample: async (storeName, limit = 5) => {
+      if (!isDexieReady()) {
+        return [];
+      }
+      return dbx.table(storeName).limit(limit).toArray();
+    },
+  };
 }
 
 function isLocalDatabaseNotReadyError(error) {
@@ -6876,11 +7412,11 @@ function mutateSyncStateStore(store, target, patch = {}) {
 }
 
 function getAllSyncStates() {
-  return readStoreAll(SYNC_STATE_STORE_NAME);
+  return Repositories.syncState.getAll();
 }
 
 function getAllLocalOps() {
-  return readStoreAll(LOCAL_OP_STORE_NAME).then((ops) => ops.map(normalizeLocalOperationRecord));
+  return Repositories.localOps.getAll().then((ops) => ops.map(normalizeLocalOperationRecord));
 }
 
 function markEntityDirty(entityType, entityId, options = {}) {
@@ -7086,7 +7622,7 @@ function isLocalOpRunnable(operation, now = Date.now()) {
 async function getRunnableLocalOperations(limit = 24) {
   const now = Date.now();
   const userId = state.session?.user?.id || "";
-  const operations = (await getAllLocalOps())
+  const operations = (await Repositories.localOps.getPendingBatch(Math.max(limit * 3, 24)))
     .filter((operation) => isLocalOpRunnable(operation, now))
     .filter((operation) => !userId || !operation.userId || operation.userId === userId)
     .sort((a, b) => {
@@ -7659,6 +8195,9 @@ function readPagesForScoreIds(scoreIds) {
   if (!idSet.size) {
     return Promise.resolve([]);
   }
+  if (isDexieReady()) {
+    return Promise.all(Array.from(idSet).map((scoreId) => Repositories.pages.getByScore(scoreId))).then((groups) => groups.flat());
+  }
   return runIdbTransaction(
     PAGE_STORE_NAME,
     "readonly",
@@ -7689,6 +8228,9 @@ function readSetlistItemsForScoreIds(scoreIds) {
   const idSet = new Set((scoreIds || []).map(String));
   if (!idSet.size) {
     return Promise.resolve([]);
+  }
+  if (isDexieReady()) {
+    return dexieToArray(SETLIST_ITEM_STORE_NAME).then((items) => items.filter((item) => idSet.has(String(item.scoreId))));
   }
   return runIdbTransaction(
     SETLIST_ITEM_STORE_NAME,
@@ -8262,11 +8804,11 @@ function hardDeleteScoresLocalAtomic(scoreIds) {
 // ===== 回收站（本地快照，不参与云端同步）=====
 
 function getAllTrashEntries() {
-  return readStoreAll(TRASH_STORE_NAME);
+  return Repositories.trash.getAll();
 }
 
 function getTrashEntry(id) {
-  return readStoreRecord(TRASH_STORE_NAME, String(id));
+  return Repositories.trash.get(String(id));
 }
 
 function putTrashEntry(entry) {
@@ -8878,27 +9420,27 @@ function cleanupSetlistItemsForDeletedScores(scoreIds) {
 }
 
 function getAllScores() {
-  return readStoreAll(STORE_NAME);
+  return Repositories.scores.getAll();
 }
 
 function getAllScorePages() {
-  return readStoreAll(PAGE_STORE_NAME);
+  return Repositories.pages.getAll();
 }
 
 function getAllFolders() {
-  return readStoreAll(FOLDER_STORE_NAME);
+  return Repositories.folders.getAll();
 }
 
 function getAllSetlists() {
-  return readStoreAll(SETLIST_STORE_NAME);
+  return Repositories.setlists.getAll();
 }
 
 function getAllSetlistItems() {
-  return readStoreAll(SETLIST_ITEM_STORE_NAME);
+  return Repositories.setlistItems.getAll();
 }
 
 function getAllAnnotations() {
-  return readStoreAll(ANNOTATION_STORE_NAME);
+  return Repositories.annotations.getAll();
 }
 
 function cloneAnnotationStroke(stroke) {
@@ -10842,7 +11384,7 @@ function startScoreCloudUpload(scoreId) {
 // ===== 同步发件箱（sync_outbox）：显式入队 + 退避重试 + 可观测 =====
 
 function getAllOutboxTasks() {
-  return readStoreAll(SYNC_OUTBOX_STORE_NAME);
+  return Repositories.syncOutbox.getAll();
 }
 
 function putOutboxTask(task, options = {}) {
