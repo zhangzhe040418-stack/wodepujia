@@ -1,11 +1,11 @@
-const CACHE_NAME = "my-score-folder-v255";
+const CACHE_NAME = "my-score-folder-v256";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=239",
+  "./styles-v238.css",
   "./piano.css?v=216",
   "./piano.js?v=216",
-  "./app.js?v=239",
+  "./app-v238.js",
   "./vendor/lucide.min.js?v=47",
   "./vendor/dexie.min.js?v=1",
   "./vendor/scanner/opencv.js?v=1",

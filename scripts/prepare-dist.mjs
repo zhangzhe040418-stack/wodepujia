@@ -8,7 +8,9 @@ const dist = join(root, "dist");
 const ASSETS = [
   "index.html",
   "app.js",
+  "app-v238.js",
   "styles.css",
+  "styles-v238.css",
   "piano.css",
   "piano.js",
   "sw.js",
