@@ -1,13 +1,18 @@
-const CACHE_NAME = "my-score-folder-v243";
+const CACHE_NAME = "my-score-folder-v254";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=227",
+  "./styles.css?v=238",
   "./piano.css?v=216",
   "./piano.js?v=216",
-  "./app.js?v=227",
+  "./app.js?v=238",
   "./vendor/lucide.min.js?v=47",
   "./vendor/dexie.min.js?v=1",
+  "./vendor/scanner/opencv.js?v=1",
+  "./vendor/scanner/jscanify.min.js?v=1",
+  "./vendor/scanner/jscanify-LICENSE.txt",
+  "./vendor/scanner/opencv-LICENSE.txt",
+  "./THIRD_PARTY_NOTICES.md",
   "./cloudbase-config.js?v=47",
   "./manifest.webmanifest?v=71",
   "./assets/add-score-button.png?v=51",

@@ -2613,6 +2613,112 @@ body.support-screen-open .fab-button {
   outline: none;
 }
 
+.scan-options {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.scan-options-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scan-options h3,
+.scan-options p {
+  margin: 0;
+}
+
+.scan-options h3 {
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 900;
+}
+
+.scan-options p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.scan-engine-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-top: 7px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.scan-engine-status[data-engine="jscanify"] {
+  background: rgba(20, 184, 166, 0.14);
+  color: #0f766e;
+}
+
+.scan-mode-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scan-setting-block {
+  display: grid;
+  gap: 7px;
+}
+
+.scan-setting-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.scan-engine-choice-group .scan-mode-button {
+  min-width: 92px;
+}
+
+.scan-mode-button,
+.scan-apply-all-button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.scan-mode-button {
+  padding: 0 12px;
+}
+
+.scan-apply-all-button {
+  flex: 0 0 auto;
+  padding: 0 11px;
+  color: var(--accent);
+}
+
+.scan-mode-button.is-active {
+  border-color: rgba(37, 99, 235, 0.44);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.scan-mode-button:disabled,
+.scan-apply-all-button:disabled {
+  opacity: 0.52;
+}
+
 .pending-area {
   display: grid;
   gap: 10px;
@@ -2638,21 +2744,98 @@ body.support-screen-open .fab-button {
   grid-template-columns: 54px minmax(0, 1fr) 40px;
   align-items: center;
   gap: 10px;
+  padding: 6px;
+  border-radius: 8px;
+}
+
+.pending-card.is-processing {
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.pending-card.is-error {
+  background: rgba(239, 68, 68, 0.06);
 }
 
 .pending-thumb {
+  display: grid;
+  place-items: center;
   width: 54px;
   height: 68px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid #e0e8e5;
   border-radius: 6px;
   background: #ffffff;
+  cursor: zoom-in;
 }
 
 .pending-thumb img {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.pending-thumb:focus-visible {
+  border-color: rgba(37, 99, 235, 0.62);
+  outline: 3px solid rgba(37, 99, 235, 0.16);
+}
+
+.pending-preview-dialog {
+  width: min(94vw, 900px);
+  max-width: 94vw;
+  height: min(88vh, 980px);
+  max-height: 88vh;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+}
+
+.pending-preview-dialog::backdrop {
+  background: rgba(17, 24, 39, 0.58);
+  backdrop-filter: blur(8px);
+}
+
+.pending-preview-surface {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 28px 70px rgba(17, 24, 39, 0.28);
+}
+
+.pending-preview-surface img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: #f6f7f8;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.pending-preview-surface p {
+  margin: 0;
+  padding: 10px 48px 12px 14px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.pending-preview-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 10px 26px rgba(17, 24, 39, 0.14);
 }
 
 .pending-title {
@@ -2669,6 +2852,61 @@ body.support-screen-open .fab-button {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 0.8rem;
+}
+
+.pending-body {
+  min-width: 0;
+}
+
+.pending-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.pending-status {
+  flex: 1 1 120px;
+  min-width: 92px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-tool-button {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pending-tool-text-button {
+  flex-basis: auto;
+  width: auto;
+  min-width: 58px;
+  padding: 0 8px;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.pending-tool-button:disabled {
+  opacity: 0.42;
+}
+
+.pending-tool-button .lucide,
+.pending-tool-button [data-lucide] {
+  width: 15px;
+  height: 15px;
 }
 
 .primary-button {
@@ -3572,6 +3810,9 @@ body.support-screen-open .fab-button {
 :root[data-theme="dark"] .share-search,
 :root[data-theme="dark"] .choice-button,
 :root[data-theme="dark"] .source-button,
+:root[data-theme="dark"] .scan-options,
+:root[data-theme="dark"] .scan-mode-button,
+:root[data-theme="dark"] .scan-apply-all-button,
 :root[data-theme="dark"] .pending-area,
 :root[data-theme="dark"] .pending-thumb,
 :root[data-theme="dark"] .confirm-surface,
@@ -3590,6 +3831,31 @@ body.support-screen-open .fab-button {
 :root[data-theme="dark"] .setlist-order-row strong {
   background: var(--accent-soft);
   color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .scan-engine-status {
+  background: rgba(110, 168, 255, 0.13);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="dark"] .scan-engine-status[data-engine="jscanify"] {
+  background: rgba(125, 211, 199, 0.13);
+  color: var(--accent-2);
+}
+
+:root[data-theme="dark"] .pending-preview-surface {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.42);
+}
+
+:root[data-theme="dark"] .pending-preview-surface img {
+  background: #151513;
+}
+
+:root[data-theme="dark"] .pending-preview-close {
+  background: rgba(34, 35, 39, 0.92);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
 }
 
 :root[data-theme="dark"] .score-preview {

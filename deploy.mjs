@@ -15,6 +15,7 @@ const SUCCESS_TEXT = /File deployment successful|Deployment complete/i;
 // 站点运行所需的文件 / 目录白名单（只上传这些，避免泄露 .git 与无关文件）。
 const ASSETS = [
   "index.html",
+  "force-update.html",
   "app.js",
   "styles.css",
   "piano.css",
@@ -22,6 +23,7 @@ const ASSETS = [
   "sw.js",
   "manifest.webmanifest",
   "cloudbase-config.js",
+  "THIRD_PARTY_NOTICES.md",
   ".nojekyll",
   "assets",
   "icons",

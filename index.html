@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -26,13 +26,15 @@
         }
       } catch (error) {}
     </script>
-    <link rel="stylesheet" href="styles.css?v=227" />
+    <link rel="stylesheet" href="styles.css?v=238" />
     <link rel="stylesheet" href="piano.css?v=216" />
+    <link rel="prefetch" as="script" href="vendor/scanner/opencv.js?v=1" />
+    <link rel="prefetch" as="script" href="vendor/scanner/jscanify.min.js?v=1" />
     <script defer charset="UTF-8" src="vendor/lucide.min.js?v=47"></script>
     <script defer charset="UTF-8" src="vendor/dexie.min.js?v=1"></script>
     <script defer charset="UTF-8" src="cloudbase-config.js?v=47"></script>
     <script defer charset="UTF-8" src="piano.js?v=216"></script>
-    <script defer charset="UTF-8" src="app.js?v=227"></script>
+    <script defer charset="UTF-8" src="app.js?v=238"></script>
   </head>
   <body class="app-booting">
     <div class="app-shell">
@@ -324,7 +326,7 @@
               <span class="usage-guide-icon" aria-hidden="true"><i data-lucide="plus"></i></span>
               <div>
                 <h3>添加歌谱</h3>
-                <p>在谱夹页点击底部的“添加歌谱”，选择拍照、图库或文件，填写歌谱名后保存。文件夹、调号、备注可以按需要补充。</p>
+                <p>在谱夹页点击底部的“添加歌谱”，选择拍照、图库或文件，填写歌谱名后保存。高清扫描会自动裁边、减轻阴影、去灰底，并尝试把斜拍的歌谱、简谱和文字自动扶正，让页面更像扫描件；原图会保留照片原貌。</p>
                 <div class="usage-button-demo" aria-hidden="true"><span>+</span><b>添加歌谱</b></div>
               </div>
             </section>
@@ -591,6 +593,23 @@
           <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
           <input id="galleryInput" type="file" accept="image/*" multiple hidden />
           <input id="fileInput" type="file" accept="image/*" multiple hidden />
+
+          <section class="scan-options" aria-labelledby="scanOptionsTitle">
+            <div class="scan-options-header">
+              <div>
+                <h3 id="scanOptionsTitle">扫描优化</h3>
+                <p>高清扫描会自动裁边、减轻阴影、去灰底，并尝试把斜拍页面自动扶正；原图只压缩保存，不做裁边和增强。</p>
+              </div>
+              <button class="scan-apply-all-button" id="applyScanToAllButton" type="button" hidden>应用到全部</button>
+            </div>
+            <div class="scan-setting-block">
+              <span class="scan-setting-label">优化效果</span>
+              <div class="scan-mode-group" id="scanModeGroup" role="group" aria-label="扫描优化模式">
+                <button class="scan-mode-button is-active" id="scanModeHdButton" type="button" data-scan-mode="hdScan">高清扫描</button>
+                <button class="scan-mode-button" id="scanModeOriginalButton" type="button" data-scan-mode="original">原图</button>
+              </div>
+            </div>
+          </section>
 
           <div class="pending-area" id="pendingArea"></div>
 
@@ -1213,6 +1232,16 @@
             <span>删除所选</span>
           </button>
         </div>
+      </div>
+    </dialog>
+
+    <dialog class="pending-preview-dialog" id="pendingPreviewDialog" aria-label="查看优化效果">
+      <div class="pending-preview-surface">
+        <button class="icon-button pending-preview-close" id="closePendingPreviewButton" type="button" title="关闭" aria-label="关闭">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+        <img id="pendingPreviewImage" alt="优化效果预览" />
+        <p id="pendingPreviewCaption"></p>
       </div>
     </dialog>
 

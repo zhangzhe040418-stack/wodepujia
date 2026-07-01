@@ -14,6 +14,7 @@ const ASSETS = [
   "sw.js",
   "manifest.webmanifest",
   "cloudbase-config.js",
+  "THIRD_PARTY_NOTICES.md",
   ".nojekyll",
   "assets",
   "icons",

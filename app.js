@@ -14,7 +14,7 @@ const SYNC_STATE_STORE_NAME = "sync_state";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 2;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v227";
+const APP_BUILD = "v238";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -57,6 +57,42 @@ const ANNOTATION_POINTER_DEBUG = false;
 const IMAGE_MAX_EDGE = 1600;
 const IMAGE_WEBP_QUALITY = 0.7;
 const IMAGE_JPEG_QUALITY = 0.76;
+const SCAN_MODE_ORIGINAL = "original";
+const SCAN_MODE_HD = "hdScan";
+const SCAN_MODE_AUTO = "auto";
+const SCAN_MODE_DOCUMENT = "document";
+const SCAN_MODE_BW = "bw";
+const SCAN_MODE_GRAYSCALE = "grayscale";
+const SCAN_MODE_MUSIC_SCORE = "musicScore";
+const DEFAULT_SCAN_MODE = SCAN_MODE_HD;
+const SCAN_STRENGTH_LIGHT = "light";
+const SCAN_STRENGTH_NORMAL = "normal";
+const SCAN_STRENGTH_STRONG = "strong";
+const DEFAULT_SCAN_STRENGTH = SCAN_STRENGTH_STRONG;
+const SCAN_ENGINE_NONE = "none";
+const SCAN_ENGINE_CANVAS = "canvas";
+const SCAN_ENGINE_JSCANIFY = "jscanify";
+const SCAN_ENGINE_CHOICE_PROFESSIONAL = "professional";
+const SCAN_ENGINE_CHOICE_BASIC = "basic";
+const DEFAULT_SCAN_ENGINE_CHOICE = SCAN_ENGINE_CHOICE_PROFESSIONAL;
+const SCAN_MAX_EDGE = IMAGE_MAX_EDGE;
+const SCAN_BACKGROUND_MARGIN_RATIO = 0.035;
+const SCAN_AUTO_CROP_MIN_AREA_RATIO = 0.35;
+const SCAN_MODE_LABELS = {
+  [SCAN_MODE_ORIGINAL]: "原图",
+  [SCAN_MODE_HD]: "高清扫描",
+};
+const SCAN_STRENGTH_LABELS = {
+  [SCAN_STRENGTH_LIGHT]: "柔和",
+  [SCAN_STRENGTH_NORMAL]: "标准",
+  [SCAN_STRENGTH_STRONG]: "强力",
+};
+const SCAN_ENGINE_CHOICE_LABELS = {
+  [SCAN_ENGINE_CHOICE_PROFESSIONAL]: "professional",
+  [SCAN_ENGINE_CHOICE_BASIC]: "basic",
+};
+const SCANNER_OPENCV_LOCAL = "./vendor/scanner/opencv.js?v=1";
+const SCANNER_JSCANIFY_LOCAL = "./vendor/scanner/jscanify.min.js?v=1";
 const THUMBNAIL_MAX_EDGE = 420;
 const THUMBNAIL_QUALITY = 0.6;
 const CLOUDBASE_SDK_LOCAL = "./vendor/cloudbase.full.js";
@@ -154,6 +190,15 @@ const state = {
   setlistItems: [],
   pendingPages: [],
   pendingFilesProcessing: false,
+  pendingScanQueue: Promise.resolve(),
+  scanMode: DEFAULT_SCAN_MODE,
+  scanStrength: DEFAULT_SCAN_STRENGTH,
+  scanEngineChoice: DEFAULT_SCAN_ENGINE_CHOICE,
+  scanApplyToAll: true,
+  scanEngineReady: false,
+  scanEngineLoading: false,
+  scanEngineError: "",
+  scanEngine: SCAN_ENGINE_CANVAS,
   scoreUrls: new Map(),
   pendingUrls: new Map(),
   pageThumbUrls: new Map(),
@@ -473,6 +518,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   updateAccountUi();
   refreshOutboxCounts();
   initializeDexieDatabaseInBackground(300);
+  initializeScanEngineInBackground();
   // 明确的启动账号恢复流程：自动恢复登录 + 必要时轻量拉取云端歌谱。
   restoreStartupAuthSession();
   // 每月 1 号自动弹出“支持作者”页面（稍延迟，等首屏稳定）。
@@ -1230,7 +1276,14 @@ function bindElements() {
   elements.cameraInput = document.querySelector("#cameraInput");
   elements.galleryInput = document.querySelector("#galleryInput");
   elements.fileInput = document.querySelector("#fileInput");
+  elements.scanModeGroup = document.querySelector("#scanModeGroup");
+  elements.scanModeButtons = Array.from(document.querySelectorAll("[data-scan-mode]"));
+  elements.applyScanToAllButton = document.querySelector("#applyScanToAllButton");
   elements.pendingArea = document.querySelector("#pendingArea");
+  elements.pendingPreviewDialog = document.querySelector("#pendingPreviewDialog");
+  elements.pendingPreviewImage = document.querySelector("#pendingPreviewImage");
+  elements.pendingPreviewCaption = document.querySelector("#pendingPreviewCaption");
+  elements.closePendingPreviewButton = document.querySelector("#closePendingPreviewButton");
   elements.saveButton = document.querySelector("#saveButton");
   elements.resetFormButton = document.querySelector("#resetFormButton");
   elements.statusMessage = document.querySelector("#statusMessage");
@@ -1294,6 +1347,20 @@ function bindEvents() {
 
   [elements.cameraInput, elements.galleryInput, elements.fileInput].forEach((input) => {
     input.addEventListener("change", () => addPendingFiles(input.files));
+  });
+  elements.scanModeButtons?.forEach((button) => {
+    button.addEventListener("click", () => setScanMode(button.dataset.scanMode));
+  });
+  elements.applyScanToAllButton?.addEventListener("click", applyScanModeToAllPending);
+  elements.closePendingPreviewButton?.addEventListener("click", closePendingPreview);
+  elements.pendingPreviewDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closePendingPreview();
+  });
+  elements.pendingPreviewDialog?.addEventListener("click", (event) => {
+    if (event.target === elements.pendingPreviewDialog) {
+      closePendingPreview();
+    }
   });
 
   elements.scoreName.addEventListener("input", updateSaveState);
@@ -2437,33 +2504,188 @@ function loadCloudbaseSdk() {
   });
 }
 
-function loadScript(src) {
+function loadScript(src, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const existing = document.querySelector(`script[src="${src}"]`);
     if (existing) {
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error(`${src} 加载失败`)), { once: true });
+      if (existing.dataset.loaded === "true") {
+        resolve();
+        return;
+      }
+      if (existing.dataset.error === "true") {
+        reject(new Error(`${src} 加载失败`));
+        return;
+      }
+      const timeout = window.setTimeout(() => {
+        reject(new Error(`${src} 加载超时`));
+      }, timeoutMs);
+      existing.addEventListener(
+        "load",
+        () => {
+          window.clearTimeout(timeout);
+          existing.dataset.loaded = "true";
+          resolve();
+        },
+        { once: true },
+      );
+      existing.addEventListener(
+        "error",
+        () => {
+          window.clearTimeout(timeout);
+          existing.dataset.error = "true";
+          reject(new Error(`${src} 加载失败`));
+        },
+        { once: true },
+      );
       return;
     }
 
     const script = document.createElement("script");
     const timeout = window.setTimeout(() => {
       script.remove();
+      script.dataset.error = "true";
       reject(new Error(`${src} 加载超时`));
-    }, 12000);
+    }, timeoutMs);
 
     script.src = src;
     script.async = true;
     script.onload = () => {
       window.clearTimeout(timeout);
+      script.dataset.loaded = "true";
       resolve();
     };
     script.onerror = () => {
       window.clearTimeout(timeout);
+      script.dataset.error = "true";
       reject(new Error(`${src} 加载失败`));
     };
     document.head.append(script);
   });
+}
+
+function isJscanifyAvailable() {
+  return Boolean(window.cv?.Mat && window.jscanify);
+}
+
+function getOpenCvRuntime() {
+  if (window.cv && typeof window.cv === "object" && typeof window.cv.then !== "function") {
+    return window.cv;
+  }
+  return null;
+}
+
+function updateScanEngineStatusUi() {
+  renderScanOptions();
+}
+
+async function initializeScanEngineInBackground() {
+  if (state.scanEngineLoading || state.scanEngineReady) {
+    return;
+  }
+  state.scanEngineError = "";
+  state.scanEngine = SCAN_ENGINE_CANVAS;
+  updateScanEngineStatusUi();
+
+  window.setTimeout(async () => {
+    try {
+      await ensureProfessionalScanEngine(30000);
+    } catch (error) {
+      console.warn("Professional scan engine unavailable, using canvas fallback.", error);
+      state.scanEngineReady = false;
+      state.scanEngine = SCAN_ENGINE_CANVAS;
+      state.scanEngineError = getErrorMessage(error);
+    }
+    updateScanEngineStatusUi();
+  }, 800);
+}
+
+async function waitForOpenCvRuntime(timeoutMs = 20000) {
+  const startedAt = Date.now();
+  let promiseHandled = false;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (window.cv && typeof window.cv.then === "function" && !promiseHandled) {
+      promiseHandled = true;
+      const remaining = Math.max(1000, timeoutMs - (Date.now() - startedAt));
+      try {
+        window.cv = await withTimeout(window.cv, remaining, "OpenCV 初始化超时");
+      } catch (error) {
+        console.warn("OpenCV promise initialization failed.", error);
+      }
+    }
+
+    const cv = getOpenCvRuntime();
+    if (cv?.Mat && typeof cv.imread === "function") {
+      return cv;
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+  }
+
+  throw new Error("OpenCV 初始化超时");
+}
+
+async function ensureProfessionalScanEngine(timeoutMs = 30000) {
+  if (isJscanifyAvailable()) {
+    state.scanEngineReady = true;
+    state.scanEngine = SCAN_ENGINE_JSCANIFY;
+    state.scanEngineError = "";
+    updateScanEngineStatusUi();
+    return true;
+  }
+
+  if (state.scanEngineLoading) {
+    return waitForScanEngineReady(timeoutMs);
+  }
+
+  state.scanEngineLoading = true;
+  state.scanEngineError = "";
+  state.scanEngine = SCAN_ENGINE_CANVAS;
+  updateScanEngineStatusUi();
+
+  try {
+    await loadScript(SCANNER_OPENCV_LOCAL, Math.max(20000, timeoutMs));
+    await waitForOpenCvRuntime(Math.max(16000, timeoutMs - 5000));
+    await loadScript(SCANNER_JSCANIFY_LOCAL, 16000);
+    if (!isJscanifyAvailable()) {
+      throw new Error("jscanify 或 OpenCV 未就绪");
+    }
+    state.scanEngineReady = true;
+    state.scanEngine = SCAN_ENGINE_JSCANIFY;
+    state.scanEngineError = "";
+    return true;
+  } catch (error) {
+    state.scanEngineReady = false;
+    state.scanEngine = SCAN_ENGINE_CANVAS;
+    state.scanEngineError = getErrorMessage(error);
+    throw error;
+  } finally {
+    state.scanEngineLoading = false;
+    updateScanEngineStatusUi();
+  }
+}
+
+async function waitForScanEngineReady(timeoutMs = 2500) {
+  if (isJscanifyAvailable()) {
+    state.scanEngineReady = true;
+    state.scanEngine = SCAN_ENGINE_JSCANIFY;
+    updateScanEngineStatusUi();
+    return true;
+  }
+  if (!state.scanEngineLoading && !state.scanEngineReady) {
+    initializeScanEngineInBackground();
+  }
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (isJscanifyAvailable()) {
+      state.scanEngineReady = true;
+      state.scanEngine = SCAN_ENGINE_JSCANIFY;
+      updateScanEngineStatusUi();
+      return true;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+  }
+  return false;
 }
 
 // 恢复云端会话：不依赖单一来源；createCloudSession 已会依次尝试
@@ -5001,7 +5223,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=243");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=254");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -10034,59 +10256,270 @@ async function addPendingFiles(fileList) {
     return;
   }
 
-  setStatus(`正在压缩 1 / ${imageFiles.length} 张图片...`);
-
   state.pendingFilesProcessing = true;
   updateSaveState();
 
   for (const [index, file] of imageFiles.entries()) {
-    await nextFrame();
-    try {
-      const compressed = await withTimeout(
-        compressImageFile(file),
-        IMAGE_COMPRESSION_TIMEOUT,
-        `《${file.name}》压缩超时，已使用原图。`,
-      );
-      state.pendingPages.push({
-        id: createId(),
-        name: file.name,
-        originalSize: file.size,
-        type: compressed.type || file.type || "image/jpeg",
-        size: compressed.size,
-        blob: compressed,
-      });
-    } catch (error) {
-      console.warn(error);
-      state.pendingPages.push({
-        id: createId(),
-        name: file.name,
-        originalSize: file.size,
-        type: file.type || "image/jpeg",
-        size: file.size,
-        blob: file,
-      });
-    }
-
+    const scanMode = normalizeScanMode(state.scanMode);
+    const page = createPendingPageRecord(file, {
+      scanMode,
+      scanStrength: getEffectiveScanStrength(),
+      scanEngineChoice: SCAN_ENGINE_CHOICE_PROFESSIONAL,
+      status: "queued",
+    });
+    state.pendingPages.push(page);
     renderPending();
     updateSaveState();
+    enqueuePendingOptimization(page, {
+      statusMessage: `正在优化 ${index + 1} / ${imageFiles.length} 张图片...`,
+    });
     await nextFrame();
-    if (index < imageFiles.length - 1) {
-      setStatus(`正在压缩 ${index + 2} / ${imageFiles.length} 张图片...`);
-    }
   }
 
   state.pendingFilesProcessing = false;
 
   if (imageFiles.length !== files.length) {
-    setStatus(`已压缩 ${imageFiles.length} 张图片，并跳过非图片文件。`, true);
+    setStatus(`已选择 ${imageFiles.length} 张图片，并跳过非图片文件。`, true);
   } else {
-    setStatus(`已压缩并选择 ${state.pendingPages.length} 张图片。`);
+    setStatus(`已选择 ${state.pendingPages.length} 张图片，正在后台优化。`);
   }
 
   renderPending();
   updateSaveState();
 }
 
+function createPendingPageRecord(file, options = {}) {
+  const id = createId();
+  const originalUrl = URL.createObjectURL(file);
+  const scanMode = normalizeScanMode(options.scanMode || state.scanMode);
+  const scanStrength = getEffectiveScanStrength();
+  return {
+    id,
+    originalFile: file,
+    file,
+    blob: file,
+    url: originalUrl,
+    originalUrl,
+    optimizedUrl: "",
+    name: file.name,
+    originalSize: file.size,
+    type: file.type || "image/jpeg",
+    size: file.size,
+    scanMode,
+    scanEngineChoice: SCAN_ENGINE_CHOICE_PROFESSIONAL,
+    scanStrength,
+    previewOriginal: false,
+    rotation: Number(options.rotation) || 0,
+    crop: null,
+    scanMeta: {
+      mode: scanMode,
+      strength: scanStrength,
+      engineChoice: SCAN_ENGINE_CHOICE_PROFESSIONAL,
+      engine: SCAN_ENGINE_NONE,
+      perspectiveCorrected: false,
+      cropApplied: false,
+      deskewApplied: false,
+      deskewAngle: 0,
+      deskewConfidence: 0,
+      deskewMethod: "none",
+      deskewMeta: null,
+      rotation: Number(options.rotation) || 0,
+      warning: "",
+    },
+    status: options.status || "original",
+    error: "",
+    scanVersion: 0,
+  };
+}
+
+function normalizeScanMode(mode) {
+  return mode === SCAN_MODE_ORIGINAL ? SCAN_MODE_ORIGINAL : SCAN_MODE_HD;
+}
+
+function normalizeScanStrength(strength) {
+  return Object.prototype.hasOwnProperty.call(SCAN_STRENGTH_LABELS, strength)
+    ? strength
+    : DEFAULT_SCAN_STRENGTH;
+}
+
+function getEffectiveScanStrength() {
+  return SCAN_STRENGTH_STRONG;
+}
+
+function normalizeScanEngineChoice(choice) {
+  return SCAN_ENGINE_CHOICE_PROFESSIONAL;
+}
+
+function setScanMode(mode) {
+  state.scanMode = normalizeScanMode(mode);
+  renderScanOptions();
+}
+
+function setScanEngineChoice(choice) {
+  state.scanEngineChoice = SCAN_ENGINE_CHOICE_PROFESSIONAL;
+  state.scanStrength = getEffectiveScanStrength(state.scanEngineChoice, state.scanStrength);
+  initializeScanEngineInBackground();
+  renderScanOptions();
+}
+
+function renderScanOptions() {
+  elements.scanModeButtons?.forEach((button) => {
+    const active = normalizeScanMode(button.dataset.scanMode) === state.scanMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (elements.applyScanToAllButton) {
+    elements.applyScanToAllButton.hidden = !state.pendingPages.length;
+    elements.applyScanToAllButton.disabled = isPendingScanBusy();
+  }
+}
+
+function applyScanModeToAllPending() {
+  if (!state.pendingPages.length) {
+    return;
+  }
+  state.pendingPages.forEach((page, index) => {
+    page.scanMode = state.scanMode;
+    page.scanEngineChoice = SCAN_ENGINE_CHOICE_PROFESSIONAL;
+    page.scanStrength = getEffectiveScanStrength(page.scanEngineChoice, state.scanStrength);
+    page.previewOriginal = false;
+    enqueuePendingOptimization(page, {
+      statusMessage: `正在重新优化 ${index + 1} / ${state.pendingPages.length} 张图片...`,
+    });
+  });
+  renderPending();
+  updateSaveState();
+}
+
+function enqueuePendingOptimization(page, options = {}) {
+  if (!page || !state.pendingPages.some((item) => item.id === page.id)) {
+    return Promise.resolve();
+  }
+  page.scanVersion = (page.scanVersion || 0) + 1;
+  page.status = "processing";
+  page.error = "";
+  const version = page.scanVersion;
+  renderPending();
+  updateSaveState();
+  state.pendingScanQueue = state.pendingScanQueue
+    .catch(() => {})
+    .then(async () => {
+      if (!state.pendingPages.some((item) => item.id === page.id) || page.scanVersion !== version) {
+        return;
+      }
+      if (options.statusMessage) {
+        setStatus(options.statusMessage);
+      }
+      await optimizePendingPage(page, version);
+    })
+    .finally(() => {
+      renderPending();
+      updateSaveState();
+    });
+  return state.pendingScanQueue;
+}
+
+async function optimizePendingPage(page, version = page.scanVersion) {
+  await nextFrame();
+  try {
+    const optimized = await withTimeout(
+      optimizeScoreImageFile(page.originalFile || page.blob || page.file, {
+        mode: page.scanMode,
+        strength: page.scanStrength,
+        engineChoice: SCAN_ENGINE_CHOICE_PROFESSIONAL,
+        rotation: page.rotation,
+      }),
+      IMAGE_COMPRESSION_TIMEOUT,
+      `《${page.name || "图片"}》优化超时，已使用原图。`,
+    );
+    if (page.scanVersion !== version) {
+      return;
+    }
+    setPendingPageBlob(page, optimized, page.scanMode === SCAN_MODE_ORIGINAL ? "original" : "optimized");
+  } catch (error) {
+    console.warn("Scan optimization failed, using compressed original.", error);
+    if (page.scanVersion !== version) {
+      return;
+    }
+    try {
+      const fallback = await compressImageFile(page.originalFile || page.blob || page.file);
+      setPendingPageBlob(page, fallback, "error", "优化失败，已使用原图");
+    } catch (fallbackError) {
+      console.warn(fallbackError);
+      setPendingPageBlob(page, page.originalFile || page.blob || page.file, "error", "优化失败，已使用原图");
+    }
+  }
+}
+
+function setPendingPageBlob(page, blob, status = "optimized", error = "") {
+  if (!page || !blob) {
+    return;
+  }
+  if (page.optimizedUrl && page.optimizedUrl !== page.originalUrl) {
+    URL.revokeObjectURL(page.optimizedUrl);
+  }
+  page.file = blob;
+  page.blob = blob;
+  page.type = blob.type || page.originalFile?.type || "image/jpeg";
+  page.size = blob.size || page.originalFile?.size || 0;
+  page.scanMeta = blob.scanMeta || {
+    mode: page.scanMode,
+    strength: page.scanStrength,
+    engineChoice: page.scanEngineChoice,
+    engine: status === "original" ? SCAN_ENGINE_NONE : SCAN_ENGINE_CANVAS,
+    perspectiveCorrected: false,
+    cropApplied: false,
+    deskewApplied: false,
+    deskewAngle: 0,
+    deskewConfidence: 0,
+    deskewMethod: "none",
+    deskewMeta: null,
+    rotation: page.rotation || 0,
+    warning: error || "",
+  };
+  page.deskewApplied = Boolean(page.scanMeta.deskewApplied);
+  page.deskewAngle = Number(page.scanMeta.deskewAngle) || 0;
+  page.deskewMeta = page.scanMeta.deskewMeta || null;
+  page.status = status;
+  page.error = error;
+  if (status !== "original") {
+    page.previewOriginal = false;
+  }
+  if (blob === page.originalFile) {
+    page.optimizedUrl = "";
+    page.url = page.originalUrl;
+  } else {
+    page.optimizedUrl = URL.createObjectURL(blob);
+    page.url = page.optimizedUrl;
+  }
+}
+
+function resetPendingPageScan(page) {
+  if (!page) {
+    return;
+  }
+  page.scanVersion = (page.scanVersion || 0) + 1;
+  page.scanMode = SCAN_MODE_ORIGINAL;
+  page.scanStrength = getEffectiveScanStrength();
+  page.scanEngineChoice = SCAN_ENGINE_CHOICE_PROFESSIONAL;
+  page.previewOriginal = true;
+  page.rotation = 0;
+  page.error = "";
+  setPendingPageBlob(page, page.originalFile || page.blob || page.file, "original");
+  renderPending();
+  updateSaveState();
+}
+
+function isPendingScanBusy() {
+  return state.pendingFilesProcessing || state.pendingPages.some((page) => page.status === "processing" || page.status === "queued");
+}
+
+async function waitForPendingScanQueue() {
+  await state.pendingScanQueue.catch((error) => console.warn(error));
+  while (isPendingScanBusy()) {
+    await new Promise((resolve) => window.setTimeout(resolve, 60));
+  }
+}
 function isImageFile(file) {
   if (!file) {
     return false;
@@ -10137,6 +10570,1430 @@ async function compressImageFile(file) {
   return file;
 }
 
+async function optimizeScoreImageFile(file, options = {}) {
+  const mode = normalizeScanMode(options.mode || DEFAULT_SCAN_MODE);
+  const engineChoice = SCAN_ENGINE_CHOICE_PROFESSIONAL;
+  const strength = getEffectiveScanStrength();
+  const rotation = normalizeRotation(options.rotation || 0);
+
+  if (mode === SCAN_MODE_ORIGINAL && rotation === 0) {
+    const compressed = await compressImageFile(file);
+    compressed.scanMeta = {
+      mode,
+      strength,
+      engineChoice,
+      engine: SCAN_ENGINE_NONE,
+      perspectiveCorrected: false,
+      cropApplied: false,
+      deskewApplied: false,
+      deskewAngle: 0,
+      deskewConfidence: 0,
+      deskewMethod: "none",
+      deskewMeta: null,
+      rotation,
+      warning: "",
+    };
+    return compressed;
+  }
+
+  let source = null;
+  try {
+    source = await loadImageSource(file);
+    const sourceCanvas = drawSourceToScanCanvas(source, {
+      rotation,
+      maxEdge: SCAN_MAX_EDGE,
+    });
+    source.close?.();
+    source = null;
+
+    const scanResult = await createScannedCanvas(sourceCanvas, { mode, engineChoice, rotation });
+    let workingCanvas = scanResult.canvas;
+    let deskewResult = {
+      canvas: workingCanvas,
+      deskewApplied: false,
+      meta: {
+        angle: 0,
+        confidence: 0,
+        method: "none",
+        warning: "",
+      },
+    };
+    if (mode === SCAN_MODE_HD) {
+      deskewResult = await autoDeskewCanvas(workingCanvas, { mode, engineChoice });
+      workingCanvas = deskewResult.canvas || workingCanvas;
+      await nextFrame();
+    }
+
+    const outputData = workingCanvas
+      .getContext("2d", { alpha: false, willReadFrequently: true })
+      .getImageData(0, 0, workingCanvas.width, workingCanvas.height);
+    await nextFrame();
+    applyScanModeToImageData(outputData, mode, { strength, deskewMeta: deskewResult.meta });
+    await nextFrame();
+    workingCanvas.getContext("2d", { alpha: false }).putImageData(outputData, 0, 0);
+
+    const optimized = await canvasToOptimizedImageFile(workingCanvas, file, mode);
+    optimized.scanMeta = {
+      mode,
+      strength,
+      engineChoice,
+      engine: scanResult.engine,
+      perspectiveCorrected: Boolean(scanResult.perspectiveCorrected),
+      cropApplied: Boolean(scanResult.cropApplied),
+      deskewApplied: Boolean(deskewResult.deskewApplied),
+      deskewAngle: Number(deskewResult.meta?.angle) || 0,
+      deskewConfidence: Number(deskewResult.meta?.confidence) || 0,
+      deskewMethod: deskewResult.meta?.method || "none",
+      deskewMeta: deskewResult.meta || null,
+      rotation,
+      warning: [scanResult.warning, deskewResult.meta?.warning].filter(Boolean).join(" · "),
+    };
+    return optimized;
+  } catch (error) {
+    console.warn("Image scan optimization failed, using compressed original.", error);
+    const fallback = await compressImageFile(file);
+    fallback.scanMeta = {
+      mode,
+      strength,
+      engineChoice,
+      engine: SCAN_ENGINE_CANVAS,
+      perspectiveCorrected: false,
+      cropApplied: false,
+      rotation,
+      warning: "扫描优化失败，已使用原图压缩。",
+    };
+    return fallback;
+  } finally {
+    source?.close?.();
+  }
+}
+
+function normalizeRotation(rotation) {
+  const normalized = ((Number(rotation) || 0) % 360 + 360) % 360;
+  return [0, 90, 180, 270].includes(normalized) ? normalized : 0;
+}
+
+function getScanOutputQuality(mode) {
+  const scanMode = normalizeScanMode(mode);
+  if (scanMode === SCAN_MODE_BW) {
+    return 0.92;
+  }
+  if ([SCAN_MODE_HD, SCAN_MODE_MUSIC_SCORE, SCAN_MODE_DOCUMENT, SCAN_MODE_GRAYSCALE, SCAN_MODE_AUTO].includes(scanMode)) {
+    return 0.86;
+  }
+  return IMAGE_WEBP_QUALITY;
+}
+
+async function canvasToOptimizedImageFile(canvas, originalFile, mode = DEFAULT_SCAN_MODE) {
+  const quality = getScanOutputQuality(mode);
+  if (normalizeScanMode(mode) === SCAN_MODE_BW) {
+    const pngBlob = await canvasToBlob(canvas, "image/png", quality);
+    if (pngBlob && pngBlob.size < originalFile.size * 1.4) {
+      return createCompressedFile(pngBlob, originalFile.name, "png");
+    }
+  }
+
+  const webpBlob = await canvasToBlob(canvas, "image/webp", quality);
+  if (webpBlob && webpBlob.size < originalFile.size) {
+    return createCompressedFile(webpBlob, originalFile.name, "webp");
+  }
+
+  const jpegBlob = await canvasToBlob(canvas, "image/jpeg", Math.max(IMAGE_JPEG_QUALITY, quality - 0.03));
+  if (jpegBlob) {
+    return createCompressedFile(jpegBlob, originalFile.name, "jpg");
+  }
+
+  return originalFile;
+}
+
+function drawSourceToScanCanvas(source, options = {}) {
+  const rotation = normalizeRotation(options.rotation || 0);
+  const maxEdge = Number(options.maxEdge) || SCAN_MAX_EDGE;
+  const rotated = rotation === 90 || rotation === 270;
+  const rawWidth = rotated ? source.height : source.width;
+  const rawHeight = rotated ? source.width : source.height;
+  const scale = Math.min(1, maxEdge / Math.max(rawWidth, rawHeight));
+  const width = Math.max(1, Math.round(rawWidth * scale));
+  const height = Math.max(1, Math.round(rawHeight * scale));
+  const drawWidth = Math.max(1, Math.round(source.width * scale));
+  const drawHeight = Math.max(1, Math.round(source.height * scale));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+  canvas.width = width;
+  canvas.height = height;
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+
+  context.save();
+  if (rotation === 90) {
+    context.translate(width, 0);
+    context.rotate(Math.PI / 2);
+  } else if (rotation === 180) {
+    context.translate(width, height);
+    context.rotate(Math.PI);
+  } else if (rotation === 270) {
+    context.translate(0, height);
+    context.rotate(-Math.PI / 2);
+  }
+  context.drawImage(source.image, 0, 0, drawWidth, drawHeight);
+  context.restore();
+  return canvas;
+}
+
+function createScaledAnalysisCanvas(canvas, maxEdge = 1000) {
+  const scale = Math.min(1, maxEdge / Math.max(canvas.width, canvas.height));
+  if (scale >= 0.999) {
+    return canvas;
+  }
+  const output = document.createElement("canvas");
+  output.width = Math.max(1, Math.round(canvas.width * scale));
+  output.height = Math.max(1, Math.round(canvas.height * scale));
+  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, output.width, output.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(canvas, 0, 0, output.width, output.height);
+  return output;
+}
+
+function normalizeSkewLineAngle(angle) {
+  let normalized = Number(angle) || 0;
+  while (normalized <= -90) {
+    normalized += 180;
+  }
+  while (normalized > 90) {
+    normalized -= 180;
+  }
+  return normalized;
+}
+
+function median(values) {
+  if (!values.length) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function estimateSkewAngleWithOpenCV(canvas, options = {}) {
+  const cv = window.cv;
+  if (!cv?.Mat || typeof cv.imread !== "function") {
+    throw new Error("OpenCV 未就绪");
+  }
+
+  const sample = createScaledAnalysisCanvas(canvas, Number(options.maxEdge) || 1100);
+  let src = null;
+  let gray = null;
+  let blurred = null;
+  let edges = null;
+  let lines = null;
+
+  try {
+    src = cv.imread(sample);
+    gray = new cv.Mat();
+    blurred = new cv.Mat();
+    edges = new cv.Mat();
+    lines = new cv.Mat();
+
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+    cv.Canny(blurred, edges, 50, 150, 3, false);
+
+    const minLineLength = Math.max(80, Math.round(sample.width * 0.18));
+    const threshold = Math.max(36, Math.round(Math.min(sample.width, sample.height) * 0.055));
+    cv.HoughLinesP(edges, lines, 1, Math.PI / 180, threshold, minLineLength, 14);
+
+    const angles = [];
+    const lengths = [];
+    const data = lines.data32S || [];
+    for (let index = 0; index < data.length; index += 4) {
+      const x1 = data[index];
+      const y1 = data[index + 1];
+      const x2 = data[index + 2];
+      const y2 = data[index + 3];
+      const length = Math.hypot(x2 - x1, y2 - y1);
+      if (length < minLineLength) {
+        continue;
+      }
+      const angle = normalizeSkewLineAngle((Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI);
+      if (Math.abs(angle) <= 20) {
+        angles.push(angle);
+        lengths.push(length);
+      }
+    }
+
+    if (angles.length < 4) {
+      throw new Error("OpenCV 候选线不足");
+    }
+
+    const rawAngle = median(angles);
+    const averageLength = lengths.reduce((total, value) => total + value, 0) / Math.max(1, lengths.length);
+    const lineScore = Math.min(1, angles.length / 24);
+    const lengthScore = Math.min(1, averageLength / Math.max(1, sample.width * 0.32));
+    const spread =
+      angles.reduce((total, angle) => total + Math.abs(angle - rawAngle), 0) / Math.max(1, angles.length);
+    const spreadScore = Math.max(0.35, 1 - spread / 8);
+    const confidence = Math.max(0, Math.min(1, (lineScore * 0.48 + lengthScore * 0.34 + spreadScore * 0.18)));
+    const correctionAngle = Math.abs(rawAngle) < 0.3 ? 0 : -rawAngle;
+
+    if (Math.abs(correctionAngle) > 12 && !(angles.length >= 18 && confidence > 0.86)) {
+      throw new Error("OpenCV 角度过大，跳过扶正");
+    }
+
+    return {
+      angle: correctionAngle,
+      confidence,
+      method: "opencv-hough",
+    };
+  } finally {
+    src?.delete?.();
+    gray?.delete?.();
+    blurred?.delete?.();
+    edges?.delete?.();
+    lines?.delete?.();
+  }
+}
+
+function createProjectionInkPoints(canvas, options = {}) {
+  const sample = createScaledAnalysisCanvas(canvas, Number(options.maxEdge) || 1000);
+  const context = sample.getContext("2d", { alpha: false, willReadFrequently: true });
+  const imageData = context.getImageData(0, 0, sample.width, sample.height);
+  const gray = createLuminanceBuffer(imageData);
+  const stats = computeLuminanceStats(imageData);
+  const threshold = Math.max(72, Math.min(188, stats.p50 - 10));
+  const points = [];
+  const step = sample.width * sample.height > 700000 ? 2 : 1;
+  const centerX = sample.width / 2;
+  const centerY = sample.height / 2;
+
+  for (let y = 1; y < sample.height - 1; y += step) {
+    for (let x = 1; x < sample.width - 1; x += step) {
+      const value = gray[y * sample.width + x];
+      const gradient = computeSimpleGradientFromGray(gray, sample.width, sample.height, x, y);
+      if (value < threshold || (value < 228 && gradient > 44)) {
+        points.push([x - centerX, y - centerY]);
+      }
+    }
+  }
+
+  return {
+    points,
+    width: sample.width,
+    height: sample.height,
+  };
+}
+
+function scoreProjectionAngle(points, height, angleDeg) {
+  if (!points.length) {
+    return 0;
+  }
+  const radians = (angleDeg * Math.PI) / 180;
+  const sin = Math.sin(radians);
+  const cos = Math.cos(radians);
+  const bins = new Float32Array(Math.ceil(height * 1.35) + 8);
+  const offset = bins.length / 2;
+
+  for (const [x, y] of points) {
+    const yRot = x * sin + y * cos;
+    const bin = Math.max(0, Math.min(bins.length - 1, Math.round(yRot + offset)));
+    bins[bin] += 1;
+  }
+
+  let energy = 0;
+  let total = 0;
+  for (let index = 0; index < bins.length; index += 1) {
+    const value = bins[index];
+    energy += value * value;
+    total += value;
+  }
+  return energy / Math.max(1, total);
+}
+
+function findBestProjectionAngle(points, height, center, range, step) {
+  let bestAngle = center;
+  let bestScore = -Infinity;
+  let secondScore = -Infinity;
+  for (let angle = center - range; angle <= center + range + 0.0001; angle += step) {
+    const rounded = Math.round(angle * 1000) / 1000;
+    const score = scoreProjectionAngle(points, height, rounded);
+    if (score > bestScore) {
+      secondScore = bestScore;
+      bestScore = score;
+      bestAngle = rounded;
+    } else if (score > secondScore) {
+      secondScore = score;
+    }
+  }
+  return { angle: bestAngle, score: bestScore, secondScore };
+}
+
+function estimateSkewAngleByProjection(canvas, options = {}) {
+  const { points, height } = createProjectionInkPoints(canvas, options);
+  if (points.length < 500) {
+    return {
+      angle: 0,
+      confidence: 0,
+      method: "projection",
+      warning: "可用于扶正的内容不足",
+    };
+  }
+
+  const coarse = findBestProjectionAngle(points, height, 0, 8, 1);
+  const fine = findBestProjectionAngle(points, height, coarse.angle, 1, 0.2);
+  const baseline = scoreProjectionAngle(points, height, 0);
+  const confidence = Math.max(
+    0,
+    Math.min(1, ((fine.score - Math.max(fine.secondScore, baseline * 0.98)) / Math.max(1, fine.score)) * 6),
+  );
+  const angle = Math.abs(fine.angle) < 0.3 ? 0 : fine.angle;
+
+  if (Math.abs(angle) > 8) {
+    return {
+      angle: 0,
+      confidence: 0,
+      method: "projection",
+      warning: "投影估计角度过大，已跳过",
+    };
+  }
+
+  return {
+    angle,
+    confidence,
+    method: "projection",
+  };
+}
+
+async function estimateContentSkewAngle(canvas, options = {}) {
+  if (!canvas?.width || !canvas?.height) {
+    return { angle: 0, confidence: 0, method: "none", warning: "图片不可用" };
+  }
+
+  try {
+    if (window.cv?.Mat && typeof window.cv.imread === "function") {
+      const openCvResult = estimateSkewAngleWithOpenCV(canvas, options);
+      if (openCvResult.confidence >= 0.36 || Math.abs(openCvResult.angle) < 0.3) {
+        return openCvResult;
+      }
+    }
+  } catch (error) {
+    console.warn("OpenCV deskew failed, using projection fallback.", error);
+  }
+
+  await nextFrame();
+  return estimateSkewAngleByProjection(canvas, options);
+}
+
+function detectDeskewContentBounds(canvas) {
+  const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { width, height, data } = imageData;
+  let minX = width;
+  let minY = height;
+  let maxX = 0;
+  let maxY = 0;
+  const step = Math.max(1, Math.floor(Math.max(width, height) / 1200));
+
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const index = (y * width + x) * 4;
+      const luminance = getLuminance(data[index], data[index + 1], data[index + 2]);
+      if (luminance < 246) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+
+  if (minX >= maxX || minY >= maxY) {
+    return null;
+  }
+
+  const paddingX = Math.max(8, Math.round(width * 0.018));
+  const paddingY = Math.max(8, Math.round(height * 0.018));
+  minX = Math.max(0, minX - paddingX);
+  minY = Math.max(0, minY - paddingY);
+  maxX = Math.min(width - 1, maxX + paddingX);
+  maxY = Math.min(height - 1, maxY + paddingY);
+  const cropWidth = maxX - minX + 1;
+  const cropHeight = maxY - minY + 1;
+  if (cropWidth < width * 0.46 || cropHeight < height * 0.46) {
+    return null;
+  }
+  return { x: minX, y: minY, width: cropWidth, height: cropHeight };
+}
+
+function cropCanvasToBounds(canvas, bounds) {
+  if (!bounds) {
+    return canvas;
+  }
+  const output = document.createElement("canvas");
+  output.width = bounds.width;
+  output.height = bounds.height;
+  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, output.width, output.height);
+  context.drawImage(
+    canvas,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    0,
+    0,
+    bounds.width,
+    bounds.height,
+  );
+  return output;
+}
+
+async function applyDeskewToCanvas(canvas, angleDeg, options = {}) {
+  const angle = Number(angleDeg) || 0;
+  if (Math.abs(angle) < 0.3) {
+    return canvas;
+  }
+  await nextFrame();
+  const radians = (angle * Math.PI) / 180;
+  const sin = Math.abs(Math.sin(radians));
+  const cos = Math.abs(Math.cos(radians));
+  const newWidth = Math.ceil(canvas.width * cos + canvas.height * sin);
+  const newHeight = Math.ceil(canvas.width * sin + canvas.height * cos);
+  const output = document.createElement("canvas");
+  output.width = newWidth;
+  output.height = newHeight;
+  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, newWidth, newHeight);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.translate(newWidth / 2, newHeight / 2);
+  context.rotate(radians);
+  context.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  context.setTransform(1, 0, 0, 1, 0, 0);
+
+  const bounds = detectDeskewContentBounds(output);
+  return cropCanvasToBounds(output, bounds);
+}
+
+function estimateCanvasInkRatio(canvas) {
+  try {
+    const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const stats = computeScanQualityStats(imageData);
+    return stats.blackRatio + stats.middleRatio * 0.18;
+  } catch (error) {
+    console.warn(error);
+    return 0;
+  }
+}
+
+function validateDeskewResult(beforeCanvas, afterCanvas, meta = {}) {
+  if (!afterCanvas?.width || !afterCanvas?.height) {
+    return false;
+  }
+  const angle = Math.abs(Number(meta.angle) || 0);
+  const confidence = Number(meta.confidence) || 0;
+  const minConfidence = meta.method === "opencv-hough" ? 0.34 : 0.05;
+  if (angle < 0.3 || confidence < minConfidence) {
+    return false;
+  }
+  if (angle > 12 || (meta.method === "projection" && angle > 8)) {
+    return false;
+  }
+
+  const beforeArea = beforeCanvas.width * beforeCanvas.height;
+  const afterArea = afterCanvas.width * afterCanvas.height;
+  if (afterArea > beforeArea * 1.42 || afterArea < beforeArea * 0.48) {
+    return false;
+  }
+
+  const beforeInk = estimateCanvasInkRatio(beforeCanvas);
+  const afterInk = estimateCanvasInkRatio(afterCanvas);
+  if (beforeInk > 0.01 && afterInk < beforeInk * 0.42) {
+    return false;
+  }
+  return true;
+}
+
+async function autoDeskewCanvas(canvas, options = {}) {
+  const fallback = {
+    canvas,
+    deskewApplied: false,
+    meta: {
+      angle: 0,
+      confidence: 0,
+      method: "none",
+      warning: "自动扶正置信度不足，已跳过",
+    },
+  };
+
+  try {
+    const estimate = await estimateContentSkewAngle(canvas, options);
+    if (!estimate || Math.abs(Number(estimate.angle) || 0) < 0.3) {
+      return {
+        ...fallback,
+        meta: {
+          ...fallback.meta,
+          ...(estimate || {}),
+          angle: 0,
+          warning: "",
+        },
+      };
+    }
+    const deskewed = await applyDeskewToCanvas(canvas, estimate.angle, options);
+    if (!validateDeskewResult(canvas, deskewed, estimate)) {
+      return fallback;
+    }
+    return {
+      canvas: deskewed,
+      deskewApplied: true,
+      meta: {
+        angle: estimate.angle,
+        confidence: estimate.confidence,
+        method: estimate.method,
+        warning: "",
+      },
+    };
+  } catch (error) {
+    console.warn("Auto deskew skipped.", error);
+    return fallback;
+  }
+}
+
+async function createScannedCanvas(sourceCanvas, options = {}) {
+  const mode = normalizeScanMode(options.mode || DEFAULT_SCAN_MODE);
+  const engineChoice = SCAN_ENGINE_CHOICE_PROFESSIONAL;
+
+  if (mode === SCAN_MODE_ORIGINAL) {
+    return scanWithCanvasFallback(sourceCanvas, { mode });
+  }
+
+  try {
+    await ensureProfessionalScanEngine(30000);
+    const jscanifyResult = await scanWithJscanify(sourceCanvas, { mode });
+    if (jscanifyResult?.canvas) {
+      return {
+        ...jscanifyResult,
+        engineChoice,
+      };
+    }
+    throw new Error("专业扫描没有返回可用结果");
+  } catch (error) {
+    console.warn("Professional crop failed, using canvas scan fallback.", error);
+    const fallback = scanWithCanvasFallback(sourceCanvas, { mode });
+    return {
+      ...fallback,
+      engineChoice,
+      warning: fallback.warning || "高清扫描已使用保守裁边。",
+    };
+  }
+}
+
+function createUncroppedScanResult(sourceCanvas, options = {}) {
+  const output = document.createElement("canvas");
+  output.width = sourceCanvas.width;
+  output.height = sourceCanvas.height;
+  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, output.width, output.height);
+  context.drawImage(sourceCanvas, 0, 0);
+  return {
+    canvas: output,
+    engine: SCAN_ENGINE_NONE,
+    engineChoice: normalizeScanEngineChoice(options.engineChoice || state.scanEngineChoice),
+    perspectiveCorrected: false,
+    cropApplied: false,
+    warning: options.warning || "",
+  };
+}
+
+async function scanWithJscanify(sourceCanvas, options = {}) {
+  if (!isJscanifyAvailable()) {
+    throw new Error("专业扫描引擎尚未就绪");
+  }
+  const Scanner = window.jscanify;
+  const scanner = new Scanner();
+  const ratio = sourceCanvas.width / Math.max(1, sourceCanvas.height);
+  let targetWidth = sourceCanvas.width;
+  let targetHeight = sourceCanvas.height;
+  if (ratio >= 1) {
+    targetWidth = Math.min(SCAN_MAX_EDGE, sourceCanvas.width);
+    targetHeight = Math.max(1, Math.round(targetWidth / ratio));
+  } else {
+    targetHeight = Math.min(SCAN_MAX_EDGE, sourceCanvas.height);
+    targetWidth = Math.max(1, Math.round(targetHeight * ratio));
+  }
+  const extracted = scanner.extractPaper(sourceCanvas, targetWidth, targetHeight);
+  if (!isUsableScannedCanvas(extracted, sourceCanvas)) {
+    throw new Error("未检测到清晰纸张边缘");
+  }
+  return {
+    canvas: extracted,
+    engine: SCAN_ENGINE_JSCANIFY,
+    perspectiveCorrected: true,
+    cropApplied: true,
+    warning: "",
+  };
+}
+
+function isUsableScannedCanvas(canvas, sourceCanvas) {
+  if (!canvas || !canvas.width || !canvas.height) {
+    return false;
+  }
+  const ratio = canvas.width / canvas.height;
+  const sourceRatio = sourceCanvas.width / sourceCanvas.height;
+  if (ratio < 0.22 || ratio > 4.5) {
+    return false;
+  }
+  if (Math.abs(Math.log(ratio / sourceRatio)) > 1.25) {
+    return false;
+  }
+  if (canvas.width < sourceCanvas.width * 0.3 || canvas.height < sourceCanvas.height * 0.3) {
+    return false;
+  }
+  try {
+    const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+    const sample = context.getImageData(0, 0, canvas.width, canvas.height);
+    const stats = computeScanQualityStats(sample);
+    if (stats.blackRatio > 0.62 || (stats.average > 252 && stats.blackRatio < 0.002) || stats.average < 28) {
+      return false;
+    }
+  } catch (error) {
+    console.warn("Scanned canvas quality check skipped.", error);
+  }
+  return true;
+}
+
+function scanWithCanvasFallback(sourceCanvas, options = {}) {
+  const mode = normalizeScanMode(options.mode || DEFAULT_SCAN_MODE);
+  const context = sourceCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+  let bounds = { x: 0, y: 0, width: sourceCanvas.width, height: sourceCanvas.height };
+  let cropApplied = false;
+  let warning = "";
+  if (mode !== SCAN_MODE_ORIGINAL) {
+    try {
+      const imageData = context.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+      const detected = detectContentBoundsFromImageData(imageData);
+      if (detected) {
+        bounds = detected;
+        cropApplied = true;
+      } else {
+        warning = "未检测到清晰纸张边缘，已使用基础增强。";
+      }
+    } catch (error) {
+      warning = "自动裁边失败，已使用基础增强。";
+      console.warn(error);
+    }
+  }
+
+  const output = document.createElement("canvas");
+  output.width = bounds.width;
+  output.height = bounds.height;
+  const outputContext = output.getContext("2d", { alpha: false, willReadFrequently: true });
+  outputContext.fillStyle = "#ffffff";
+  outputContext.fillRect(0, 0, output.width, output.height);
+  outputContext.drawImage(
+    sourceCanvas,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    0,
+    0,
+    bounds.width,
+    bounds.height,
+  );
+
+  return {
+    canvas: output,
+    engine: SCAN_ENGINE_CANVAS,
+    perspectiveCorrected: false,
+    cropApplied,
+    warning,
+  };
+}
+
+function getLuminance(red, green, blue) {
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function clamp255(value) {
+  return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+}
+
+function computeLuminanceStats(imageData) {
+  const histogram = new Array(256).fill(0);
+  const data = imageData.data;
+  const pixelCount = Math.max(1, data.length / 4);
+  const step = Math.max(4, Math.floor(pixelCount / 90000) * 4);
+  let samples = 0;
+
+  for (let index = 0; index < data.length; index += step) {
+    histogram[clamp255(getLuminance(data[index], data[index + 1], data[index + 2]))] += 1;
+    samples += 1;
+  }
+
+  const percentile = (target) => {
+    const threshold = samples * target;
+    let total = 0;
+    for (let value = 0; value < histogram.length; value += 1) {
+      total += histogram[value];
+      if (total >= threshold) {
+        return value;
+      }
+    }
+    return 255;
+  };
+
+  return {
+    p2: percentile(0.02),
+    p5: percentile(0.05),
+    p50: percentile(0.5),
+    p95: percentile(0.95),
+    p98: percentile(0.98),
+  };
+}
+
+function computeImageLuminanceStats(imageData) {
+  return computeLuminanceStats(imageData);
+}
+
+function detectContentBoundsFromImageData(imageData) {
+  const { width, height, data } = imageData;
+  const marginX = Math.max(3, Math.round(width * SCAN_BACKGROUND_MARGIN_RATIO));
+  const marginY = Math.max(3, Math.round(height * SCAN_BACKGROUND_MARGIN_RATIO));
+  const cornerSamples = [
+    [marginX, marginY],
+    [width - marginX - 1, marginY],
+    [marginX, height - marginY - 1],
+    [width - marginX - 1, height - marginY - 1],
+  ];
+  const background =
+    cornerSamples.reduce((total, [x, y]) => {
+      const index = (Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))) * 4;
+      return total + getLuminance(data[index], data[index + 1], data[index + 2]);
+    }, 0) / cornerSamples.length;
+  const threshold = Math.max(16, Math.min(42, Math.abs(255 - background) * 0.18 + 14));
+  let minX = width;
+  let minY = height;
+  let maxX = 0;
+  let maxY = 0;
+
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      const index = (y * width + x) * 4;
+      const luminance = getLuminance(data[index], data[index + 1], data[index + 2]);
+      if (Math.abs(luminance - background) > threshold && luminance < 248) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+
+  if (minX >= maxX || minY >= maxY) {
+    return null;
+  }
+
+  const paddingX = Math.round(width * 0.026);
+  const paddingY = Math.round(height * 0.026);
+  minX = Math.max(0, minX - paddingX);
+  minY = Math.max(0, minY - paddingY);
+  maxX = Math.min(width - 1, maxX + paddingX);
+  maxY = Math.min(height - 1, maxY + paddingY);
+  const cropWidth = maxX - minX + 1;
+  const cropHeight = maxY - minY + 1;
+  const areaRatio = (cropWidth * cropHeight) / (width * height);
+  if (areaRatio < SCAN_AUTO_CROP_MIN_AREA_RATIO || cropWidth < width * 0.5 || cropHeight < height * 0.5) {
+    return null;
+  }
+
+  return {
+    x: minX,
+    y: minY,
+    width: cropWidth,
+    height: cropHeight,
+  };
+}
+
+function createLuminanceBuffer(imageData) {
+  const { data, width, height } = imageData;
+  const gray = new Uint8ClampedArray(width * height);
+  for (let pixel = 0, index = 0; pixel < gray.length; pixel += 1, index += 4) {
+    gray[pixel] = clamp255(getLuminance(data[index], data[index + 1], data[index + 2]));
+  }
+  return gray;
+}
+
+function createBackgroundMap(gray, width, height, options = {}) {
+  const blockSize = Math.max(18, Math.min(56, Number(options.blockSize) || 36));
+  const percentile = Math.max(0.68, Math.min(0.94, Number(options.percentile) || 0.86));
+  const mapWidth = Math.ceil(width / blockSize);
+  const mapHeight = Math.ceil(height / blockSize);
+  const map = new Float32Array(mapWidth * mapHeight);
+  const histogram = new Uint16Array(256);
+
+  for (let by = 0; by < mapHeight; by += 1) {
+    const startY = by * blockSize;
+    const endY = Math.min(height, startY + blockSize);
+    for (let bx = 0; bx < mapWidth; bx += 1) {
+      histogram.fill(0);
+      const startX = bx * blockSize;
+      const endX = Math.min(width, startX + blockSize);
+      let samples = 0;
+
+      for (let y = startY; y < endY; y += 2) {
+        const row = y * width;
+        for (let x = startX; x < endX; x += 2) {
+          histogram[gray[row + x]] += 1;
+          samples += 1;
+        }
+      }
+
+      const target = Math.max(1, Math.round(samples * percentile));
+      let total = 0;
+      let value = 255;
+      for (let luminance = 0; luminance < histogram.length; luminance += 1) {
+        total += histogram[luminance];
+        if (total >= target) {
+          value = luminance;
+          break;
+        }
+      }
+      map[by * mapWidth + bx] = value;
+    }
+  }
+
+  const passes = Math.max(1, Math.min(4, Number(options.smoothPasses) || 2));
+  let current = map;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const next = new Float32Array(current.length);
+    for (let y = 0; y < mapHeight; y += 1) {
+      for (let x = 0; x < mapWidth; x += 1) {
+        let sum = 0;
+        let count = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= mapHeight) {
+            continue;
+          }
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= mapWidth) {
+              continue;
+            }
+            sum += current[yy * mapWidth + xx];
+            count += 1;
+          }
+        }
+        next[y * mapWidth + x] = sum / Math.max(1, count);
+      }
+    }
+    current = next;
+  }
+
+  return { data: current, mapWidth, mapHeight, blockSize };
+}
+
+function sampleBackgroundMap(map, x, y) {
+  const gx = x / map.blockSize - 0.5;
+  const gy = y / map.blockSize - 0.5;
+  const x0 = Math.max(0, Math.min(map.mapWidth - 1, Math.floor(gx)));
+  const y0 = Math.max(0, Math.min(map.mapHeight - 1, Math.floor(gy)));
+  const x1 = Math.max(0, Math.min(map.mapWidth - 1, x0 + 1));
+  const y1 = Math.max(0, Math.min(map.mapHeight - 1, y0 + 1));
+  const tx = Math.max(0, Math.min(1, gx - x0));
+  const ty = Math.max(0, Math.min(1, gy - y0));
+  const a = map.data[y0 * map.mapWidth + x0];
+  const b = map.data[y0 * map.mapWidth + x1];
+  const c = map.data[y1 * map.mapWidth + x0];
+  const d = map.data[y1 * map.mapWidth + x1];
+  return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+}
+
+function computeSimpleGradientFromGray(gray, width, height, x, y) {
+  const left = gray[y * width + Math.max(0, x - 1)];
+  const right = gray[y * width + Math.min(width - 1, x + 1)];
+  const up = gray[Math.max(0, y - 1) * width + x];
+  const down = gray[Math.min(height - 1, y + 1) * width + x];
+  return Math.abs(right - left) + Math.abs(down - up);
+}
+
+function getScanStrengthSettings(strength, mode) {
+  const normalized = normalizeScanStrength(strength);
+  const base = {
+    targetWhite: 246,
+    shadow: 0.84,
+    colorMix: 0.06,
+    whiteAmount: 0.68,
+    inkAmount: 0.9,
+    midInkAmount: 0.44,
+    sharpen: 0.38,
+    denoise: 0.34,
+    whiteStart: 214,
+    midStart: 158,
+    inkStart: 126,
+    gradientProtect: 24,
+    blockSize: 34,
+  };
+  const strengthAdjustments = {
+    [SCAN_STRENGTH_LIGHT]: {
+      targetWhite: 243,
+      shadow: 0.66,
+      colorMix: 0.12,
+      whiteAmount: 0.5,
+      inkAmount: 0.64,
+      midInkAmount: 0.25,
+      sharpen: 0.24,
+      denoise: 0.22,
+      whiteStart: 220,
+      inkStart: 118,
+      gradientProtect: 20,
+    },
+    [SCAN_STRENGTH_NORMAL]: {},
+    [SCAN_STRENGTH_STRONG]: {
+      targetWhite: 250,
+      shadow: 0.98,
+      colorMix: 0.03,
+      whiteAmount: 0.86,
+      inkAmount: 1.14,
+      midInkAmount: 0.58,
+      sharpen: 0.5,
+      denoise: 0.46,
+      whiteStart: 206,
+      inkStart: 136,
+      gradientProtect: 28,
+    },
+  };
+  const modeAdjustments = {
+    [SCAN_MODE_MUSIC_SCORE]: {
+      colorMix: 0.1,
+      inkAmount: 0.78,
+      midInkAmount: 0.32,
+      sharpen: 0.32,
+      whiteStart: 218,
+      inkStart: 122,
+      gradientProtect: 18,
+    },
+    [SCAN_MODE_DOCUMENT]: {
+      colorMix: 0.02,
+      inkAmount: 1.12,
+      midInkAmount: 0.54,
+      sharpen: 0.5,
+      whiteStart: 204,
+      gradientProtect: 30,
+    },
+    [SCAN_MODE_GRAYSCALE]: {
+      colorMix: 0,
+      inkAmount: 0.72,
+      midInkAmount: 0.3,
+      sharpen: 0.28,
+    },
+  };
+
+  return {
+    ...base,
+    ...(strengthAdjustments[normalized] || {}),
+    ...(modeAdjustments[normalizeScanMode(mode)] || {}),
+  };
+}
+
+function flattenIllumination(imageData, options = {}) {
+  const { data, width, height } = imageData;
+  const gray = createLuminanceBuffer(imageData);
+  const background = createBackgroundMap(gray, width, height, {
+    blockSize: options.blockSize || 34,
+    percentile: options.backgroundPercentile || 0.86,
+    smoothPasses: options.smoothPasses || 2,
+  });
+  const targetWhite = Number(options.targetWhite) || 246;
+  const shadow = Math.max(0, Math.min(1.2, options.shadow ?? 0.84));
+  const colorMix = Math.max(0, Math.min(0.35, options.colorMix ?? 0.06));
+  const contrast = Math.max(0.9, Math.min(1.18, options.contrast ?? 1.04));
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixel = y * width + x;
+      const index = pixel * 4;
+      const bg = Math.max(70, sampleBackgroundMap(background, x, y));
+      const luminance = gray[pixel];
+      const ratioCorrected = (luminance / bg) * targetWhite;
+      const lifted = luminance + (targetWhite - bg) * shadow;
+      let corrected = ratioCorrected * 0.62 + lifted * 0.38;
+      corrected = (corrected - 128) * contrast + 128;
+      corrected = clamp255(corrected);
+      data[index] = clamp255(data[index] * colorMix + corrected * (1 - colorMix));
+      data[index + 1] = clamp255(data[index + 1] * colorMix + corrected * (1 - colorMix));
+      data[index + 2] = clamp255(data[index + 2] * colorMix + corrected * (1 - colorMix));
+    }
+  }
+  return imageData;
+}
+
+function whitenBackgroundPreserveInk(imageData, options = {}) {
+  const { data, width, height } = imageData;
+  const gray = createLuminanceBuffer(imageData);
+  const whiteStart = Number(options.whiteStart) || 214;
+  const midStart = Number(options.midStart) || 158;
+  const inkStart = Number(options.inkStart) || 126;
+  const whiteAmount = Math.max(0, Math.min(1, options.whiteAmount ?? 0.68));
+  const inkAmount = Math.max(0, Math.min(1.4, options.inkAmount ?? 0.9));
+  const midInkAmount = Math.max(0, Math.min(1, options.midInkAmount ?? 0.44));
+  const gradientProtect = Number(options.gradientProtect) || 24;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixel = y * width + x;
+      const index = pixel * 4;
+      const value = gray[pixel];
+      const gradient = computeSimpleGradientFromGray(gray, width, height, x, y);
+      let target = value;
+
+      if (value >= whiteStart && gradient < gradientProtect * 2.2) {
+        target = value + (255 - value) * whiteAmount;
+      } else if (value >= midStart) {
+        if (gradient < gradientProtect) {
+          const ratio = (value - midStart) / Math.max(1, whiteStart - midStart);
+          target = value + (253 - value) * whiteAmount * (0.34 + ratio * 0.48);
+        } else {
+          target = value - Math.min(16, gradient * 0.12) * midInkAmount;
+        }
+      } else if (value <= inkStart) {
+        target = value * (1 - 0.2 * inkAmount);
+      } else if (gradient >= gradientProtect) {
+        target = value - 12 * midInkAmount;
+      }
+
+      target = clamp255(target);
+      data[index] = target;
+      data[index + 1] = target;
+      data[index + 2] = target;
+    }
+  }
+  return imageData;
+}
+
+function boostInkContrast(imageData, options = {}) {
+  const { data, width, height } = imageData;
+  const gray = createLuminanceBuffer(imageData);
+  const amount = Math.max(0, Math.min(1.4, options.amount ?? 0.9));
+  const gradientProtect = Number(options.gradientProtect) || 24;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixel = y * width + x;
+      const index = pixel * 4;
+      const value = gray[pixel];
+      const gradient = computeSimpleGradientFromGray(gray, width, height, x, y);
+      let target = value;
+
+      if (value < 90) {
+        target = value * (1 - 0.24 * amount);
+      } else if (value < 135) {
+        target = value - 18 * amount;
+      } else if (value < 205 && gradient > gradientProtect) {
+        target = value - 10 * amount;
+      } else if (value > 225 && gradient < gradientProtect * 1.5) {
+        target = value + (255 - value) * Math.min(0.55, amount * 0.32);
+      }
+
+      target = clamp255(target);
+      data[index] = target;
+      data[index + 1] = target;
+      data[index + 2] = target;
+    }
+  }
+  return imageData;
+}
+
+function applyMildDenoise(imageData, options = {}) {
+  const amount = Math.max(0, Math.min(1, options.amount ?? 0.34));
+  if (amount <= 0.01) {
+    return imageData;
+  }
+  const { data, width, height } = imageData;
+  const source = new Uint8ClampedArray(data);
+  const gray = createLuminanceBuffer(imageData);
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const pixel = y * width + x;
+      const gradient = computeSimpleGradientFromGray(gray, width, height, x, y);
+      if (gray[pixel] < 178 || gradient > 16) {
+        continue;
+      }
+      const index = pixel * 4;
+      for (let channel = 0; channel < 3; channel += 1) {
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            sum += source[((y + dy) * width + x + dx) * 4 + channel];
+          }
+        }
+        data[index + channel] = clamp255(source[index + channel] * (1 - amount) + (sum / 9) * amount);
+      }
+    }
+  }
+  return imageData;
+}
+
+function applyUnsharpMask(imageData, options = {}) {
+  const amount = Math.max(0, Math.min(0.75, options.amount ?? 0.38));
+  if (amount <= 0.01) {
+    return imageData;
+  }
+  const { data, width, height } = imageData;
+  const source = new Uint8ClampedArray(data);
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = (y * width + x) * 4;
+      const gray = getLuminance(source[index], source[index + 1], source[index + 2]);
+      if (gray > 248) {
+        continue;
+      }
+      for (let channel = 0; channel < 3; channel += 1) {
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            sum += source[((y + dy) * width + x + dx) * 4 + channel];
+          }
+        }
+        const blur = sum / 9;
+        data[index + channel] = clamp255(source[index + channel] + (source[index + channel] - blur) * amount);
+      }
+    }
+  }
+  return imageData;
+}
+
+function computeScanQualityStats(imageData) {
+  const { data } = imageData;
+  const pixelCount = Math.max(1, data.length / 4);
+  const step = Math.max(4, Math.floor(pixelCount / 140000) * 4);
+  let samples = 0;
+  let white = 0;
+  let black = 0;
+  let middle = 0;
+  let total = 0;
+
+  for (let index = 0; index < data.length; index += step) {
+    const luminance = getLuminance(data[index], data[index + 1], data[index + 2]);
+    total += luminance;
+    samples += 1;
+    if (luminance > 246) {
+      white += 1;
+    } else if (luminance < 55) {
+      black += 1;
+    } else if (luminance >= 80 && luminance <= 220) {
+      middle += 1;
+    }
+  }
+
+  return {
+    whiteRatio: white / Math.max(1, samples),
+    blackRatio: black / Math.max(1, samples),
+    middleRatio: middle / Math.max(1, samples),
+    average: total / Math.max(1, samples),
+  };
+}
+
+function validateScanOutput(imageData, beforeStats, mode) {
+  const stats = computeScanQualityStats(imageData);
+  const scanMode = normalizeScanMode(mode);
+  if (scanMode === SCAN_MODE_BW) {
+    return stats.blackRatio >= 0.01 && stats.blackRatio <= 0.35;
+  }
+  if (stats.blackRatio > 0.45 || stats.blackRatio < 0.002) {
+    return false;
+  }
+  if (stats.whiteRatio > 0.985 && stats.blackRatio < 0.012) {
+    return false;
+  }
+  if (stats.average > 251 && stats.blackRatio < Math.max(0.006, beforeStats.blackRatio * 0.35)) {
+    return false;
+  }
+  if (scanMode === SCAN_MODE_MUSIC_SCORE && stats.blackRatio > 0.38) {
+    return false;
+  }
+  return true;
+}
+
+function applyHdPipeline(imageData, options = {}) {
+  const settings = getScanStrengthSettings(options.strength, options.mode || SCAN_MODE_HD);
+  flattenIllumination(imageData, settings);
+  whitenBackgroundPreserveInk(imageData, settings);
+  boostInkContrast(imageData, {
+    amount: settings.inkAmount,
+    gradientProtect: settings.gradientProtect,
+  });
+  applyMildDenoise(imageData, { amount: settings.denoise });
+  applyUnsharpMask(imageData, { amount: settings.sharpen });
+  return imageData;
+}
+
+function applyHdScanEnhancement(imageData, options = {}) {
+  const original = new Uint8ClampedArray(imageData.data);
+  const beforeStats = computeScanQualityStats(imageData);
+  applyHdPipeline(imageData, {
+    mode: SCAN_MODE_HD,
+    strength: options.strength,
+  });
+  if (!options.skipValidation && !validateScanOutput(imageData, beforeStats, SCAN_MODE_HD)) {
+    imageData.data.set(original);
+    applyHdPipeline(imageData, {
+      mode: SCAN_MODE_MUSIC_SCORE,
+      strength: SCAN_STRENGTH_LIGHT,
+    });
+  }
+  return imageData;
+}
+
+function normalizeDocumentBackground(imageData, options = {}) {
+  return applyHdPipeline(imageData, {
+    mode: options.mode || SCAN_MODE_DOCUMENT,
+    strength: options.strength || SCAN_STRENGTH_LIGHT,
+  });
+}
+
+function applyMusicScoreEnhancement(imageData, options = {}) {
+  const original = new Uint8ClampedArray(imageData.data);
+  const beforeStats = computeScanQualityStats(imageData);
+  applyHdPipeline(imageData, {
+    mode: SCAN_MODE_MUSIC_SCORE,
+    strength: options.strength || SCAN_STRENGTH_NORMAL,
+  });
+  if (!options.skipValidation && !validateScanOutput(imageData, beforeStats, SCAN_MODE_MUSIC_SCORE)) {
+    imageData.data.set(original);
+    applyHdPipeline(imageData, {
+      mode: SCAN_MODE_MUSIC_SCORE,
+      strength: SCAN_STRENGTH_LIGHT,
+    });
+  }
+  return imageData;
+}
+
+function applyDocumentEnhancement(imageData, options = {}) {
+  const original = new Uint8ClampedArray(imageData.data);
+  const beforeStats = computeScanQualityStats(imageData);
+  applyHdPipeline(imageData, {
+    mode: SCAN_MODE_DOCUMENT,
+    strength: options.strength || SCAN_STRENGTH_NORMAL,
+  });
+  if (!options.skipValidation && !validateScanOutput(imageData, beforeStats, SCAN_MODE_DOCUMENT)) {
+    imageData.data.set(original);
+    applyHdPipeline(imageData, {
+      mode: SCAN_MODE_DOCUMENT,
+      strength: SCAN_STRENGTH_LIGHT,
+    });
+  }
+  return imageData;
+}
+
+function applyGrayscaleEnhancement(imageData, options = {}) {
+  applyHdPipeline(imageData, {
+    mode: SCAN_MODE_GRAYSCALE,
+    strength: options.strength || SCAN_STRENGTH_NORMAL,
+  });
+  const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const luminance = clamp255(getLuminance(data[index], data[index + 1], data[index + 2]));
+    data[index] = luminance;
+    data[index + 1] = luminance;
+    data[index + 2] = luminance;
+  }
+  return imageData;
+}
+
+function applyAdaptiveBinarization(imageData, options = {}) {
+  const { width, height, data } = imageData;
+  const radius = Math.max(8, Math.min(28, Number(options.radius) || 16));
+  const bias = Number(options.bias) || 8;
+  const grayscale = new Uint8ClampedArray(width * height);
+  const integral = new Float64Array((width + 1) * (height + 1));
+
+  for (let y = 0; y < height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < width; x += 1) {
+      const sourceIndex = (y * width + x) * 4;
+      const gray = getLuminance(data[sourceIndex], data[sourceIndex + 1], data[sourceIndex + 2]);
+      grayscale[y * width + x] = gray;
+      rowSum += gray;
+      integral[(y + 1) * (width + 1) + x + 1] = integral[y * (width + 1) + x + 1] + rowSum;
+    }
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    const y1 = Math.max(0, y - radius);
+    const y2 = Math.min(height - 1, y + radius);
+    for (let x = 0; x < width; x += 1) {
+      const x1 = Math.max(0, x - radius);
+      const x2 = Math.min(width - 1, x + radius);
+      const area = (x2 - x1 + 1) * (y2 - y1 + 1);
+      const sum =
+        integral[(y2 + 1) * (width + 1) + x2 + 1] -
+        integral[y1 * (width + 1) + x2 + 1] -
+        integral[(y2 + 1) * (width + 1) + x1] +
+        integral[y1 * (width + 1) + x1];
+      const localMean = sum / area;
+      const gray = grayscale[y * width + x];
+      const value = gray < localMean - bias ? 16 : 255;
+      const targetIndex = (y * width + x) * 4;
+      data[targetIndex] = value;
+      data[targetIndex + 1] = value;
+      data[targetIndex + 2] = value;
+    }
+  }
+  return imageData;
+}
+
+function applyCleanBwScan(imageData, options = {}) {
+  const original = new Uint8ClampedArray(imageData.data);
+  const strength = normalizeScanStrength(options.strength);
+  const settings = getScanStrengthSettings(strength, SCAN_MODE_DOCUMENT);
+  flattenIllumination(imageData, {
+    ...settings,
+    colorMix: 0,
+    targetWhite: strength === SCAN_STRENGTH_STRONG ? 250 : 246,
+  });
+  applyGrayscaleEnhancement(imageData, { strength: SCAN_STRENGTH_LIGHT });
+  const bias = strength === SCAN_STRENGTH_STRONG ? 7 : strength === SCAN_STRENGTH_LIGHT ? 3 : 5;
+  applyAdaptiveBinarization(imageData, { radius: 18, bias });
+  if (!validateScanOutput(imageData, computeScanQualityStats({ data: original, width: imageData.width, height: imageData.height }), SCAN_MODE_BW)) {
+    imageData.data.set(original);
+    applyGrayscaleEnhancement(imageData, { strength: SCAN_STRENGTH_LIGHT });
+    applyAdaptiveBinarization(imageData, { radius: 20, bias: 2 });
+  }
+  return imageData;
+}
+
+function applyScanModeToImageData(imageData, mode, options = {}) {
+  const scanMode = normalizeScanMode(mode);
+  const strength = normalizeScanStrength(options.strength || state.scanStrength);
+  if (scanMode === SCAN_MODE_ORIGINAL) {
+    return imageData;
+  }
+  if (scanMode === SCAN_MODE_HD) {
+    return applyHdScanEnhancement(imageData, { strength });
+  }
+  if (scanMode === SCAN_MODE_BW) {
+    return applyCleanBwScan(imageData, { strength });
+  }
+  if (scanMode === SCAN_MODE_GRAYSCALE) {
+    return applyGrayscaleEnhancement(imageData, { strength });
+  }
+  if (scanMode === SCAN_MODE_DOCUMENT) {
+    return applyDocumentEnhancement(imageData, { strength });
+  }
+  if (scanMode === SCAN_MODE_MUSIC_SCORE) {
+    return applyMusicScoreEnhancement(imageData, { strength });
+  }
+  return applyHdScanEnhancement(imageData, { strength });
+}
 async function loadImageSource(file) {
   if (typeof createImageBitmap === "function") {
     try {
@@ -10190,8 +12047,8 @@ function createCompressedFile(blob, originalName, extension) {
 }
 
 function renderPending() {
-  clearPendingUrls();
   elements.pendingArea.replaceChildren();
+  renderScanOptions();
 
   if (!state.pendingPages.length) {
     const empty = document.createElement("div");
@@ -10204,24 +12061,44 @@ function renderPending() {
 
   state.pendingPages.forEach((page, index) => {
     const row = document.createElement("div");
-    row.className = "pending-row";
+    row.className = "pending-row pending-card";
+    row.classList.toggle("is-processing", page.status === "processing" || page.status === "queued");
+    row.classList.toggle("is-error", page.status === "error");
 
-    const thumb = document.createElement("div");
+    const thumb = document.createElement("button");
     thumb.className = "pending-thumb";
+    thumb.type = "button";
+    thumb.title = "查看优化效果";
+    thumb.setAttribute("aria-label", `查看第 ${index + 1} 页优化效果`);
     const img = document.createElement("img");
     img.draggable = false;
-    img.src = getPendingUrl(page);
+    img.src = getPendingDisplayUrl(page);
     img.alt = `待保存第 ${index + 1} 页`;
     thumb.append(img);
+    thumb.addEventListener("click", () => openPendingPreview(page, index));
 
     const text = document.createElement("div");
+    text.className = "pending-body";
     const title = document.createElement("p");
     title.className = "pending-title";
     title.textContent = page.name || `第 ${index + 1} 页`;
     const meta = document.createElement("p");
     meta.className = "pending-meta";
     meta.textContent = `${index + 1} / ${state.pendingPages.length} · ${formatCompressionMeta(page)}`;
-    text.append(title, meta);
+    const tools = document.createElement("div");
+    tools.className = "pending-tools";
+    const status = document.createElement("span");
+    status.className = "pending-status";
+    status.textContent = getPendingScanStatus(page);
+    tools.append(
+      status,
+      createPendingToolButton("rotate-ccw", "左转", page.id, "rotate-left", page.status === "processing"),
+      createPendingToolButton("rotate-cw", "右转", page.id, "rotate-right", page.status === "processing"),
+      createPendingTextToolButton(getPendingCompareLabel(page), page.id, "toggle-preview", page.status === "processing"),
+      createPendingToolButton("refresh-ccw", "重置", page.id, "reset-scan", page.status === "processing"),
+      createPendingToolButton("wand-sparkles", "重新优化", page.id, "reoptimize", page.status === "processing"),
+    );
+    text.append(title, meta, tools);
 
     const removeButton = document.createElement("button");
     removeButton.className = "icon-button";
@@ -10230,7 +12107,7 @@ function renderPending() {
     removeButton.setAttribute("aria-label", "移除图片");
     removeButton.append(createIcon("trash-2"));
     removeButton.addEventListener("click", () => {
-      revokePendingUrl(page.id);
+      revokePendingPageUrls(page);
       state.pendingPages = state.pendingPages.filter((item) => item.id !== page.id);
       renderPending();
       updateSaveState();
@@ -10243,6 +12120,111 @@ function renderPending() {
   refreshIcons();
 }
 
+function openPendingPreview(page, index = 0) {
+  if (!page || !elements.pendingPreviewDialog || !elements.pendingPreviewImage) {
+    return;
+  }
+  elements.pendingPreviewImage.src = getPendingDisplayUrl(page);
+  elements.pendingPreviewImage.alt = page.name || `第 ${index + 1} 页优化效果`;
+  if (elements.pendingPreviewCaption) {
+    elements.pendingPreviewCaption.textContent = `${page.name || `第 ${index + 1} 页`} · ${getPendingScanStatus(page)}`;
+  }
+  elements.pendingPreviewDialog.showModal();
+}
+
+function closePendingPreview() {
+  if (elements.pendingPreviewDialog?.open) {
+    elements.pendingPreviewDialog.close();
+  }
+  if (elements.pendingPreviewImage) {
+    elements.pendingPreviewImage.removeAttribute("src");
+  }
+}
+
+function createPendingToolButton(iconName, label, pageId, action, disabled = false) {
+  const button = document.createElement("button");
+  button.className = "pending-tool-button";
+  button.type = "button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.dataset.pendingId = pageId;
+  button.dataset.pendingAction = action;
+  button.disabled = disabled;
+  button.append(createIcon(iconName));
+  button.addEventListener("click", handlePendingToolAction);
+  return button;
+}
+
+function createPendingTextToolButton(label, pageId, action, disabled = false) {
+  const button = document.createElement("button");
+  button.className = "pending-tool-button pending-tool-text-button";
+  button.type = "button";
+  button.textContent = label;
+  button.dataset.pendingId = pageId;
+  button.dataset.pendingAction = action;
+  button.disabled = disabled;
+  button.addEventListener("click", handlePendingToolAction);
+  return button;
+}
+
+function getPendingScanStatus(page) {
+  if (page.status === "processing" || page.status === "queued") {
+    return "正在处理...";
+  }
+  if (page.status === "error") {
+    return "处理失败，已回退原图";
+  }
+  const label = SCAN_MODE_LABELS[normalizeScanMode(page.scanMode)] || "原图";
+  const deskew = getPendingDeskewLabel(page);
+  if (page.rotation) {
+    return `${label}${deskew} · 已旋转`;
+  }
+  return `${label}${deskew}`;
+}
+
+function getPendingCompareLabel(page) {
+  return page.previewOriginal ? "看优化" : "看原图";
+}
+
+function getPendingDeskewLabel(page) {
+  const meta = page.scanMeta || {};
+  if (normalizeScanMode(page.scanMode) !== SCAN_MODE_HD || !meta.deskewApplied) {
+    return "";
+  }
+  const angle = Math.abs(Number(meta.deskewAngle) || 0);
+  return angle ? ` · 已扶正 ${angle.toFixed(1)}°` : " · 已扶正";
+}
+
+function handlePendingToolAction(event) {
+  const button = event.currentTarget;
+  const page = state.pendingPages.find((item) => item.id === button.dataset.pendingId);
+  if (!page || button.disabled) {
+    return;
+  }
+
+  const action = button.dataset.pendingAction;
+  if (action === "toggle-preview") {
+    page.previewOriginal = !page.previewOriginal;
+    renderPending();
+    return;
+  }
+  if (action === "reset-scan") {
+    resetPendingPageScan(page);
+    return;
+  }
+
+  if (action === "rotate-left" || action === "rotate-right") {
+    const delta = action === "rotate-left" ? -90 : 90;
+    page.rotation = normalizeRotation((page.rotation || 0) + delta);
+    enqueuePendingOptimization(page, {
+      statusMessage: "正在旋转并优化图片...",
+    });
+  } else if (action === "reoptimize") {
+    enqueuePendingOptimization(page, {
+      statusMessage: "正在重新优化图片...",
+    });
+  }
+}
 async function saveScore(event) {
   event.preventDefault();
 
@@ -10255,6 +12237,11 @@ async function saveScore(event) {
     if (!name || !state.pendingPages.length) {
       updateSaveState();
       return;
+    }
+    if (isPendingScanBusy()) {
+      setStatus("正在完成图片优化，请稍候...");
+      elements.saveButton.disabled = true;
+      await waitForPendingScanQueue();
     }
     const folderId = elements.scoreFolder ? elements.scoreFolder.value || null : state.currentFolderId || null;
     if (hasDuplicateScoreName(name, folderId)) {
@@ -10943,7 +12930,7 @@ async function deleteManagedPage(page) {
 }
 
 async function appendManagedPages(fileList) {
-  const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+  const files = Array.from(fileList || []).filter(isImageFile);
   elements.appendPageInput.value = "";
   if (!files.length) {
     setPageManagerStatus("请选择图片文件。", true);
@@ -10964,7 +12951,11 @@ async function appendManagedPages(fileList) {
     const newPages = [];
     for (const [index, file] of files.entries()) {
       const compressed = await withTimeout(
-        compressImageFile(file),
+        optimizeScoreImageFile(file, {
+          mode: state.scanMode,
+          strength: state.scanStrength,
+          engineChoice: state.scanEngineChoice,
+        }),
         IMAGE_COMPRESSION_TIMEOUT,
         `《${file.name}》压缩超时，已使用原图。`,
       ).catch((error) => {
@@ -11008,7 +12999,7 @@ async function replaceManagedPage(file) {
   if (!pageId || !file) {
     return;
   }
-  if (!file.type.startsWith("image/")) {
+  if (!isImageFile(file)) {
     setPageManagerStatus("请选择图片文件。", true);
     return;
   }
@@ -11025,7 +13016,11 @@ async function replaceManagedPage(file) {
       return;
     }
     const compressed = await withTimeout(
-      compressImageFile(file),
+      optimizeScoreImageFile(file, {
+        mode: state.scanMode,
+        strength: state.scanStrength,
+        engineChoice: state.scanEngineChoice,
+      }),
       IMAGE_COMPRESSION_TIMEOUT,
       `《${file.name}》压缩超时，已使用原图。`,
     ).catch((error) => {
@@ -14686,6 +16681,7 @@ function resetForm(showMessage = true) {
   clearPendingUrls();
   state.pendingPages = [];
   state.pendingFilesProcessing = false;
+  state.pendingScanQueue = Promise.resolve();
   renderPending();
   updateSaveState();
   if (showMessage) {
@@ -14696,7 +16692,7 @@ function resetForm(showMessage = true) {
 function updateSaveState() {
   elements.saveButton.disabled =
     operationLocks.has("saveScore") ||
-    state.pendingFilesProcessing ||
+    isPendingScanBusy() ||
     !elements.scoreName.value.trim() ||
     !state.pendingPages.length;
 }
@@ -19558,10 +21554,20 @@ function refreshVisibleScoreImages() {
 }
 
 function getPendingUrl(page) {
+  if (page.url) {
+    return page.url;
+  }
   if (!state.pendingUrls.has(page.id)) {
     state.pendingUrls.set(page.id, URL.createObjectURL(page.blob));
   }
   return state.pendingUrls.get(page.id);
+}
+
+function getPendingDisplayUrl(page) {
+  if (page?.previewOriginal && page.originalUrl) {
+    return page.originalUrl;
+  }
+  return getPendingUrl(page);
 }
 
 function revokeScoreUrls(score) {
@@ -19604,7 +21610,25 @@ function revokePendingUrl(id) {
   }
 }
 
+function revokePendingPageUrls(page) {
+  if (!page) {
+    return;
+  }
+  const urls = new Set([
+    page.url,
+    page.originalUrl,
+    page.optimizedUrl,
+    state.pendingUrls.get(page.id),
+  ].filter(Boolean));
+  urls.forEach((url) => URL.revokeObjectURL(url));
+  state.pendingUrls.delete(page.id);
+  page.url = "";
+  page.originalUrl = "";
+  page.optimizedUrl = "";
+}
+
 function clearPendingUrls() {
+  state.pendingPages.forEach(revokePendingPageUrls);
   state.pendingUrls.forEach((url) => URL.revokeObjectURL(url));
   state.pendingUrls.clear();
 }
@@ -19702,6 +21726,9 @@ function createId() {
 }
 
 function formatCompressionMeta(page) {
+  if (page.status === "processing" || page.status === "queued") {
+    return "正在处理";
+  }
   if (!page.originalSize || page.originalSize <= page.size) {
     return formatBytes(page.size);
   }
