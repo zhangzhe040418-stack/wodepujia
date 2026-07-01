@@ -14,7 +14,7 @@ const SYNC_STATE_STORE_NAME = "sync_state";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 2;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v241";
+const APP_BUILD = "v238";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -78,14 +78,6 @@ const DEFAULT_SCAN_ENGINE_CHOICE = SCAN_ENGINE_CHOICE_PROFESSIONAL;
 const SCAN_MAX_EDGE = IMAGE_MAX_EDGE;
 const SCAN_BACKGROUND_MARGIN_RATIO = 0.035;
 const SCAN_AUTO_CROP_MIN_AREA_RATIO = 0.35;
-const LINE_STRAIGHTEN_MIN_ROWS = 2;
-const LINE_STRAIGHTEN_MIN_CONFIDENCE = 0.32;
-const LINE_STRAIGHTEN_MIN_ANGLE = 0.35;
-const LINE_STRAIGHTEN_MAX_ANGLE = 5;
-const LINE_STRAIGHTEN_MAX_ROW_ANGLE_SPREAD = 7;
-const LINE_STRAIGHTEN_MAX_ROWS = 30;
-const SCAN_ENABLE_LINE_STRAIGHTEN = false;
-const SCAN_ENABLE_DOCUMENT_DEWARP = false;
 const SCAN_MODE_LABELS = {
   [SCAN_MODE_ORIGINAL]: "原图",
   [SCAN_MODE_HD]: "高清扫描",
@@ -5231,7 +5223,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=259");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=256");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -10319,12 +10311,21 @@ function createPendingPageRecord(file, options = {}) {
     previewOriginal: false,
     rotation: Number(options.rotation) || 0,
     crop: null,
-    scanMeta: createDefaultScanMeta({
+    scanMeta: {
       mode: scanMode,
       strength: scanStrength,
       engineChoice: SCAN_ENGINE_CHOICE_PROFESSIONAL,
+      engine: SCAN_ENGINE_NONE,
+      perspectiveCorrected: false,
+      cropApplied: false,
+      deskewApplied: false,
+      deskewAngle: 0,
+      deskewConfidence: 0,
+      deskewMethod: "none",
+      deskewMeta: null,
       rotation: Number(options.rotation) || 0,
-    }),
+      warning: "",
+    },
     status: options.status || "original",
     error: "",
     scanVersion: 0,
@@ -10333,40 +10334,6 @@ function createPendingPageRecord(file, options = {}) {
 
 function normalizeScanMode(mode) {
   return mode === SCAN_MODE_ORIGINAL ? SCAN_MODE_ORIGINAL : SCAN_MODE_HD;
-}
-
-function createDefaultLineStraightenMeta(overrides = {}) {
-  return {
-    lineStraightenApplied: Boolean(overrides.lineStraightenApplied),
-    lineStraightenRows: Number(overrides.lineStraightenRows) || 0,
-    lineStraightenCorrectedRows: Number(overrides.lineStraightenCorrectedRows) || 0,
-    lineStraightenAverageAngle: Number(overrides.lineStraightenAverageAngle) || 0,
-    lineStraightenMaxAngle: Number(overrides.lineStraightenMaxAngle) || 0,
-    lineStraightenMethod: overrides.lineStraightenMethod || "none",
-    lineStraightenMeta: overrides.lineStraightenMeta || null,
-  };
-}
-
-function createDefaultScanMeta(overrides = {}) {
-  const mode = normalizeScanMode(overrides.mode || state.scanMode || DEFAULT_SCAN_MODE);
-  const strength = overrides.strength || getEffectiveScanStrength();
-  const rotation = normalizeRotation(overrides.rotation || 0);
-  return {
-    mode,
-    strength,
-    engineChoice: overrides.engineChoice || SCAN_ENGINE_CHOICE_PROFESSIONAL,
-    engine: overrides.engine || SCAN_ENGINE_NONE,
-    perspectiveCorrected: Boolean(overrides.perspectiveCorrected),
-    cropApplied: Boolean(overrides.cropApplied),
-    deskewApplied: Boolean(overrides.deskewApplied),
-    deskewAngle: Number(overrides.deskewAngle) || 0,
-    deskewConfidence: Number(overrides.deskewConfidence) || 0,
-    deskewMethod: overrides.deskewMethod || "none",
-    deskewMeta: overrides.deskewMeta || null,
-    rotation,
-    warning: overrides.warning || "",
-    ...createDefaultLineStraightenMeta(overrides),
-  };
 }
 
 function normalizeScanStrength(strength) {
@@ -10495,14 +10462,21 @@ function setPendingPageBlob(page, blob, status = "optimized", error = "") {
   page.blob = blob;
   page.type = blob.type || page.originalFile?.type || "image/jpeg";
   page.size = blob.size || page.originalFile?.size || 0;
-  page.scanMeta = blob.scanMeta || createDefaultScanMeta({
+  page.scanMeta = blob.scanMeta || {
     mode: page.scanMode,
     strength: page.scanStrength,
     engineChoice: page.scanEngineChoice,
     engine: status === "original" ? SCAN_ENGINE_NONE : SCAN_ENGINE_CANVAS,
+    perspectiveCorrected: false,
+    cropApplied: false,
+    deskewApplied: false,
+    deskewAngle: 0,
+    deskewConfidence: 0,
+    deskewMethod: "none",
+    deskewMeta: null,
     rotation: page.rotation || 0,
     warning: error || "",
-  });
+  };
   page.deskewApplied = Boolean(page.scanMeta.deskewApplied);
   page.deskewAngle = Number(page.scanMeta.deskewAngle) || 0;
   page.deskewMeta = page.scanMeta.deskewMeta || null;
@@ -10604,12 +10578,21 @@ async function optimizeScoreImageFile(file, options = {}) {
 
   if (mode === SCAN_MODE_ORIGINAL && rotation === 0) {
     const compressed = await compressImageFile(file);
-    compressed.scanMeta = createDefaultScanMeta({
+    compressed.scanMeta = {
       mode,
       strength,
       engineChoice,
+      engine: SCAN_ENGINE_NONE,
+      perspectiveCorrected: false,
+      cropApplied: false,
+      deskewApplied: false,
+      deskewAngle: 0,
+      deskewConfidence: 0,
+      deskewMethod: "none",
+      deskewMeta: null,
       rotation,
-    });
+      warning: "",
+    };
     return compressed;
   }
 
@@ -10635,16 +10618,10 @@ async function optimizeScoreImageFile(file, options = {}) {
         warning: "",
       },
     };
-    let lineStraightenResult = createLineStraightenFallback(workingCanvas, { warning: "" });
     if (mode === SCAN_MODE_HD) {
       deskewResult = await autoDeskewCanvas(workingCanvas, { mode, engineChoice });
       workingCanvas = deskewResult.canvas || workingCanvas;
       await nextFrame();
-      if (SCAN_ENABLE_LINE_STRAIGHTEN) {
-        lineStraightenResult = await autoLineStraightenCanvas(workingCanvas, { mode, engineChoice });
-        workingCanvas = lineStraightenResult.canvas || workingCanvas;
-        await nextFrame();
-      }
     }
 
     const outputData = workingCanvas
@@ -10656,7 +10633,7 @@ async function optimizeScoreImageFile(file, options = {}) {
     workingCanvas.getContext("2d", { alpha: false }).putImageData(outputData, 0, 0);
 
     const optimized = await canvasToOptimizedImageFile(workingCanvas, file, mode);
-    optimized.scanMeta = createDefaultScanMeta({
+    optimized.scanMeta = {
       mode,
       strength,
       engineChoice,
@@ -10669,29 +10646,22 @@ async function optimizeScoreImageFile(file, options = {}) {
       deskewMethod: deskewResult.meta?.method || "none",
       deskewMeta: deskewResult.meta || null,
       rotation,
-      lineStraightenApplied: Boolean(lineStraightenResult.lineStraightenApplied),
-      lineStraightenRows: Number(lineStraightenResult.meta?.rowCount) || 0,
-      lineStraightenCorrectedRows: Number(lineStraightenResult.meta?.correctedRowCount) || 0,
-      lineStraightenAverageAngle: Number(lineStraightenResult.meta?.averageAbsAngle) || 0,
-      lineStraightenMaxAngle: Number(lineStraightenResult.meta?.maxAbsAngle) || 0,
-      lineStraightenMethod: lineStraightenResult.meta?.method || "none",
-      lineStraightenMeta: lineStraightenResult.meta || null,
-      warning: [scanResult.warning, deskewResult.meta?.warning, lineStraightenResult.meta?.warning]
-        .filter(Boolean)
-        .join(" · "),
-    });
+      warning: [scanResult.warning, deskewResult.meta?.warning].filter(Boolean).join(" · "),
+    };
     return optimized;
   } catch (error) {
     console.warn("Image scan optimization failed, using compressed original.", error);
     const fallback = await compressImageFile(file);
-    fallback.scanMeta = createDefaultScanMeta({
+    fallback.scanMeta = {
       mode,
       strength,
       engineChoice,
       engine: SCAN_ENGINE_CANVAS,
+      perspectiveCorrected: false,
+      cropApplied: false,
       rotation,
       warning: "扫描优化失败，已使用原图压缩。",
-    });
+    };
     return fallback;
   } finally {
     source?.close?.();
@@ -11193,1392 +11163,6 @@ async function autoDeskewCanvas(canvas, options = {}) {
   }
 }
 
-function createLineStraightenFallback(canvas, overrides = {}) {
-  return {
-    canvas,
-    lineStraightenApplied: false,
-    meta: {
-      rowCount: Number(overrides.rowCount) || 0,
-      correctedRowCount: Number(overrides.correctedRowCount) || 0,
-      averageAbsAngle: Number(overrides.averageAbsAngle) || 0,
-      maxAbsAngle: Number(overrides.maxAbsAngle) || 0,
-      method: overrides.method || "none",
-      warning: Object.prototype.hasOwnProperty.call(overrides, "warning")
-        ? overrides.warning
-        : "行级扶正置信度不足，已跳过",
-    },
-  };
-}
-
-function smoothNumberSequence(values, radius = 5) {
-  const size = values.length;
-  const output = new Float32Array(size);
-  const windowRadius = Math.max(1, Math.round(radius));
-  for (let index = 0; index < size; index += 1) {
-    let total = 0;
-    let count = 0;
-    for (let offset = -windowRadius; offset <= windowRadius; offset += 1) {
-      const sourceIndex = index + offset;
-      if (sourceIndex < 0 || sourceIndex >= size) {
-        continue;
-      }
-      total += values[sourceIndex];
-      count += 1;
-    }
-    output[index] = total / Math.max(1, count);
-  }
-  return output;
-}
-
-function detectScoreTextRows(canvas, options = {}) {
-  if (!canvas?.width || !canvas?.height) {
-    return [];
-  }
-
-  const sample = createScaledAnalysisCanvas(canvas, Number(options.maxEdge) || 1150);
-  const context = sample.getContext("2d", { alpha: false, willReadFrequently: true });
-  const imageData = context.getImageData(0, 0, sample.width, sample.height);
-  const gray = createLuminanceBuffer(imageData);
-  const stats = computeLuminanceStats(imageData);
-  const rowInk = new Float32Array(sample.height);
-  const threshold = Math.max(70, Math.min(205, stats.p50 - 8));
-  const width = sample.width;
-  const height = sample.height;
-
-  for (let y = 1; y < height - 1; y += 1) {
-    let count = 0;
-    const rowOffset = y * width;
-    for (let x = 1; x < width - 1; x += 1) {
-      const value = gray[rowOffset + x];
-      const gradient = computeSimpleGradientFromGray(gray, width, height, x, y);
-      if (value < threshold || (value < 236 && gradient > 38)) {
-        count += 1;
-      }
-    }
-    rowInk[y] = count;
-  }
-
-  const smoothed = smoothNumberSequence(rowInk, Math.max(4, Math.min(13, Math.round(height * 0.007))));
-  let maxInk = 0;
-  let totalInk = 0;
-  for (const value of smoothed) {
-    maxInk = Math.max(maxInk, value);
-    totalInk += value;
-  }
-  if (maxInk <= 0) {
-    return [];
-  }
-
-  const meanInk = totalInk / Math.max(1, smoothed.length);
-  const activeThreshold = Math.max(width * 0.008, meanInk * 1.35, maxInk * 0.08);
-  const gapAllowance = Math.max(2, Math.round(height * 0.004));
-  const bands = [];
-  let active = false;
-  let start = 0;
-  let gap = 0;
-  let area = 0;
-  let peak = 0;
-
-  for (let y = 0; y < height; y += 1) {
-    const value = smoothed[y];
-    if (value >= activeThreshold) {
-      if (!active) {
-        active = true;
-        start = y;
-        area = 0;
-        peak = 0;
-      }
-      gap = 0;
-      area += value;
-      peak = Math.max(peak, value);
-    } else if (active) {
-      gap += 1;
-      if (gap > gapAllowance) {
-        bands.push({ y1: start, y2: y - gap, area, peak });
-        active = false;
-        gap = 0;
-      }
-    }
-  }
-  if (active) {
-    bands.push({ y1: start, y2: height - 1, area, peak });
-  }
-
-  if (!bands.length) {
-    return [];
-  }
-
-  const mergeGap = Math.max(8, Math.round(height * 0.026));
-  const merged = [];
-  for (const band of bands) {
-    const bandHeight = band.y2 - band.y1 + 1;
-    if (bandHeight < Math.max(2, Math.round(height * 0.004)) && band.peak < activeThreshold * 1.8) {
-      continue;
-    }
-    const previous = merged[merged.length - 1];
-    if (previous && band.y1 - previous.y2 <= mergeGap) {
-      previous.y2 = Math.max(previous.y2, band.y2);
-      previous.area += band.area;
-      previous.peak = Math.max(previous.peak, band.peak);
-    } else {
-      merged.push({ ...band });
-    }
-  }
-
-  const scaleY = canvas.height / sample.height;
-  const padding = Math.max(3, Math.round(height * 0.01));
-  const rows = merged
-    .map((band) => {
-      const y1Sample = Math.max(0, band.y1 - padding);
-      const y2Sample = Math.min(height - 1, band.y2 + padding);
-      const y1 = Math.max(0, Math.round(y1Sample * scaleY));
-      const y2 = Math.min(canvas.height - 1, Math.round((y2Sample + 1) * scaleY) - 1);
-      const rowHeight = Math.max(1, y2 - y1 + 1);
-      const inkScore = band.area / Math.max(1, width * Math.max(1, band.y2 - band.y1 + 1));
-      return {
-        y1,
-        y2,
-        centerY: (y1 + y2) / 2,
-        height: rowHeight,
-        inkScore,
-        type: rowHeight > canvas.height * 0.075 ? "mixed" : "unknown",
-      };
-    })
-    .filter((row) => row.height >= Math.max(4, canvas.height * 0.006) && row.y2 > row.y1)
-    .sort((a, b) => a.centerY - b.centerY);
-
-  if (rows.length <= LINE_STRAIGHTEN_MAX_ROWS) {
-    return rows;
-  }
-
-  return rows
-    .slice()
-    .sort((a, b) => b.inkScore - a.inkScore)
-    .slice(0, LINE_STRAIGHTEN_MAX_ROWS)
-    .sort((a, b) => a.centerY - b.centerY);
-}
-
-function createRowCropCanvas(canvas, row, options = {}) {
-  const padding = Math.max(8, Math.round(Math.max(row.height * 0.22, canvas.height * 0.006, Number(options.padding) || 0)));
-  const y1 = Math.max(0, Math.floor(row.y1 - padding));
-  const y2 = Math.min(canvas.height - 1, Math.ceil(row.y2 + padding));
-  const height = Math.max(1, y2 - y1 + 1);
-  const output = document.createElement("canvas");
-  output.width = canvas.width;
-  output.height = height;
-  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, output.width, output.height);
-  context.drawImage(canvas, 0, y1, canvas.width, height, 0, 0, output.width, output.height);
-  return { canvas: output, y1, y2 };
-}
-
-function weightedMedian(entries) {
-  const valid = entries
-    .filter((entry) => Number.isFinite(entry.value) && Number.isFinite(entry.weight) && entry.weight > 0)
-    .sort((a, b) => a.value - b.value);
-  if (!valid.length) {
-    return 0;
-  }
-  const totalWeight = valid.reduce((total, entry) => total + entry.weight, 0);
-  let cumulative = 0;
-  for (const entry of valid) {
-    cumulative += entry.weight;
-    if (cumulative >= totalWeight / 2) {
-      return entry.value;
-    }
-  }
-  return valid[valid.length - 1].value;
-}
-
-function estimateSingleRowSkewWithOpenCV(canvas, row, options = {}) {
-  const cv = window.cv;
-  if (!cv?.Mat || typeof cv.imread !== "function") {
-    throw new Error("OpenCV 未就绪");
-  }
-
-  const { canvas: rowCanvas } = createRowCropCanvas(canvas, row, options);
-  const sample = createScaledAnalysisCanvas(rowCanvas, Number(options.maxEdge) || 900);
-  let src = null;
-  let gray = null;
-  let blurred = null;
-  let edges = null;
-  let lines = null;
-
-  try {
-    src = cv.imread(sample);
-    gray = new cv.Mat();
-    blurred = new cv.Mat();
-    edges = new cv.Mat();
-    lines = new cv.Mat();
-
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-    cv.Canny(blurred, edges, 45, 140, 3, false);
-
-    const minLineLength = Math.max(32, Math.round(sample.width * 0.16));
-    const threshold = Math.max(18, Math.round(Math.min(sample.width, sample.height) * 0.045));
-    cv.HoughLinesP(edges, lines, 1, Math.PI / 180, threshold, minLineLength, 10);
-
-    const candidates = [];
-    const data = lines.data32S || [];
-    for (let index = 0; index < data.length; index += 4) {
-      const x1 = data[index];
-      const y1 = data[index + 1];
-      const x2 = data[index + 2];
-      const y2 = data[index + 3];
-      const length = Math.hypot(x2 - x1, y2 - y1);
-      if (length < minLineLength) {
-        continue;
-      }
-      const rawAngle = normalizeSkewLineAngle((Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI);
-      if (Math.abs(rawAngle) > 12) {
-        continue;
-      }
-      const weight = length * Math.max(0.25, 1 - Math.abs(rawAngle) / 18);
-      candidates.push({ value: rawAngle, weight, length });
-    }
-
-    if (candidates.length < 2) {
-      throw new Error("行内水平线不足");
-    }
-
-    const rawAngle = weightedMedian(candidates);
-    const averageLength = candidates.reduce((total, item) => total + item.length, 0) / Math.max(1, candidates.length);
-    const spread =
-      candidates.reduce((total, item) => total + Math.abs(item.value - rawAngle), 0) / Math.max(1, candidates.length);
-    const lineScore = Math.min(1, candidates.length / 10);
-    const lengthScore = Math.min(1, averageLength / Math.max(1, sample.width * 0.28));
-    const spreadScore = Math.max(0, 1 - spread / 6);
-    const confidence = Math.max(0, Math.min(1, lineScore * 0.42 + lengthScore * 0.38 + spreadScore * 0.2));
-    const angle = Math.abs(rawAngle) < 0.25 ? 0 : -rawAngle;
-
-    return {
-      row,
-      angle,
-      confidence,
-      method: "opencv-row-hough",
-    };
-  } finally {
-    src?.delete?.();
-    gray?.delete?.();
-    blurred?.delete?.();
-    edges?.delete?.();
-    lines?.delete?.();
-  }
-}
-
-function estimateSingleRowSkewByProjection(canvas, row, options = {}) {
-  const { canvas: rowCanvas } = createRowCropCanvas(canvas, row, options);
-  const { points, height } = createProjectionInkPoints(rowCanvas, { maxEdge: Number(options.maxEdge) || 900 });
-  if (points.length < Math.max(80, rowCanvas.width * 0.08)) {
-    return {
-      row,
-      angle: 0,
-      confidence: 0,
-      method: "projection-row",
-      warning: "行内内容不足",
-    };
-  }
-
-  const coarse = findBestProjectionAngle(points, height, 0, 6, 0.75);
-  const fine = findBestProjectionAngle(points, height, coarse.angle, 0.8, 0.15);
-  const baseline = scoreProjectionAngle(points, height, 0);
-  const advantage = (fine.score - Math.max(fine.secondScore, baseline * 0.99)) / Math.max(1, fine.score);
-  const confidence = Math.max(0, Math.min(1, advantage * 8 + Math.min(0.22, points.length / 9000)));
-  const angle = Math.abs(fine.angle) < 0.25 ? 0 : fine.angle;
-
-  return {
-    row,
-    angle,
-    confidence,
-    method: "projection-row",
-  };
-}
-
-function estimateSingleRowSkewAngle(canvas, row, options = {}) {
-  try {
-    if (window.cv?.Mat && typeof window.cv.imread === "function") {
-      const openCvResult = estimateSingleRowSkewWithOpenCV(canvas, row, options);
-      if (openCvResult.confidence >= LINE_STRAIGHTEN_MIN_CONFIDENCE || Math.abs(openCvResult.angle) < 0.25) {
-        return openCvResult;
-      }
-    }
-  } catch (error) {
-    console.warn("Row OpenCV deskew failed, using projection fallback.", error);
-  }
-  return estimateSingleRowSkewByProjection(canvas, row, options);
-}
-
-function estimateRowSkewAngles(canvas, rows, options = {}) {
-  return rows.slice(0, LINE_STRAIGHTEN_MAX_ROWS).map((row) => estimateSingleRowSkewAngle(canvas, row, options));
-}
-
-function smoothRowAngleCorrections(rowCorrections, options = {}) {
-  const minConfidence = Number(options.minConfidence) || LINE_STRAIGHTEN_MIN_CONFIDENCE;
-  const valid = rowCorrections
-    .filter((item) => {
-      const angle = Number(item.angle) || 0;
-      const confidence = Number(item.confidence) || 0;
-      return (
-        item.row &&
-        confidence >= minConfidence &&
-        Math.abs(angle) >= LINE_STRAIGHTEN_MIN_ANGLE &&
-        Math.abs(angle) <= LINE_STRAIGHTEN_MAX_ANGLE
-      );
-    })
-    .sort((a, b) => a.row.centerY - b.row.centerY);
-
-  if (valid.length < LINE_STRAIGHTEN_MIN_ROWS) {
-    return [];
-  }
-
-  const angles = valid.map((item) => item.angle);
-  const minAngle = Math.min(...angles);
-  const maxAngle = Math.max(...angles);
-  if (maxAngle - minAngle > LINE_STRAIGHTEN_MAX_ROW_ANGLE_SPREAD) {
-    return [];
-  }
-
-  const medianAngle = median(angles);
-  const filtered = valid.filter((item) => Math.abs(item.angle - medianAngle) <= 3.2);
-  if (filtered.length < LINE_STRAIGHTEN_MIN_ROWS) {
-    return [];
-  }
-
-  const filteredAngles = filtered.map((item) => item.angle);
-  const spread = Math.max(...filteredAngles) - Math.min(...filteredAngles);
-  const averageAbs = filteredAngles.reduce((total, angle) => total + Math.abs(angle), 0) / Math.max(1, filteredAngles.length);
-  if (averageAbs < LINE_STRAIGHTEN_MIN_ANGLE) {
-    return [];
-  }
-  if (spread < 0.18 && averageAbs < 0.75) {
-    return [];
-  }
-
-  return filtered.map((item, index) => {
-    const previous = filtered[index - 1];
-    const next = filtered[index + 1];
-    let total = item.angle * item.confidence * 2;
-    let weight = item.confidence * 2;
-    if (previous && Math.abs(previous.angle - item.angle) < 3) {
-      total += previous.angle * previous.confidence;
-      weight += previous.confidence;
-    }
-    if (next && Math.abs(next.angle - item.angle) < 3) {
-      total += next.angle * next.confidence;
-      weight += next.confidence;
-    }
-    const angle = Math.max(-LINE_STRAIGHTEN_MAX_ANGLE, Math.min(LINE_STRAIGHTEN_MAX_ANGLE, total / Math.max(0.01, weight)));
-    return {
-      ...item,
-      angle,
-      confidence: Math.max(0, Math.min(1, item.confidence)),
-    };
-  });
-}
-
-function sampleImageDataBilinear(imageData, x, y) {
-  const { width, height, data } = imageData;
-  if (x < 0 || y < 0 || x > width - 1 || y > height - 1) {
-    return [255, 255, 255, 255];
-  }
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const x1 = Math.min(width - 1, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  const tx = x - x0;
-  const ty = y - y0;
-  const i00 = (y0 * width + x0) * 4;
-  const i10 = (y0 * width + x1) * 4;
-  const i01 = (y1 * width + x0) * 4;
-  const i11 = (y1 * width + x1) * 4;
-  const pixel = [0, 0, 0, 255];
-  for (let channel = 0; channel < 4; channel += 1) {
-    const top = data[i00 + channel] * (1 - tx) + data[i10 + channel] * tx;
-    const bottom = data[i01 + channel] * (1 - tx) + data[i11 + channel] * tx;
-    pixel[channel] = top * (1 - ty) + bottom * ty;
-  }
-  return pixel;
-}
-
-function applyRowLevelDeskewToCanvas(canvas, rowCorrections, options = {}) {
-  if (!canvas?.width || !canvas?.height || !rowCorrections?.length) {
-    return canvas;
-  }
-
-  const width = canvas.width;
-  const height = canvas.height;
-  const output = document.createElement("canvas");
-  output.width = width;
-  output.height = height;
-  const outputContext = output.getContext("2d", { alpha: false, willReadFrequently: true });
-  outputContext.fillStyle = "#ffffff";
-  outputContext.fillRect(0, 0, width, height);
-  outputContext.drawImage(canvas, 0, 0);
-
-  const sourceContext = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-  const sourceData = sourceContext.getImageData(0, 0, width, height);
-  const outputData = outputContext.getImageData(0, 0, width, height);
-  const centerX = width / 2;
-
-  for (const correction of rowCorrections) {
-    const angle = Math.max(-LINE_STRAIGHTEN_MAX_ANGLE, Math.min(LINE_STRAIGHTEN_MAX_ANGLE, Number(correction.angle) || 0));
-    if (Math.abs(angle) < LINE_STRAIGHTEN_MIN_ANGLE) {
-      continue;
-    }
-    const row = correction.row;
-    const padding = Math.max(8, Math.round(Math.min(36, row.height * 0.2)));
-    const y1 = Math.max(0, Math.floor(row.y1 - padding));
-    const y2 = Math.min(height - 1, Math.ceil(row.y2 + padding));
-    const bandHeight = Math.max(1, y2 - y1 + 1);
-    const feather = Math.max(6, Math.min(18, Math.round(bandHeight * 0.16)));
-    const shear = Math.tan((angle * Math.PI) / 180);
-
-    for (let y = y1; y <= y2; y += 1) {
-      const topFeather = Math.min(1, (y - y1 + 1) / feather);
-      const bottomFeather = Math.min(1, (y2 - y + 1) / feather);
-      const alpha = Math.max(0, Math.min(1, topFeather, bottomFeather));
-      if (alpha <= 0.01) {
-        continue;
-      }
-      for (let x = 0; x < width; x += 1) {
-        const sourceY = y - shear * (x - centerX);
-        const sampled = sampleImageDataBilinear(sourceData, x, sourceY);
-        const index = (y * width + x) * 4;
-        outputData.data[index] = clamp255(outputData.data[index] * (1 - alpha) + sampled[0] * alpha);
-        outputData.data[index + 1] = clamp255(outputData.data[index + 1] * (1 - alpha) + sampled[1] * alpha);
-        outputData.data[index + 2] = clamp255(outputData.data[index + 2] * (1 - alpha) + sampled[2] * alpha);
-        outputData.data[index + 3] = 255;
-      }
-    }
-  }
-
-  outputContext.putImageData(outputData, 0, 0);
-  return output;
-}
-
-function validateLineStraightenResult(beforeCanvas, afterCanvas, meta = {}) {
-  if (!afterCanvas?.width || !afterCanvas?.height) {
-    return false;
-  }
-  if (beforeCanvas.width !== afterCanvas.width || beforeCanvas.height !== afterCanvas.height) {
-    return false;
-  }
-  if ((Number(meta.correctedRowCount) || 0) < LINE_STRAIGHTEN_MIN_ROWS) {
-    return false;
-  }
-  if ((Number(meta.averageAbsAngle) || 0) < LINE_STRAIGHTEN_MIN_ANGLE) {
-    return false;
-  }
-  if ((Number(meta.maxAbsAngle) || 0) > 5.5) {
-    return false;
-  }
-  const beforeInk = estimateCanvasInkRatio(beforeCanvas);
-  const afterInk = estimateCanvasInkRatio(afterCanvas);
-  if (beforeInk > 0.01 && afterInk < beforeInk * 0.55) {
-    return false;
-  }
-  if (beforeInk > 0.01 && afterInk > beforeInk * 2.4) {
-    return false;
-  }
-  return true;
-}
-
-async function autoLineStraightenCanvas(canvas, options = {}) {
-  if (!canvas?.width || !canvas?.height) {
-    return createLineStraightenFallback(canvas, { warning: "图片不可用，已跳过行级扶正" });
-  }
-
-  try {
-    const rows = detectScoreTextRows(canvas, options);
-    if (rows.length < LINE_STRAIGHTEN_MIN_ROWS) {
-      return createLineStraightenFallback(canvas, { rowCount: rows.length });
-    }
-    await nextFrame();
-
-    const estimates = estimateRowSkewAngles(canvas, rows, options);
-    const corrections = smoothRowAngleCorrections(estimates, options);
-    if (corrections.length < LINE_STRAIGHTEN_MIN_ROWS) {
-      return createLineStraightenFallback(canvas, { rowCount: rows.length });
-    }
-    await nextFrame();
-
-    const corrected = applyRowLevelDeskewToCanvas(canvas, corrections, options);
-    const angles = corrections.map((item) => Math.abs(Number(item.angle) || 0));
-    const averageAbsAngle = angles.reduce((total, angle) => total + angle, 0) / Math.max(1, angles.length);
-    const maxAbsAngle = Math.max(...angles);
-    const methods = new Set(corrections.map((item) => item.method || "unknown"));
-    const meta = {
-      rowCount: rows.length,
-      correctedRowCount: corrections.length,
-      averageAbsAngle,
-      maxAbsAngle,
-      method: methods.size === 1 ? [...methods][0] : "mixed-row",
-      warning: "",
-    };
-
-    if (!validateLineStraightenResult(canvas, corrected, meta)) {
-      return createLineStraightenFallback(canvas, {
-        rowCount: rows.length,
-        correctedRowCount: corrections.length,
-        averageAbsAngle,
-        maxAbsAngle,
-        method: meta.method,
-      });
-    }
-
-    return {
-      canvas: corrected,
-      lineStraightenApplied: true,
-      meta,
-    };
-  } catch (error) {
-    console.warn("Line straighten skipped.", error);
-    return createLineStraightenFallback(canvas);
-  }
-}
-
-function pointDistance(a, b) {
-  return Math.hypot((a?.x || 0) - (b?.x || 0), (a?.y || 0) - (b?.y || 0));
-}
-
-function polygonArea(points) {
-  if (!points?.length) {
-    return 0;
-  }
-  let area = 0;
-  for (let index = 0; index < points.length; index += 1) {
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    area += current.x * next.y - next.x * current.y;
-  }
-  return Math.abs(area) / 2;
-}
-
-function orderQuadPoints(points) {
-  const items = (points || []).slice(0, 4).map((point) => ({ x: Number(point.x) || 0, y: Number(point.y) || 0 }));
-  if (items.length !== 4) {
-    return items;
-  }
-  const sums = items.map((point) => point.x + point.y);
-  const diffs = items.map((point) => point.x - point.y);
-  const topLeft = items[sums.indexOf(Math.min(...sums))];
-  const bottomRight = items[sums.indexOf(Math.max(...sums))];
-  const topRight = items[diffs.indexOf(Math.max(...diffs))];
-  const bottomLeft = items[diffs.indexOf(Math.min(...diffs))];
-  return [topLeft, topRight, bottomRight, bottomLeft];
-}
-
-function getBoundingBoxFromPoints(points, width, height, paddingRatio = 0.015) {
-  const minX = Math.max(0, Math.floor(Math.min(...points.map((point) => point.x)) - width * paddingRatio));
-  const minY = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y)) - height * paddingRatio));
-  const maxX = Math.min(width - 1, Math.ceil(Math.max(...points.map((point) => point.x)) + width * paddingRatio));
-  const maxY = Math.min(height - 1, Math.ceil(Math.max(...points.map((point) => point.y)) + height * paddingRatio));
-  if (maxX <= minX || maxY <= minY) {
-    return null;
-  }
-  return {
-    x: minX,
-    y: minY,
-    width: maxX - minX + 1,
-    height: maxY - minY + 1,
-  };
-}
-
-function createCanvasFromRect(sourceCanvas, rect) {
-  const bounds = rect || { x: 0, y: 0, width: sourceCanvas.width, height: sourceCanvas.height };
-  const output = document.createElement("canvas");
-  output.width = Math.max(1, Math.round(bounds.width));
-  output.height = Math.max(1, Math.round(bounds.height));
-  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, output.width, output.height);
-  context.drawImage(
-    sourceCanvas,
-    bounds.x,
-    bounds.y,
-    bounds.width,
-    bounds.height,
-    0,
-    0,
-    output.width,
-    output.height,
-  );
-  return output;
-}
-
-async function detectDocumentRegion(canvas, options = {}) {
-  try {
-    const region = detectDocumentRegionWithOpenCV(canvas, options);
-    if (region?.points?.length === 4) {
-      return region;
-    }
-  } catch (error) {
-    console.warn("OpenCV document region detection failed, using canvas bounds.", error);
-  }
-
-  try {
-    const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-    const box = detectPrimaryPageContentBoxFromImageData(imageData, { conservative: true });
-    if (!box) {
-      return null;
-    }
-    const points = [
-      { x: box.x, y: box.y },
-      { x: box.x + box.width - 1, y: box.y },
-      { x: box.x + box.width - 1, y: box.y + box.height - 1 },
-      { x: box.x, y: box.y + box.height - 1 },
-    ];
-    return {
-      points,
-      method: "canvas-page-bounds",
-      confidence: 0.42,
-    };
-  } catch (error) {
-    console.warn("Canvas document region detection failed.", error);
-    return null;
-  }
-}
-
-function detectDocumentRegionWithOpenCV(canvas, options = {}) {
-  const cv = window.cv;
-  if (!cv?.Mat || typeof cv.imread !== "function") {
-    return null;
-  }
-
-  const sample = createScaledAnalysisCanvas(canvas, Number(options.maxEdge) || 1100);
-  const scaleX = canvas.width / sample.width;
-  const scaleY = canvas.height / sample.height;
-  let src = null;
-  let gray = null;
-  let blurred = null;
-  let edges = null;
-  let kernel = null;
-  let contours = null;
-  let hierarchy = null;
-
-  try {
-    src = cv.imread(sample);
-    gray = new cv.Mat();
-    blurred = new cv.Mat();
-    edges = new cv.Mat();
-    contours = new cv.MatVector();
-    hierarchy = new cv.Mat();
-    kernel = cv.Mat.ones(5, 5, cv.CV_8U);
-
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-    cv.Canny(blurred, edges, 38, 120, 3, false);
-    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
-    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    const imageArea = sample.width * sample.height;
-    let best = null;
-    for (let index = 0; index < contours.size(); index += 1) {
-      const contour = contours.get(index);
-      let approx = null;
-      try {
-        const area = Math.abs(cv.contourArea(contour));
-        if (area < imageArea * 0.18 || area > imageArea * 0.98) {
-          continue;
-        }
-        const perimeter = cv.arcLength(contour, true);
-        approx = new cv.Mat();
-        cv.approxPolyDP(contour, approx, Math.max(4, perimeter * 0.025), true);
-        if (approx.rows !== 4) {
-          continue;
-        }
-        const data = approx.data32S || [];
-        const points = [];
-        for (let pointIndex = 0; pointIndex < data.length; pointIndex += 2) {
-          points.push({
-            x: data[pointIndex],
-            y: data[pointIndex + 1],
-          });
-        }
-        const ordered = orderQuadPoints(points);
-        const widthTop = pointDistance(ordered[0], ordered[1]);
-        const widthBottom = pointDistance(ordered[3], ordered[2]);
-        const heightLeft = pointDistance(ordered[0], ordered[3]);
-        const heightRight = pointDistance(ordered[1], ordered[2]);
-        const pageWidth = Math.max(widthTop, widthBottom);
-        const pageHeight = Math.max(heightLeft, heightRight);
-        const ratio = pageWidth / Math.max(1, pageHeight);
-        if (ratio < 0.28 || ratio > 3.6) {
-          continue;
-        }
-        const centerX = ordered.reduce((total, point) => total + point.x, 0) / 4;
-        const centerY = ordered.reduce((total, point) => total + point.y, 0) / 4;
-        const centerPenalty =
-          Math.abs(centerX - sample.width / 2) / Math.max(1, sample.width) +
-          Math.abs(centerY - sample.height / 2) / Math.max(1, sample.height);
-        const areaScore = Math.min(1, area / Math.max(1, imageArea * 0.72));
-        const ratioScore = Math.max(0.25, 1 - Math.abs(Math.log(ratio / 0.72)) / 1.4);
-        const centerScore = Math.max(0.2, 1 - centerPenalty * 1.15);
-        const score = areaScore * 0.52 + ratioScore * 0.22 + centerScore * 0.26;
-        if (!best || score > best.score) {
-          best = { points: ordered, score };
-        }
-      } finally {
-        approx?.delete?.();
-        contour?.delete?.();
-      }
-    }
-
-    if (!best) {
-      return null;
-    }
-
-    return {
-      points: best.points.map((point) => ({ x: point.x * scaleX, y: point.y * scaleY })),
-      method: "opencv-document-contour",
-      confidence: Math.max(0, Math.min(1, best.score)),
-    };
-  } finally {
-    src?.delete?.();
-    gray?.delete?.();
-    blurred?.delete?.();
-    edges?.delete?.();
-    kernel?.delete?.();
-    contours?.delete?.();
-    hierarchy?.delete?.();
-  }
-}
-
-async function rectifyDocumentPerspective(canvas, docRegion, options = {}) {
-  if (!docRegion?.points || docRegion.points.length !== 4) {
-    return {
-      canvas,
-      perspectiveCorrected: false,
-      method: "none",
-    };
-  }
-
-  const ordered = orderQuadPoints(docRegion.points);
-  const widthTop = pointDistance(ordered[0], ordered[1]);
-  const widthBottom = pointDistance(ordered[3], ordered[2]);
-  const heightLeft = pointDistance(ordered[0], ordered[3]);
-  const heightRight = pointDistance(ordered[1], ordered[2]);
-  let targetWidth = Math.max(1, Math.round(Math.max(widthTop, widthBottom)));
-  let targetHeight = Math.max(1, Math.round(Math.max(heightLeft, heightRight)));
-  const scale = Math.min(1, SCAN_MAX_EDGE / Math.max(targetWidth, targetHeight));
-  targetWidth = Math.max(1, Math.round(targetWidth * scale));
-  targetHeight = Math.max(1, Math.round(targetHeight * scale));
-
-  const cv = window.cv;
-  if (cv?.Mat && typeof cv.imread === "function" && typeof cv.warpPerspective === "function") {
-    let src = null;
-    let dst = null;
-    let srcTri = null;
-    let dstTri = null;
-    let transform = null;
-    try {
-      src = cv.imread(canvas);
-      dst = new cv.Mat();
-      srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-        ordered[0].x,
-        ordered[0].y,
-        ordered[1].x,
-        ordered[1].y,
-        ordered[2].x,
-        ordered[2].y,
-        ordered[3].x,
-        ordered[3].y,
-      ]);
-      dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-        0,
-        0,
-        targetWidth - 1,
-        0,
-        targetWidth - 1,
-        targetHeight - 1,
-        0,
-        targetHeight - 1,
-      ]);
-      transform = cv.getPerspectiveTransform(srcTri, dstTri);
-      cv.warpPerspective(
-        src,
-        dst,
-        transform,
-        new cv.Size(targetWidth, targetHeight),
-        cv.INTER_LINEAR,
-        cv.BORDER_CONSTANT,
-        new cv.Scalar(255, 255, 255, 255),
-      );
-      const output = document.createElement("canvas");
-      output.width = targetWidth;
-      output.height = targetHeight;
-      cv.imshow(output, dst);
-      await nextFrame();
-      return {
-        canvas: output,
-        perspectiveCorrected: true,
-        method: docRegion.method || "opencv-perspective",
-      };
-    } catch (error) {
-      console.warn("Perspective correction failed, cropping bounding box.", error);
-    } finally {
-      src?.delete?.();
-      dst?.delete?.();
-      srcTri?.delete?.();
-      dstTri?.delete?.();
-      transform?.delete?.();
-    }
-  }
-
-  const box = getBoundingBoxFromPoints(ordered, canvas.width, canvas.height, 0.012);
-  if (!box) {
-    return { canvas, perspectiveCorrected: false, method: "none" };
-  }
-  return {
-    canvas: createCanvasFromRect(canvas, box),
-    perspectiveCorrected: false,
-    method: "canvas-region-crop",
-  };
-}
-
-function validateDocumentRegion(region, sourceCanvas, options = {}) {
-  if (!region?.points || region.points.length !== 4 || !sourceCanvas?.width || !sourceCanvas?.height) {
-    return false;
-  }
-
-  const points = region.points.map((point) => ({
-    x: Number(point.x),
-    y: Number(point.y),
-  }));
-  if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
-    return false;
-  }
-
-  const padding = Math.max(12, Math.round(Math.max(sourceCanvas.width, sourceCanvas.height) * 0.05));
-  if (
-    points.some(
-      (point) =>
-        point.x < -padding ||
-        point.y < -padding ||
-        point.x > sourceCanvas.width + padding ||
-        point.y > sourceCanvas.height + padding,
-    )
-  ) {
-    return false;
-  }
-
-  const ordered = orderQuadPoints(points);
-  const polygonArea =
-    Math.abs(
-      ordered.reduce((total, point, index) => {
-        const next = ordered[(index + 1) % ordered.length];
-        return total + point.x * next.y - next.x * point.y;
-      }, 0),
-    ) / 2;
-  const imageArea = Math.max(1, sourceCanvas.width * sourceCanvas.height);
-  const areaRatio = polygonArea / imageArea;
-  const minAreaRatio = Number(options.minAreaRatio) || 0.16;
-  const maxAreaRatio = Number(options.maxAreaRatio) || 0.99;
-  if (areaRatio < minAreaRatio || areaRatio > maxAreaRatio) {
-    return false;
-  }
-
-  const widthTop = pointDistance(ordered[0], ordered[1]);
-  const widthBottom = pointDistance(ordered[3], ordered[2]);
-  const heightLeft = pointDistance(ordered[0], ordered[3]);
-  const heightRight = pointDistance(ordered[1], ordered[2]);
-  const averageWidth = (widthTop + widthBottom) / 2;
-  const averageHeight = (heightLeft + heightRight) / 2;
-  const ratio = averageWidth / Math.max(1, averageHeight);
-  if (ratio < 0.2 || ratio > 5) {
-    return false;
-  }
-
-  const bbox = getBoundingBoxFromPoints(ordered, sourceCanvas.width, sourceCanvas.height, 0);
-  if (!bbox) {
-    return false;
-  }
-  const bboxArea = Math.max(1, bbox.width * bbox.height);
-  if (polygonArea / bboxArea < 0.58) {
-    return false;
-  }
-
-  const minSide = Math.min(widthTop, widthBottom, heightLeft, heightRight);
-  if (minSide < Math.min(sourceCanvas.width, sourceCanvas.height) * 0.22) {
-    return false;
-  }
-
-  return true;
-}
-
-async function detectMainDocumentPage(canvas, options = {}) {
-  try {
-    const region = await detectDocumentRegion(canvas, options);
-    if (validateDocumentRegion(region, canvas, options)) {
-      return region;
-    }
-  } catch (error) {
-    console.warn("Safe document region detection skipped.", error);
-  }
-
-  try {
-    const box = await detectPrimaryPageContentBox(canvas, { ...options, conservative: true });
-    if (!box) {
-      return null;
-    }
-    const region = {
-      points: [
-        { x: box.x, y: box.y },
-        { x: box.x + box.width - 1, y: box.y },
-        { x: box.x + box.width - 1, y: box.y + box.height - 1 },
-        { x: box.x, y: box.y + box.height - 1 },
-      ],
-      method: "safe-content-bounds",
-      confidence: 0.36,
-    };
-    return validateDocumentRegion(region, canvas, { ...options, minAreaRatio: 0.12 }) ? region : null;
-  } catch (error) {
-    console.warn("Safe content region detection skipped.", error);
-    return null;
-  }
-}
-
-function validateNoSevereWarp(beforeCanvas, afterCanvas, options = {}) {
-  if (!beforeCanvas?.width || !beforeCanvas?.height || !afterCanvas?.width || !afterCanvas?.height) {
-    return false;
-  }
-
-  const sourceRatio = beforeCanvas.width / Math.max(1, beforeCanvas.height);
-  const outputRatio = afterCanvas.width / Math.max(1, afterCanvas.height);
-  if (outputRatio < 0.2 || outputRatio > 5 || Math.abs(Math.log(outputRatio / sourceRatio)) > 1.35) {
-    return false;
-  }
-
-  const areaRatio = (afterCanvas.width * afterCanvas.height) / Math.max(1, beforeCanvas.width * beforeCanvas.height);
-  if (areaRatio < 0.08 || areaRatio > 1.18) {
-    return false;
-  }
-
-  try {
-    const beforeInk = estimateCanvasInkRatio(beforeCanvas);
-    const afterInk = estimateCanvasInkRatio(afterCanvas);
-    if (beforeInk > 0.004 && (afterInk < beforeInk * 0.16 || afterInk > beforeInk * 7.5)) {
-      return false;
-    }
-    if (afterInk > 0.68) {
-      return false;
-    }
-  } catch (error) {
-    console.warn("Warp safety ink check skipped.", error);
-  }
-
-  return true;
-}
-
-function validateScannedPageCanvas(outputCanvas, sourceCanvas, options = {}) {
-  if (!isUsableScannedCanvas(outputCanvas, sourceCanvas)) {
-    return false;
-  }
-  return validateNoSevereWarp(sourceCanvas, outputCanvas, options);
-}
-
-async function safePerspectiveCorrectCanvas(canvas, region, options = {}) {
-  if (!validateDocumentRegion(region, canvas, options)) {
-    return {
-      canvas,
-      perspectiveCorrected: false,
-      cropApplied: false,
-      method: "invalid-region",
-    };
-  }
-
-  const corrected = await rectifyDocumentPerspective(canvas, region, options);
-  if (corrected?.canvas && validateScannedPageCanvas(corrected.canvas, canvas, options)) {
-    return corrected;
-  }
-
-  return {
-    canvas,
-    perspectiveCorrected: false,
-    cropApplied: false,
-    method: "unsafe-perspective-skip",
-  };
-}
-
-async function cropMainDocumentPage(canvas, region, options = {}) {
-  const contentBox = region
-    ? getBoundingBoxFromPoints(orderQuadPoints(region.points), canvas.width, canvas.height, 0.008)
-    : await detectPrimaryPageContentBox(canvas, { ...options, conservative: false });
-  const cropped = await cropToPrimaryPage(canvas, contentBox, options);
-  if (!cropped.cropApplied) {
-    return cropped;
-  }
-  if (!validateScannedPageCanvas(cropped.canvas, canvas, { ...options, minAreaRatio: 0.08 })) {
-    return {
-      canvas,
-      cropApplied: false,
-    };
-  }
-  return cropped;
-}
-
-function findPrimarySpan(values, threshold, minLength) {
-  let best = null;
-  let active = false;
-  let start = 0;
-  let score = 0;
-  for (let index = 0; index <= values.length; index += 1) {
-    const value = values[index] || 0;
-    if (index < values.length && value >= threshold) {
-      if (!active) {
-        active = true;
-        start = index;
-        score = 0;
-      }
-      score += value;
-    } else if (active) {
-      const end = index - 1;
-      const length = end - start + 1;
-      if (length >= minLength) {
-        const center = (start + end) / 2;
-        const centerScore = 1 - Math.min(0.55, Math.abs(center - values.length / 2) / Math.max(1, values.length));
-        const totalScore = score * (0.82 + centerScore * 0.18);
-        if (!best || totalScore > best.score) {
-          best = { start, end, score: totalScore };
-        }
-      }
-      active = false;
-    }
-  }
-  return best;
-}
-
-function detectPrimaryPageContentBoxFromImageData(imageData, options = {}) {
-  const { width, height, data } = imageData;
-  if (!width || !height) {
-    return null;
-  }
-  const stats = computeLuminanceStats(imageData);
-  const threshold = Math.max(112, Math.min(222, stats.p50 - (options.conservative ? 30 : 20)));
-  const step = Math.max(1, Math.round(Math.max(width, height) / 1300));
-  const colScores = new Float32Array(width);
-  const rowScores = new Float32Array(height);
-
-  for (let y = 0; y < height; y += step) {
-    let rowPaper = 0;
-    let rowSamples = 0;
-    for (let x = 0; x < width; x += step) {
-      const index = (y * width + x) * 4;
-      const luminance = getLuminance(data[index], data[index + 1], data[index + 2]);
-      const isPaper = luminance > threshold;
-      const isDarkBorder = luminance < 58;
-      const score = isPaper ? 1 : isDarkBorder ? -0.45 : 0.22;
-      colScores[x] += score;
-      rowPaper += score;
-      rowSamples += 1;
-    }
-    rowScores[y] = rowPaper / Math.max(1, rowSamples);
-  }
-
-  for (let x = 0; x < width; x += step) {
-    let colPaper = 0;
-    let colSamples = 0;
-    for (let y = 0; y < height; y += step) {
-      const index = (y * width + x) * 4;
-      const luminance = getLuminance(data[index], data[index + 1], data[index + 2]);
-      const isPaper = luminance > threshold;
-      const isDarkBorder = luminance < 58;
-      colPaper += isPaper ? 1 : isDarkBorder ? -0.45 : 0.22;
-      colSamples += 1;
-    }
-    colScores[x] = colPaper / Math.max(1, colSamples);
-  }
-
-  const smoothX = smoothNumberSequence(colScores, Math.max(4, Math.round(width * 0.01)));
-  const smoothY = smoothNumberSequence(rowScores, Math.max(4, Math.round(height * 0.01)));
-  const xThreshold = options.conservative ? 0.25 : 0.18;
-  const yThreshold = options.conservative ? 0.24 : 0.16;
-  const xSpan = findPrimarySpan(smoothX, xThreshold, Math.max(20, Math.round(width * 0.38)));
-  const ySpan = findPrimarySpan(smoothY, yThreshold, Math.max(20, Math.round(height * 0.38)));
-  if (!xSpan || !ySpan) {
-    return detectContentBoundsFromImageData(imageData);
-  }
-
-  const paddingX = Math.max(3, Math.round(width * 0.012));
-  const paddingY = Math.max(3, Math.round(height * 0.012));
-  const x = Math.max(0, xSpan.start - paddingX);
-  const y = Math.max(0, ySpan.start - paddingY);
-  const right = Math.min(width - 1, xSpan.end + paddingX);
-  const bottom = Math.min(height - 1, ySpan.end + paddingY);
-  const box = {
-    x,
-    y,
-    width: right - x + 1,
-    height: bottom - y + 1,
-  };
-  if (box.width < width * 0.42 || box.height < height * 0.42) {
-    return detectContentBoundsFromImageData(imageData);
-  }
-  return box;
-}
-
-async function detectPrimaryPageContentBox(canvas, options = {}) {
-  try {
-    const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-    return detectPrimaryPageContentBoxFromImageData(imageData, options);
-  } catch (error) {
-    console.warn("Primary page content box detection failed.", error);
-    return null;
-  }
-}
-
-async function cropToPrimaryPage(canvas, contentBox, options = {}) {
-  if (!contentBox) {
-    return {
-      canvas,
-      cropApplied: false,
-    };
-  }
-  const areaRatio = (contentBox.width * contentBox.height) / Math.max(1, canvas.width * canvas.height);
-  if (areaRatio > 0.985 || contentBox.width < canvas.width * 0.35 || contentBox.height < canvas.height * 0.35) {
-    return {
-      canvas,
-      cropApplied: false,
-    };
-  }
-  await nextFrame();
-  return {
-    canvas: createCanvasFromRect(canvas, contentBox),
-    cropApplied: true,
-  };
-}
-
-async function refinePageMask(canvas, options = {}) {
-  const box = await detectPrimaryPageContentBox(canvas, { ...options, conservative: false });
-  return cropToPrimaryPage(canvas, box, options);
-}
-
-async function estimateDocumentWarpField(canvas, options = {}) {
-  if (!canvas?.width || !canvas?.height) {
-    return null;
-  }
-  const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  const gray = createLuminanceBuffer(imageData);
-  const stats = computeLuminanceStats(imageData);
-  const threshold = Math.max(112, Math.min(232, stats.p50 - 18));
-  const samples = Math.max(16, Math.min(64, Math.round(canvas.width / 28)));
-  const top = new Float32Array(samples);
-  const bottom = new Float32Array(samples);
-  const sliceWidth = canvas.width / samples;
-
-  for (let sampleIndex = 0; sampleIndex < samples; sampleIndex += 1) {
-    const xStart = Math.max(0, Math.floor(sampleIndex * sliceWidth));
-    const xEnd = Math.min(canvas.width - 1, Math.ceil((sampleIndex + 1) * sliceWidth));
-    let topFound = 0;
-    let bottomFound = canvas.height - 1;
-    for (let y = 0; y < canvas.height; y += 1) {
-      let paper = 0;
-      let count = 0;
-      for (let x = xStart; x <= xEnd; x += Math.max(1, Math.floor((xEnd - xStart + 1) / 6))) {
-        if (gray[y * canvas.width + x] > threshold) {
-          paper += 1;
-        }
-        count += 1;
-      }
-      if (paper / Math.max(1, count) > 0.45) {
-        topFound = y;
-        break;
-      }
-    }
-    for (let y = canvas.height - 1; y >= 0; y -= 1) {
-      let paper = 0;
-      let count = 0;
-      for (let x = xStart; x <= xEnd; x += Math.max(1, Math.floor((xEnd - xStart + 1) / 6))) {
-        if (gray[y * canvas.width + x] > threshold) {
-          paper += 1;
-        }
-        count += 1;
-      }
-      if (paper / Math.max(1, count) > 0.45) {
-        bottomFound = y;
-        break;
-      }
-    }
-    top[sampleIndex] = topFound;
-    bottom[sampleIndex] = bottomFound;
-  }
-
-  const smoothTop = smoothNumberSequence(top, 2);
-  const smoothBottom = smoothNumberSequence(bottom, 2);
-  const topMedian = median(Array.from(smoothTop));
-  const bottomMedian = median(Array.from(smoothBottom));
-  const topSpread = Math.max(...smoothTop) - Math.min(...smoothTop);
-  const bottomSpread = Math.max(...smoothBottom) - Math.min(...smoothBottom);
-  if (topSpread < canvas.height * 0.012 && bottomSpread < canvas.height * 0.012) {
-    return null;
-  }
-  if (bottomMedian - topMedian < canvas.height * 0.55) {
-    return null;
-  }
-  return {
-    top: smoothTop,
-    bottom: smoothBottom,
-    topMedian,
-    bottomMedian,
-    samples,
-  };
-}
-
-function sampleWarpFieldValue(values, x, width) {
-  const position = (x / Math.max(1, width - 1)) * (values.length - 1);
-  const left = Math.max(0, Math.min(values.length - 1, Math.floor(position)));
-  const right = Math.max(0, Math.min(values.length - 1, left + 1));
-  const t = Math.max(0, Math.min(1, position - left));
-  return values[left] * (1 - t) + values[right] * t;
-}
-
-async function dewarpDocumentCanvas(canvas, options = {}) {
-  try {
-    const field = await estimateDocumentWarpField(canvas, options);
-    if (!field) {
-      return {
-        canvas,
-        dewarpApplied: false,
-      };
-    }
-
-    const width = canvas.width;
-    const height = canvas.height;
-    const sourceContext = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-    const sourceData = sourceContext.getImageData(0, 0, width, height);
-    const output = document.createElement("canvas");
-    output.width = width;
-    output.height = height;
-    const outputContext = output.getContext("2d", { alpha: false, willReadFrequently: true });
-    const outputData = outputContext.createImageData(width, height);
-
-    for (let y = 0; y < height; y += 1) {
-      const t = y / Math.max(1, height - 1);
-      for (let x = 0; x < width; x += 1) {
-        const top = sampleWarpFieldValue(field.top, x, width);
-        const bottom = sampleWarpFieldValue(field.bottom, x, width);
-        const sourceY = top + (bottom - top) * t;
-        const sampled = sampleImageDataBilinear(sourceData, x, sourceY);
-        const index = (y * width + x) * 4;
-        outputData.data[index] = sampled[0];
-        outputData.data[index + 1] = sampled[1];
-        outputData.data[index + 2] = sampled[2];
-        outputData.data[index + 3] = 255;
-      }
-    }
-
-    outputContext.putImageData(outputData, 0, 0);
-    await nextFrame();
-    return {
-      canvas: output,
-      dewarpApplied: true,
-    };
-  } catch (error) {
-    console.warn("Document dewarp skipped.", error);
-    return {
-      canvas,
-      dewarpApplied: false,
-    };
-  }
-}
-
-async function createProfessionalScannedCanvas(sourceCanvas, options = {}) {
-  const warnings = [];
-  let result = null;
-
-  try {
-    await ensureProfessionalScanEngine(30000);
-  } catch (error) {
-    console.warn("Professional scan engine unavailable, using fallback extraction.", error);
-    warnings.push("专业页面检测不可用，已使用保守裁边。");
-  }
-
-  try {
-    const region = await detectMainDocumentPage(sourceCanvas, options);
-    if (region?.points?.length === 4) {
-      const rectified = await safePerspectiveCorrectCanvas(sourceCanvas, region, options);
-      if (rectified?.canvas && rectified.canvas !== sourceCanvas && validateScannedPageCanvas(rectified.canvas, sourceCanvas)) {
-        result = {
-          canvas: rectified.canvas,
-          engine: region.method?.startsWith("opencv") ? SCAN_ENGINE_JSCANIFY : SCAN_ENGINE_CANVAS,
-          perspectiveCorrected: Boolean(rectified.perspectiveCorrected),
-          cropApplied: true,
-          warning: "",
-        };
-      }
-      if (!result) {
-        const cropped = await cropMainDocumentPage(sourceCanvas, region, options);
-        if (cropped.cropApplied && validateScannedPageCanvas(cropped.canvas, sourceCanvas, { minAreaRatio: 0.08 })) {
-          result = {
-            canvas: cropped.canvas,
-            engine: SCAN_ENGINE_CANVAS,
-            perspectiveCorrected: false,
-            cropApplied: true,
-            warning: "",
-          };
-        }
-      }
-    }
-  } catch (error) {
-    console.warn("Professional document extraction failed.", error);
-  }
-
-  if (!result) {
-    try {
-      const jscanifyResult = await scanWithJscanify(sourceCanvas, options);
-      if (jscanifyResult?.canvas) {
-        result = jscanifyResult;
-      }
-    } catch (error) {
-      console.warn("jscanify extraction failed, using canvas fallback.", error);
-    }
-  }
-
-  if (!result) {
-    result = scanWithCanvasFallback(sourceCanvas, options);
-    if (!result.warning) {
-      warnings.push("高清扫描已使用保守裁边。");
-    }
-  }
-
-  try {
-    const cropped = await cropMainDocumentPage(result.canvas, null, options);
-    if (cropped.cropApplied) {
-      result.canvas = cropped.canvas;
-      result.cropApplied = true;
-    }
-    const refined = await refinePageMask(result.canvas, options);
-    if (refined.cropApplied && validateScannedPageCanvas(refined.canvas, result.canvas, { minAreaRatio: 0.08 })) {
-      result.canvas = refined.canvas;
-      result.cropApplied = true;
-    }
-    if (SCAN_ENABLE_DOCUMENT_DEWARP) {
-      const beforeDewarp = result.canvas;
-      const dewarped = await dewarpDocumentCanvas(result.canvas, options);
-      if (dewarped?.canvas && validateScannedPageCanvas(dewarped.canvas, beforeDewarp, { minAreaRatio: 0.08 })) {
-        result.canvas = dewarped.canvas;
-        result.dewarpApplied = Boolean(dewarped.dewarpApplied);
-      } else {
-        result.dewarpApplied = false;
-      }
-    } else {
-      result.dewarpApplied = false;
-    }
-  } catch (error) {
-    console.warn("Professional scan refinement skipped.", error);
-  }
-
-  return {
-    ...result,
-    warning: [result.warning, ...warnings].filter(Boolean).join(" · "),
-  };
-}
-
 async function createScannedCanvas(sourceCanvas, options = {}) {
   const mode = normalizeScanMode(options.mode || DEFAULT_SCAN_MODE);
   const engineChoice = SCAN_ENGINE_CHOICE_PROFESSIONAL;
@@ -12588,10 +11172,11 @@ async function createScannedCanvas(sourceCanvas, options = {}) {
   }
 
   try {
-    const professionalResult = await createProfessionalScannedCanvas(sourceCanvas, { mode, engineChoice });
-    if (professionalResult?.canvas) {
+    await ensureProfessionalScanEngine(30000);
+    const jscanifyResult = await scanWithJscanify(sourceCanvas, { mode });
+    if (jscanifyResult?.canvas) {
       return {
-        ...professionalResult,
+        ...jscanifyResult,
         engineChoice,
       };
     }
@@ -12985,24 +11570,6 @@ function getScanStrengthSettings(strength, mode) {
     },
   };
   const modeAdjustments = {
-    [SCAN_MODE_HD]: {
-      targetWhite: 252,
-      shadow: 1.06,
-      colorMix: 0.012,
-      whiteAmount: 0.92,
-      inkAmount: 1.22,
-      midInkAmount: 0.68,
-      sharpen: 0.56,
-      denoise: 0.5,
-      whiteStart: 198,
-      midStart: 146,
-      inkStart: 140,
-      gradientProtect: 32,
-      blockSize: 30,
-      backgroundPercentile: 0.9,
-      smoothPasses: 3,
-      contrast: 1.08,
-    },
     [SCAN_MODE_MUSIC_SCORE]: {
       colorMix: 0.1,
       inkAmount: 0.78,
@@ -13241,18 +11808,6 @@ function validateScanOutput(imageData, beforeStats, mode) {
   if (scanMode === SCAN_MODE_BW) {
     return stats.blackRatio >= 0.01 && stats.blackRatio <= 0.35;
   }
-  if (scanMode === SCAN_MODE_HD) {
-    if (stats.blackRatio > 0.5 || stats.blackRatio < 0.0012) {
-      return false;
-    }
-    if (stats.whiteRatio > 0.993 && stats.blackRatio < 0.006) {
-      return false;
-    }
-    if (stats.average > 253 && stats.blackRatio < Math.max(0.004, beforeStats.blackRatio * 0.22)) {
-      return false;
-    }
-    return true;
-  }
   if (stats.blackRatio > 0.45 || stats.blackRatio < 0.002) {
     return false;
   }
@@ -13268,70 +11823,8 @@ function validateScanOutput(imageData, beforeStats, mode) {
   return true;
 }
 
-function normalizeDocumentLighting(imageData, options = {}) {
-  return flattenIllumination(imageData, {
-    ...options,
-    targetWhite: options.targetWhite || 252,
-    shadow: options.shadow ?? 1.08,
-    colorMix: options.colorMix ?? 0.01,
-    contrast: options.contrast ?? 1.08,
-    backgroundPercentile: options.backgroundPercentile || 0.9,
-    smoothPasses: options.smoothPasses || 3,
-    blockSize: options.blockSize || 30,
-  });
-}
-
-function removeDocumentBackgroundShading(imageData, options = {}) {
-  flattenIllumination(imageData, {
-    ...options,
-    targetWhite: options.targetWhite || 253,
-    shadow: options.shadow ?? 1.12,
-    colorMix: options.colorMix ?? 0,
-    contrast: options.contrast ?? 1.05,
-    backgroundPercentile: options.backgroundPercentile || 0.92,
-    smoothPasses: options.smoothPasses || 3,
-    blockSize: options.blockSize || 38,
-  });
-  return imageData;
-}
-
-function whitenPaperBackground(imageData, options = {}) {
-  return whitenBackgroundPreserveInk(imageData, {
-    ...options,
-    whiteStart: options.whiteStart || 198,
-    midStart: options.midStart || 146,
-    inkStart: options.inkStart || 138,
-    whiteAmount: options.whiteAmount ?? 0.94,
-    inkAmount: options.inkAmount ?? 1.1,
-    midInkAmount: options.midInkAmount ?? 0.66,
-    gradientProtect: options.gradientProtect || 34,
-  });
-}
-
-function enhanceDocumentInk(imageData, options = {}) {
-  boostInkContrast(imageData, {
-    amount: options.inkAmount ?? 1.18,
-    gradientProtect: options.gradientProtect || 32,
-  });
-  return imageData;
-}
-
-function finalizeDocumentScanLook(imageData, options = {}) {
-  applyMildDenoise(imageData, { amount: options.denoise ?? 0.46 });
-  applyUnsharpMask(imageData, { amount: options.sharpen ?? 0.52 });
-  return imageData;
-}
-
 function applyHdPipeline(imageData, options = {}) {
   const settings = getScanStrengthSettings(options.strength, options.mode || SCAN_MODE_HD);
-  if (normalizeScanMode(options.mode || SCAN_MODE_HD) === SCAN_MODE_HD) {
-    normalizeDocumentLighting(imageData, settings);
-    removeDocumentBackgroundShading(imageData, settings);
-    whitenPaperBackground(imageData, settings);
-    enhanceDocumentInk(imageData, settings);
-    finalizeDocumentScanLook(imageData, settings);
-    return imageData;
-  }
   flattenIllumination(imageData, settings);
   whitenBackgroundPreserveInk(imageData, settings);
   boostInkContrast(imageData, {
@@ -13694,7 +12187,12 @@ function getPendingCompareLabel(page) {
 }
 
 function getPendingDeskewLabel(page) {
-  return "";
+  const meta = page.scanMeta || {};
+  if (normalizeScanMode(page.scanMode) !== SCAN_MODE_HD || !meta.deskewApplied) {
+    return "";
+  }
+  const angle = Math.abs(Number(meta.deskewAngle) || 0);
+  return angle ? ` · 已扶正 ${angle.toFixed(1)}°` : " · 已扶正";
 }
 
 function handlePendingToolAction(event) {
