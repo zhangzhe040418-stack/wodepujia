@@ -14,7 +14,7 @@ const SYNC_STATE_STORE_NAME = "sync_state";
 const BACKUP_FORMAT = "my-score-folder-backup";
 const BACKUP_VERSION = 2;
 // 构建版本号：显示在“我的”页底部，用于确认实际加载到的版本（排查缓存是否刷新）。
-const APP_BUILD = "v227";
+const APP_BUILD = "v228";
 // outbox 任务状态与重试策略
 const OUTBOX_STATUS_PENDING = "pending";
 const OUTBOX_STATUS_FAILED = "failed";
@@ -5001,7 +5001,7 @@ async function registerServiceWorker() {
       window.location.reload();
     });
 
-    const registration = await navigator.serviceWorker.register("./sw.js?v=243");
+    const registration = await navigator.serviceWorker.register("./sw.js?v=244");
     await registration.update();
   } catch (error) {
     console.warn("Service worker registration failed.", error);
@@ -14425,6 +14425,105 @@ function shareScoreHasReadyPages(scoreItem) {
   return Array.isArray(scoreItem.pages) && scoreItem.pages.some((page) => page.storage_path);
 }
 
+async function createImportedSharedPageCopy(pageRow, context = {}) {
+  const sourcePath = pageRow.storage_path;
+  if (!sourcePath) {
+    return null;
+  }
+
+  const now = context.now || new Date().toISOString();
+  const pageType = pageRow.type || "image/jpeg";
+  const pageId = context.pageId || createId();
+  const pageIndex = Number.isInteger(context.pageIndex) ? context.pageIndex : Number(pageRow.page_index) || 0;
+  const page = {
+    id: pageId,
+    scoreId: context.scoreId,
+    userId: context.userId,
+    pageIndex,
+    name: pageRow.name || `第 ${pageIndex + 1} 页`,
+    type: pageType,
+    size: Number(pageRow.size) || 0,
+    assetId: createAssetId("asset"),
+    storagePath: null,
+    sourceShareId: context.sourceShareId || null,
+    sourceScoreId: context.sourceScoreId || "",
+    sourcePageId: context.sourcePageId || "",
+    storageSyncedAt: null,
+    storageUploadVersion: 0,
+    createdAt: now,
+    updatedAt: now,
+    deletedAt: null,
+    syncStatus: SYNC_STATUS_PENDING,
+  };
+
+  const blob = await downloadCloudFile(sourcePath, page.size, pageType);
+  page.blob = blob;
+  page.type = blob.type || pageType;
+  page.size = blob.size || page.size;
+
+  try {
+    const cloudPath = getPageUploadPath(context.userId, page, null);
+    page.storagePath = await uploadCloudFile(cloudPath, blob, `${page.id}.${getExtensionFromType(page.type)}`);
+    page.storageSyncedAt = new Date().toISOString();
+    page.storageUploadVersion = STORAGE_UPLOAD_VERSION;
+    page.syncStatus = SYNC_STATUS_SYNCED;
+  } catch (error) {
+    console.warn("复制分享图片到当前账号云端失败，已先保存在本地，稍后同步会重试。", error);
+  }
+
+  return page;
+}
+
+async function ensureImportedSharedPageOwnCopy(existingPage, pageRow, userId) {
+  if (!existingPage || !pageRow?.storage_path || !userId || isOwnStoragePath(existingPage.storagePath, userId)) {
+    return false;
+  }
+
+  let blob = await getPageBlob(existingPage).catch(() => null);
+  if (!(blob instanceof Blob) || blob.size <= 0) {
+    blob = await downloadCloudFile(pageRow.storage_path, pageRow.size || existingPage.size, pageRow.type || existingPage.type);
+  }
+  if (!(blob instanceof Blob) || blob.size <= 0) {
+    return false;
+  }
+
+  const now = new Date().toISOString();
+  const assetId = existingPage.assetId || createAssetId("asset");
+  const updatedPage = {
+    ...existingPage,
+    userId,
+    assetId,
+    blob,
+    type: blob.type || existingPage.type || pageRow.type || "image/jpeg",
+    size: blob.size || existingPage.size || Number(pageRow.size) || 0,
+    storagePath: null,
+    storageSyncedAt: null,
+    storageUploadVersion: 0,
+    updatedAt: now,
+    syncStatus: SYNC_STATUS_PENDING,
+  };
+
+  try {
+    const cloudPath = getPageUploadPath(userId, updatedPage, null);
+    updatedPage.storagePath = await uploadCloudFile(cloudPath, blob, `${updatedPage.id}.${getExtensionFromType(updatedPage.type)}`);
+    updatedPage.storageSyncedAt = new Date().toISOString();
+    updatedPage.storageUploadVersion = STORAGE_UPLOAD_VERSION;
+    updatedPage.syncStatus = SYNC_STATUS_SYNCED;
+  } catch (error) {
+    console.warn("迁移旧分享页面到当前账号云端失败，已保留本地副本。", error);
+  }
+
+  await putAsset(buildPageAssetRecord(updatedPage, blob, {
+    assetId,
+    storagePath: updatedPage.storagePath || "",
+    storageUploadVersion: updatedPage.storageUploadVersion,
+  }));
+  await putScorePage(updatedPage);
+  replaceLocalPage(updatedPage);
+  await upsertCloud(CLOUD_TABLES.pages, [toCloudPage(updatedPage)]);
+  return true;
+}
+
 async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, existingScoreScopes) {
   const normalizedName = normalizeText(sharedScore.name || "未命名歌谱");
   const scoreScopeKey = getScoreNameScopeKey(normalizedName, folderId);
@@ -14465,51 +14564,70 @@ async function importSharedScoreRow(sharedScore, sharedPages, userId, folderId, 
   const existingSourcePageIds = new Set(existingPages.map((page) => page.sourcePageId).filter(Boolean));
   const existingStoragePaths = new Set(existingPages.map((page) => page.storagePath).filter(Boolean));
   const newPages = [];
+  let repairedExistingPages = 0;
 
   for (const [index, pageRow] of pageRows.entries()) {
     if (!pageRow.storage_path) {
       continue;
     }
-    const sourcePageId = String(pageRow.page_id || `${sourceScoreId}_${pageRow.page_index ?? index}`);
+    const sourcePageId = String(pageRow.page_id || (sourceScoreId + "_" + (pageRow.page_index ?? index)));
     if (existingSourcePageIds.has(sourcePageId) || existingStoragePaths.has(pageRow.storage_path)) {
+      const existingPage = existingPages.find(
+        (page) => page.sourcePageId === sourcePageId || page.storagePath === pageRow.storage_path,
+      );
+      const repaired = await ensureImportedSharedPageOwnCopy(existingPage, pageRow, userId).catch((error) => {
+        console.warn(error);
+        return false;
+      });
+      if (repaired) {
+        repairedExistingPages += 1;
+      }
       continue;
     }
-    const newPageId = createId();
-    const pageType = pageRow.type || "image/jpeg";
-    newPages.push({
-      id: newPageId,
-      scoreId: newScore.id,
-      userId,
-      pageIndex: index,
-      name: pageRow.name || `第 ${index + 1} 页`,
-      type: pageType,
-      size: Number(pageRow.size) || 0,
-      storagePath: pageRow.storage_path,
-      sourceShareId,
-      sourceScoreId,
-      sourcePageId,
-      storageSyncedAt: new Date().toISOString(),
-      storageUploadVersion: STORAGE_UPLOAD_VERSION,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-      syncStatus: SYNC_STATUS_SYNCED,
-    });
+
+    setStatus("正在复制分享图片 " + (index + 1) + " / " + pageRows.length + "...");
+    try {
+      const copiedPage = await createImportedSharedPageCopy(pageRow, {
+        userId,
+        scoreId: newScore.id,
+        pageIndex: index,
+        sourceShareId,
+        sourceScoreId,
+        sourcePageId,
+        now,
+      });
+      if (copiedPage) {
+        newPages.push(copiedPage);
+      }
+    } catch (error) {
+      console.warn("分享页面复制失败，已跳过该页。", error);
+    }
   }
 
   if (!newPages.length) {
-    return null;
+    return repairedExistingPages ? existingSharedScore : null;
   }
+
+  const scoreForSave = {
+    ...newScore,
+    updatedAt: now,
+    syncStatus: newPages.every((page) => page.syncStatus === SYNC_STATUS_SYNCED) ? SYNC_STATUS_SYNCED : SYNC_STATUS_PENDING,
+  };
 
   if (existingSharedScore) {
     await Promise.all(newPages.map(putScorePage));
+    await Promise.all(
+      newPages
+        .filter((page) => page.blob instanceof Blob && page.blob.size > 0)
+        .map((page) => putAsset(buildPageAssetRecord(page, page.blob, { assetId: page.assetId }))),
+    );
   } else {
-    await putScoreWithPages(newScore, newPages);
-    existingScoreScopes.set(scoreScopeKey, newScore.id);
+    await putScoreWithPages(scoreForSave, newPages);
+    existingScoreScopes.set(scoreScopeKey, scoreForSave.id);
   }
-  await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(newScore)]);
+  await upsertCloud(CLOUD_TABLES.scores, [toCloudScore(scoreForSave)]);
   await upsertCloud(CLOUD_TABLES.pages, newPages.map(toCloudPage));
-  return newScore;
+  return scoreForSave;
 }
 
 function uniqueValues(values) {
@@ -18629,10 +18747,33 @@ async function deleteCloudFolder(folder, folderScores, deletedAt = new Date().to
 
 async function cleanupCloudFilesAfterDelete(paths, userId) {
   try {
-    await deleteCloudFiles(paths.filter((path) => isOwnStoragePath(path, userId)));
+    const safePaths = await getCloudFilePathsSafeToDelete(paths, userId);
+    await deleteCloudFiles(safePaths);
   } catch (error) {
     console.warn(error);
   }
+}
+
+async function getCloudFilePathsSafeToDelete(paths, userId) {
+  const ownPaths = Array.from(new Set((paths || []).filter((path) => isOwnStoragePath(path, userId))));
+  if (!ownPaths.length) {
+    return [];
+  }
+
+  const safePaths = [];
+  for (const path of ownPaths) {
+    try {
+      const rows = await queryCloudRows(CLOUD_TABLES.pages, { storage_path: path });
+      const activeReferences = rows.filter(isCloudRowActive);
+      if (activeReferences.length) {
+        continue;
+      }
+      safePaths.push(path);
+    } catch (error) {
+      console.warn("检查云端图片引用失败，已跳过删除以保护分享导入内容。", error);
+    }
+  }
+  return safePaths;
 }
 
 function requestDeleteConfirmation(target) {
@@ -19460,22 +19601,52 @@ async function hydrateScorePage(page) {
 
     const blob = await downloadCloudFileFromUrl(tempUrl, page.size, page.type);
     const assetId = page.assetId || createAssetId("asset");
-    await putAsset(buildPageAssetRecord({ ...page, assetId }, blob, {
+    const userId = state.session?.user?.id || page.userId || null;
+    let storagePath = page.storagePath;
+    let storageSyncedAt = page.storageSyncedAt;
+    let storageUploadVersion = page.storageUploadVersion;
+    let storagePathChanged = false;
+    if (userId && storagePath && !isOwnStoragePath(storagePath, userId)) {
+      try {
+        const uploadPage = {
+          ...page,
+          assetId,
+          userId,
+          type: blob.type || page.type,
+          size: blob.size || page.size,
+          storagePath: null,
+        };
+        const cloudPath = getPageUploadPath(userId, uploadPage, null);
+        storagePath = await uploadCloudFile(cloudPath, blob, `${page.id}.${getExtensionFromType(uploadPage.type)}`);
+        storageSyncedAt = new Date().toISOString();
+        storageUploadVersion = STORAGE_UPLOAD_VERSION;
+        storagePathChanged = storagePath !== page.storagePath;
+      } catch (error) {
+        console.warn("迁移分享导入图片到当前账号云端失败，继续使用现有云端路径。", error);
+      }
+    }
+
+    await putAsset(buildPageAssetRecord({ ...page, assetId, storagePath }, blob, {
       assetId,
-      storagePath: page.storagePath,
-      storageUploadVersion: STORAGE_UPLOAD_VERSION,
+      storagePath,
+      storageUploadVersion,
     }), { priority: "low" });
     const updatedPage = {
       ...page,
+      userId: page.userId || userId,
       assetId,
       size: page.size || blob.size,
-      storageSyncedAt: new Date().toISOString(),
-      storageUploadVersion: STORAGE_UPLOAD_VERSION,
+      storagePath,
+      storageSyncedAt: storageSyncedAt || new Date().toISOString(),
+      storageUploadVersion: storageUploadVersion || STORAGE_UPLOAD_VERSION,
       syncStatus: SYNC_STATUS_SYNCED,
     };
     cachePageObjectUrl(updatedPage, blob);
     await putScorePage(updatedPage, { priority: "low" });
     replaceLocalPage(updatedPage);
+    if (storagePathChanged) {
+      upsertCloud(CLOUD_TABLES.pages, [toCloudPage(updatedPage)]).catch((error) => console.warn(error));
+    }
     refreshPageImages(updatedPage);
 
     // 若刚下载的是某首歌谱的封面页，生成持久封面缩略图并刷新列表封面。
